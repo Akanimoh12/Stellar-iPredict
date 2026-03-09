@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- [Stellar CLI](https://github.com/stellar/stellar-cli) (v21+)
-- [Rust](https://rustup.rs/) 1.85+ with `wasm32-unknown-unknown` target
+- [Stellar CLI](https://github.com/stellar/stellar-cli) (v25+)
+- [Rust](https://rustup.rs/) 1.85+ with `wasm32v1-none` target
 - [Node.js](https://nodejs.org/) 18+ with npm
 - A funded Stellar testnet account
 
@@ -37,13 +37,13 @@ curl "https://friendbot.stellar.org?addr=GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27L
 cd contracts
 
 # Install wasm target if not already installed
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Build all 4 contracts
 stellar contract build
 
 # Verify WASM output sizes (should all be < 100KB)
-ls -la target/wasm32-unknown-unknown/release/*.wasm
+ls -la target/wasm32v1-none/release/*.wasm
 ```
 
 Expected output:
@@ -62,40 +62,40 @@ Deploy in the correct dependency order:
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/ipredict_token.wasm \
+  --wasm target/wasm32v1-none/release/ipredict_token.wasm \
   --source admin \
   --network testnet
-# → Returns TOKEN_CONTRACT_ID (e.g., CTOKEN...)
+# → Returns TOKEN_CONTRACT_ID (e.g., CCY4A5P3BNQEKXH5EBXTEUFMTHVF5Q7K4S3LYT24VYAUXTEUDEXA7ME5)
 ```
 
 ### 2b. Deploy Leaderboard (no dependencies)
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/leaderboard.wasm \
+  --wasm target/wasm32v1-none/release/leaderboard.wasm \
   --source admin \
   --network testnet
-# → Returns LEADERBOARD_CONTRACT_ID (e.g., CLEADERBOARD...)
+# → Returns LEADERBOARD_CONTRACT_ID (e.g., CAR4GTU62PBSR27XDAZATW2HSSXK5DPZWBC4MCKUEF4VGFSW6YPPHRCX)
 ```
 
 ### 2c. Deploy ReferralRegistry
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/referral_registry.wasm \
+  --wasm target/wasm32v1-none/release/referral_registry.wasm \
   --source admin \
   --network testnet
-# → Returns REFERRAL_CONTRACT_ID (e.g., CREFERRAL...)
+# → Returns REFERRAL_CONTRACT_ID (e.g., CAOK6BLEFCNGSFQSPRALKWWL7SS36I7CBVCLBUO2DKQ4PEIOQB4C4QCT)
 ```
 
 ### 2d. Deploy PredictionMarket (depends on all 3)
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/prediction_market.wasm \
+  --wasm target/wasm32v1-none/release/prediction_market.wasm \
   --source admin \
   --network testnet
-# → Returns MARKET_CONTRACT_ID (e.g., CMARKET...)
+# → Returns MARKET_CONTRACT_ID (e.g., CCUYXGDJLBDOYADEG4IYBTSPPAAUPOUS2RSQWW3CS4LKLXGJ67LQWUOY)
 ```
 
 ---
@@ -189,35 +189,48 @@ stellar contract invoke \
 
 ## Step 5: Create Seed Markets
 
+Create 4 crypto prediction markets with CoinGecko images:
+
 ```bash
-# Example: Create 3 seed markets with different durations
-
+# Market 1: Bitcoin
 stellar contract invoke \
   --id $MARKET_CONTRACT_ID \
   --source admin \
   --network testnet \
   -- create_market \
-  --question "Will Bitcoin reach $100k by March 2026?" \
-  --image_url "/images/markets/btc-100k.png" \
-  --duration 2592000  # 30 days
-
-stellar contract invoke \
-  --id $MARKET_CONTRACT_ID \
-  --source admin \
-  --network testnet \
-  -- create_market \
-  --question "Will Ethereum flip Bitcoin in market cap?" \
-  --image_url "/images/markets/eth-flip.png" \
+  --question "Will Bitcoin (BTC) reach \$100,000 by April 2026?" \
+  --image_url "https://assets.coingecko.com/coins/images/1/large/bitcoin.png" \
   --duration 7776000  # 90 days
 
+# Market 2: Ethereum
 stellar contract invoke \
   --id $MARKET_CONTRACT_ID \
   --source admin \
   --network testnet \
   -- create_market \
-  --question "Will FIFA 2026 final be held in MetLife Stadium?" \
-  --image_url "/images/markets/fifa-2026.png" \
-  --duration 5184000  # 60 days
+  --question "Will Ethereum (ETH) surpass \$5,000 before May 2026?" \
+  --image_url "https://assets.coingecko.com/coins/images/279/large/ethereum.png" \
+  --duration 7776000  # 90 days
+
+# Market 3: Stellar (XLM)
+stellar contract invoke \
+  --id $MARKET_CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- create_market \
+  --question "Will Stellar (XLM) break above \$1.00 by June 2026?" \
+  --image_url "https://assets.coingecko.com/coins/images/100/large/Stellar_symbol_black_RGB.png" \
+  --duration 7776000  # 90 days
+
+# Market 4: Solana
+stellar contract invoke \
+  --id $MARKET_CONTRACT_ID \
+  --source admin \
+  --network testnet \
+  -- create_market \
+  --question "Will Solana (SOL) flip Ethereum in daily transactions by Q3 2026?" \
+  --image_url "https://assets.coingecko.com/coins/images/4128/large/solana.png" \
+  --duration 7776000  # 90 days
 ```
 
 ---
@@ -234,11 +247,11 @@ cp .env.local.example .env.local
 Edit `.env.local` with deployed contract IDs:
 
 ```env
-NEXT_PUBLIC_MARKET_CONTRACT_ID=CMARKET...
-NEXT_PUBLIC_TOKEN_CONTRACT_ID=CTOKEN...
-NEXT_PUBLIC_REFERRAL_CONTRACT_ID=CREFERRAL...
-NEXT_PUBLIC_LEADERBOARD_CONTRACT_ID=CLEADERBOARD...
-NEXT_PUBLIC_XLM_SAC_ID=CDLZFC...
+NEXT_PUBLIC_MARKET_CONTRACT_ID=CCUYXGDJLBDOYADEG4IYBTSPPAAUPOUS2RSQWW3CS4LKLXGJ67LQWUOY
+NEXT_PUBLIC_TOKEN_CONTRACT_ID=CCY4A5P3BNQEKXH5EBXTEUFMTHVF5Q7K4S3LYT24VYAUXTEUDEXA7ME5
+NEXT_PUBLIC_REFERRAL_CONTRACT_ID=CAOK6BLEFCNGSFQSPRALKWWL7SS36I7CBVCLBUO2DKQ4PEIOQB4C4QCT
+NEXT_PUBLIC_LEADERBOARD_CONTRACT_ID=CAR4GTU62PBSR27XDAZATW2HSSXK5DPZWBC4MCKUEF4VGFSW6YPPHRCX
+NEXT_PUBLIC_XLM_SAC_ID=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
 NEXT_PUBLIC_ADMIN_PUBLIC_KEY=GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD
 ```
 
@@ -301,4 +314,4 @@ After deployment, verify each feature end-to-end:
 | `Insufficient funds` | Fund account via Friendbot |
 | `WASM too large` | Ensure `[profile.release]` has `opt-level = "z"` and `lto = true` |
 | `Wallet not connecting` | Ensure Freighter is on Testnet network |
-| `Build fails` | Run `rustup target add wasm32-unknown-unknown` |
+| `Build fails` | Run `rustup target add wasm32v1-none` (Stellar CLI v25+ requires this target) |

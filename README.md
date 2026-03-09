@@ -23,16 +23,13 @@
 
 🎬 [Watch Full MVP Flow on Loom](https://loom.com/share/ipredict-demo) — *Wallet connect → browse markets → place bet → view leaderboard → claim reward → referral flow*
 
-## Screenshots
-
-| Landing Page | Markets Browser | Market Detail |
-|:---:|:---:|:---:|
-| ![Landing](docs/screenshots/landing.png) | ![Markets](docs/screenshots/markets.png) | ![Detail](docs/screenshots/detail.png) |
-
-| Betting Panel | Leaderboard | Profile |
-|:---:|:---:|:---:|
-| ![Betting](docs/screenshots/betting.png) | ![Leaderboard](docs/screenshots/leaderboard.png) | ![Profile](docs/screenshots/profile.png) |
-
+##   Testnet Contracts
+| Contract | Address | Explorer |
+|----------|---------|----------|
+| Prediction Market | `CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P) |
+| IPREDICT Token | `CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY) | |
+| Referral Registry | `CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22) |
+| Leaderboard | `CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C) | 
 ---
 
 ## Features

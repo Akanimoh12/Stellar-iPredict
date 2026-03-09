@@ -89,15 +89,17 @@ export default function BettingPanel({
   };
 
   // Show share button after confirmed
+  const prevStageRef = React.useRef<TxStage>("idle");
   useEffect(() => {
-    if (stage === "confirmed") {
+    if (stage === "confirmed" && prevStageRef.current !== "confirmed") {
       setShowShare(true);
       showToast(`Bet of ${amount} XLM on ${side ? "YES" : "NO"} placed!`, "success");
       onSuccess?.();
-    } else if (stage === "failed" && error) {
+    } else if (stage === "failed" && prevStageRef.current !== "failed" && error) {
       showToast(error, "error");
     }
-  }, [stage, onSuccess, showToast, error]);
+    prevStageRef.current = stage;
+  }, [stage, error]);
 
   const handleSetMax = () => {
     setAmountStr(Math.floor(balance).toString());

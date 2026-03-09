@@ -20,17 +20,18 @@ export function useMarket(id: number): UseMarketResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const initialLoadDone = useRef(false);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (silent = false) => {
     if (!id || id < 1) {
       setLoading(false);
       return;
     }
 
-    setLoading(true);
+    // Only show loading skeleton on first load
+    if (!silent && !initialLoadDone.current) setLoading(true);
     setError(null);
     try {
-      // Fetch market data
       const marketData = await getMarket(id);
       if (!mountedRef.current) return;
 
@@ -43,13 +44,11 @@ export function useMarket(id: number): UseMarketResult {
 
       setMarket(marketData);
 
-      // Fetch user's bet if wallet is connected
       if (publicKey) {
         try {
           const bet = await getBet(id, publicKey);
           if (mountedRef.current) setUserBet(bet);
         } catch {
-          // User may not have a bet — that's fine
           if (mountedRef.current) setUserBet(null);
         }
       } else {
@@ -61,7 +60,10 @@ export function useMarket(id: number): UseMarketResult {
         err instanceof Error ? err.message : "Failed to load market"
       );
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+        initialLoadDone.current = true;
+      }
     }
   }, [id, publicKey]);
 
@@ -74,7 +76,7 @@ export function useMarket(id: number): UseMarketResult {
   }, [fetchData]);
 
   const refetch = useCallback(() => {
-    fetchData();
+    fetchData(true);
   }, [fetchData]);
 
   return { market, userBet, loading, error, refetch };

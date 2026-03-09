@@ -68,9 +68,10 @@ export function useMarkets(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const initialLoadDone = useRef(false);
 
   const fetchMarkets = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+    if (!silent && !initialLoadDone.current) setLoading(true);
     setError(null);
     try {
       const markets = await getMarkets();
@@ -82,7 +83,10 @@ export function useMarkets(
         err instanceof Error ? err.message : "Failed to load markets"
       );
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+        initialLoadDone.current = true;
+      }
     }
   }, []);
 

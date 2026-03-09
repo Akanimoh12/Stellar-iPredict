@@ -23,15 +23,18 @@
 
 🎬 [Watch Full MVP Flow on Loom](https://loom.com/share/ipredict-demo) — *Wallet connect → browse markets → place bet → view leaderboard → claim reward → referral flow*
 
-##   Testnet Contracts
+## Deployed Contracts
+
 | Contract | Address | Explorer |
 |----------|---------|----------|
 | Prediction Market | `CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P) |
-| IPREDICT Token | `CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY) | |
+| IPREDICT Token | `CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY) |
 | Referral Registry | `CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22) |
-| Leaderboard | `CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C) | 
----
+| Leaderboard | `CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C) |
 
+> **Network:** Stellar Testnet | **Admin:** `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD` | **10 seed markets** pre-loaded
+
+---
 ## Features
 
 - **Binary Prediction Markets** — Bet YES or NO on any question with XLM
@@ -199,19 +202,6 @@ npm run dev  # http://localhost:3000
 ### Deploy Contracts (Testnet)
 
 See [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md) for the full step-by-step deployment guide with correct dependency order.
-
----
-
-## Deployed Contracts
-
-| Contract | Address | Explorer |
-|----------|---------|----------|
-| Prediction Market | `CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDN6UUYR62ACCGLTKIJGJQ32MX27MKFBOS2S5E3CIYHS47FH6SVGX43P) |
-| IPREDICT Token | `CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAIRYPO7H6JVWMWXVXWA3PJLH3TRLS7DBM2Q7ZLALI3RK2RAVC4B45ZY) |
-| Referral Registry | `CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDGIN4AXHM3RU5MM73C5OMH5FQOTPN6EBDSNB347VC2MOG42IW4CWK22) |
-| Leaderboard | `CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C` | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CAKIT7M76AGRG4JWSGP43SA53B2OUQDXXMVQDD3B7S24HR3OKTAX522C) |
-
-> **Network:** Stellar Testnet | **Admin:** `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD` | **10 seed markets** pre-loaded
 
 ---
 

@@ -10,7 +10,7 @@ const PRODUCT_LINKS = [
 
 const RESOURCE_LINKS = [
   { href: "https://soroban.stellar.org/docs", label: "Docs", external: true },
-  { href: "https://github.com", label: "GitHub", external: true },
+  { href: "https://github.com/Akanimoh12/Stellar-iPredict.git", label: "GitHub", external: true },
 ];
 
 const LEGAL_LINKS = [
@@ -19,9 +19,9 @@ const LEGAL_LINKS = [
 ];
 
 const SOCIAL_LINKS = [
-  { href: "https://twitter.com", label: "Twitter", icon: FiTwitter },
-  { href: "https://t.me", label: "Telegram", icon: FiMessageCircle },
-  { href: "https://discord.gg", label: "Discord", icon: FiMessageCircle },
+  { href: "https://x.com/iPredict_HQ", label: "Twitter", icon: FiTwitter },
+  { href: "#", label: "Telegram", icon: FiMessageCircle },
+  { href: "#", label: "Discord", icon: FiMessageCircle },
 ];
 
 export default function Footer() {

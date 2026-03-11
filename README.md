@@ -21,7 +21,7 @@
 
 ## Demo Video
 
-🎬 [Watch Full MVP Flow on Loom](https://loom.com/share/ipredict-demo) — *Wallet connect → browse markets → place bet → view leaderboard → claim reward → referral flow*
+🎬 [Watch Full MVP Flow on Loom](https://www.loom.com/share/bbfa51fde81645eb9ca13eeba82bc695) — *Wallet connect → browse markets → place bet → view leaderboard → claim reward → referral flow*
 
 ## Deployed Contracts
 
@@ -181,8 +181,8 @@ ipredict-stellar/
 
 ```bash
 # Clone
-git clone https://github.com/AkanEf);/ipredict-stellar.git
-cd ipredict-stellar
+git clone https://github.com/Akanimoh12/Stellar-iPredict.git
+cd Stellar-iPredict
 
 # Build smart contracts
 cd contracts
@@ -192,6 +192,7 @@ cargo test   # 70 tests
 # Setup frontend
 cd ../frontend
 cp .env.local.example .env.local
+
 # Edit .env.local with your deployed contract IDs
 npm install
 npm test     # 137 tests

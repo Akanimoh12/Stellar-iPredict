@@ -35,6 +35,24 @@
 > **Network:** Stellar Testnet | **Admin:** `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD` | **4 seed markets** pre-loaded (BTC, ETH, XLM, SOL)
 
 ---
+## User Validation
+
+### Testnet Users
+
+| # | Wallet Address | Action | Date |
+|---|---------------|--------|------|
+| 1 | GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD | Created markets, placed bets | — |
+| 2 | GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 3 | GA5OIFR4TLRJC54B3FIDWHIQKVFGVOWQFE3NXIIGCGLSGTJRUY6RHR2Q | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 4 | GDMA5FFWVJIOTBLO4XZWW5O4DWPOO33TLUOFCQQ7GPGTIRU6WXHCT4ZM | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 5 | GCFBEIZSINO3NBFLPJJLDOR7DSBM5LKHA7HORLRJKTMEAL43CBNN54XF | Placed Bet on markets and join the leaderboard by referral registration | — |
+
+## Screenshot of Leaderboard with Testnet Users
+![Leaberboard](image.png)
+
+*Wallets verifiable on [Stellar Expert Testnet Explorer](https://stellar.expert/explorer/testnet)*
+
+---
 ## Features
 
 - **Binary Prediction Markets** — Bet YES or NO on any question with XLM
@@ -257,20 +275,6 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main
 - **Cache:** Cargo registry + target directory cached
 
 ---
-
-## User Validation
-
-### Testnet Users
-
-| # | Wallet Address | Action | Date |
-|---|---------------|--------|------|
-| 1 | `GDHQ...SMSMD` | Created markets, placed bets | — |
-| 2 | *pending* | — | — |
-| 3 | *pending* | — | — |
-| 4 | *pending* | — | — |
-| 5 | *pending* | — | — |
-
-*Wallets verifiable on [Stellar Expert Testnet Explorer](https://stellar.expert/explorer/testnet)*
 
 ### Feedback & Iteration
 

@@ -2,7 +2,7 @@
   <img src="frontend/public/favicon.svg" width="64" height="64" alt="iPredict logo" />
 </p>
 
-<h1 align="center">iPredict — Prediction Market on Stellar</h1>
+<h1 align="center">iPredict - Prediction Market on Stellar</h1>
 
 <p align="center">
   <a href="https://github.com/AkanEf);/ipredict-stellar/actions"><img src="https://img.shields.io/github/actions/workflow/status/AkanEf);/ipredict-stellar/ci.yml?branch=main&label=CI&logo=github" alt="CI" /></a>
@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/tests-207%20passing-brightgreen" alt="Tests" />
 </p>
 
-> **Predict. Win or Lose — You Always Earn.** Decentralized prediction market on Stellar with near-zero fees and 5-second finality.
+**Predict. Win or Lose — You Always Earn.** Decentralized prediction market on Stellar with near-zero fees and 5-second finality.
 
 ---
 
@@ -40,17 +40,21 @@
 ### Testnet Users
 
 | # | Wallet Address | Action | Date |
-|---|---------------|--------|------|
-| 1 | GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD | Created markets, placed bets | — |
-| 2 | GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY | Placed Bet on markets and join the leaderboard by referral registration | — |
-| 3 | GA5OIFR4TLRJC54B3FIDWHIQKVFGVOWQFE3NXIIGCGLSGTJRUY6RHR2Q | Placed Bet on markets and join the leaderboard by referral registration | — |
-| 4 | GDMA5FFWVJIOTBLO4XZWW5O4DWPOO33TLUOFCQQ7GPGTIRU6WXHCT4ZM | Placed Bet on markets and join the leaderboard by referral registration | — |
-| 5 | GCFBEIZSINO3NBFLPJJLDOR7DSBM5LKHA7HORLRJKTMEAL43CBNN54XF | Placed Bet on markets and join the leaderboard by referral registration | — |
+|---|----------------|--------|------|
+| 1 | `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD` | Created markets, placed bets | — |
+| 2 | `GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY` | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 3 | `GA5OIFR4TLRJC54B3FIDWHIQKVFGVOWQFE3NXIIGCGLSGTJRUY6RHR2Q` | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 4 | `GDMA5FFWVJIOTBLO4XZWW5O4DWPOO33TLUOFCQQ7GPGTIRU6WXHCT4ZM` | Placed Bet on markets and join the leaderboard by referral registration | — |
+| 5 | `GCFBEIZSINO3NBFLPJJLDOR7DSBM5LKHA7HORLRJKTMEAL43CBNN54XF` | Placed Bet on markets and join the leaderboard by referral registration | — |
 
 ## Screenshot of Leaderboard with Testnet Users
 ![Leaberboard](image.png)
 
 *Wallets verifiable on [Stellar Expert Testnet Explorer](https://stellar.expert/explorer/testnet)*
+
+### User Feedback
+- **Form Link that I shared with users:** [https://forms.gle/WrTyoCzQ6LJegL8a9](https://forms.gle/WrTyoCzQ6LJegL8a9)
+- **The Spreadsheet with feedback:** [https://docs.google.com/spreadsheets/d/1rGhq1rgeDPiF6hI4iDL2eFt0vUMBDA6LSm9zS2txpiA/edit?usp=sharing](https://docs.google.com/spreadsheets/d/1rGhq1rgeDPiF6hI4iDL2eFt0vUMBDA6LSm9zS2txpiA/edit?usp=sharing)
 
 ---
 ## Features

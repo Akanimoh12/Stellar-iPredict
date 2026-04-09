@@ -59,6 +59,7 @@ export type MarketFilter =
   | "all"
   | "active"
   | "ending_soon"
+  | "ended"
   | "resolved"
   | "cancelled";
 

@@ -313,7 +313,7 @@ export async function createMarket(
     publicKey,
     MARKET_CONTRACT_ID,
     "create_market",
-    [stringVal(question), stringVal(imageUrl), u64Val(durationSecs)],
+    [addressVal(publicKey), stringVal(question), stringVal(imageUrl), u64Val(durationSecs)],
     signTransaction
   );
 
@@ -360,7 +360,7 @@ export async function resolveMarket(
     publicKey,
     MARKET_CONTRACT_ID,
     "resolve_market",
-    [u64Val(marketId), boolVal(outcome)],
+    [addressVal(publicKey), u64Val(marketId), boolVal(outcome)],
     signTransaction
   );
 
@@ -381,7 +381,7 @@ export async function cancelMarket(
     publicKey,
     MARKET_CONTRACT_ID,
     "cancel_market",
-    [u64Val(marketId)],
+    [addressVal(publicKey), u64Val(marketId)],
     signTransaction
   );
 

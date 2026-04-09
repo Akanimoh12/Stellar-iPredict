@@ -8,6 +8,7 @@ const FILTERS: { value: MarketFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
   { value: "ending_soon", label: "Ending Soon" },
+  { value: "ended", label: "Ended" },
   { value: "resolved", label: "Resolved" },
   { value: "cancelled", label: "Cancelled" },
 ];

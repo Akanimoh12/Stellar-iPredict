@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getMarkets } from "@/services/market";
+import * as cache from "@/services/cache";
 import type { Market, MarketFilter, MarketSort } from "@/types";
 
 // ── Ending-soon threshold: markets expiring within 24 hours ───────────────────
@@ -29,6 +30,10 @@ function applyFilter(markets: Market[], filter: MarketFilter): Market[] {
           !m.cancelled &&
           m.endTime * 1000 > now &&
           m.endTime * 1000 - now < ENDING_SOON_MS
+      );
+    case "ended":
+      return markets.filter(
+        (m) => !m.resolved && !m.cancelled && m.endTime * 1000 <= now
       );
     case "resolved":
       return markets.filter((m) => m.resolved);
@@ -63,15 +68,16 @@ export function useMarkets(
   filter?: MarketFilter,
   sort?: MarketSort
 ): UseMarketsResult {
-  const [allMarkets, setAllMarkets] = useState<Market[]>([]);
+  // Seed state from cache so returning to /markets shows data instantly
+  const cachedMarkets = useRef(cache.get<Market[]>("markets"));
+  const [allMarkets, setAllMarkets] = useState<Market[]>(cachedMarkets.current ?? []);
   const [data, setData] = useState<Market[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!cachedMarkets.current);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
-  const initialLoadDone = useRef(false);
 
   const fetchMarkets = useCallback(async (silent = false) => {
-    if (!silent && !initialLoadDone.current) setLoading(true);
+    if (!silent && allMarkets.length === 0) setLoading(true);
     setError(null);
     try {
       const markets = await getMarkets();
@@ -85,19 +91,18 @@ export function useMarkets(
     } finally {
       if (mountedRef.current) {
         setLoading(false);
-        initialLoadDone.current = true;
       }
     }
   }, []);
 
-  // Fetch on mount
+  // Fetch on mount — silent if we already have cached data
   useEffect(() => {
     mountedRef.current = true;
-    fetchMarkets();
+    fetchMarkets(allMarkets.length > 0);
     return () => {
       mountedRef.current = false;
     };
-  }, [fetchMarkets]);
+  }, [fetchMarkets]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-poll every 30 seconds (silent refresh — no skeleton flash)
   useEffect(() => {

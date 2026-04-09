@@ -10,7 +10,7 @@ import type { MarketFilter, MarketSort } from "@/types";
 import { FiSearch } from "react-icons/fi";
 
 export default function MarketsPage() {
-  const [filter, setFilter] = useState<MarketFilter>("all");
+  const [filter, setFilter] = useState<MarketFilter>("active");
   const [sort, setSort] = useState<MarketSort>("newest");
   const [search, setSearch] = useState("");
 

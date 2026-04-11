@@ -37,6 +37,13 @@ export const ADMIN_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_ADMIN_PUBLIC_KEY ||
   "GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD";
 
+// ── Fee Sponsorship ───────────────────────────────────────────────────────────
+// Sponsor account pays transaction fees so users enjoy gasless transactions.
+// ⚠️  TESTNET ONLY — for mainnet, move signing to a server-side API route.
+
+export const SPONSOR_SECRET_KEY =
+  process.env.NEXT_PUBLIC_SPONSOR_SECRET_KEY || "";
+
 // ── Fee Model (basis points — BPS) ───────────────────────────────────────────
 // 2% total fee deducted at bet time, split: 1.5% platform + 0.5% referrer
 

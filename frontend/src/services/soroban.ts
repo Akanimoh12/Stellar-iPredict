@@ -2,12 +2,14 @@ import {
   rpc,
   Horizon,
   TransactionBuilder,
+  Transaction,
   Contract,
   Networks,
+  Keypair,
   xdr,
   scValToNative,
 } from "@stellar/stellar-sdk";
-import { NETWORK } from "@/config/network";
+import { NETWORK, SPONSOR_SECRET_KEY } from "@/config/network";
 import { AppErrorType } from "@/types";
 import type { AppError, TransactionResult } from "@/types";
 
@@ -127,8 +129,10 @@ export async function buildAndSendTx(
     const operation = contract.call(method, ...args);
 
     // 3. Build the transaction
+    // When fee sponsorship is active, set a minimal fee for the inner tx —
+    // the sponsor's fee bump transaction will cover the actual cost.
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: "10000000", // 1 XLM max fee — adjusted by simulation
+      fee: SPONSOR_SECRET_KEY ? "100" : "10000000",
       networkPassphrase: getNetworkPassphrase(),
     })
       .addOperation(operation)
@@ -162,12 +166,36 @@ export async function buildAndSendTx(
       };
     }
 
-    // 6. Reconstruct signed transaction and submit
-    const signedTx = TransactionBuilder.fromXDR(
+    // 6. Reconstruct signed transaction and submit (with fee bump if sponsor is configured)
+    const parsedTx = TransactionBuilder.fromXDR(
       signedXdr,
       getNetworkPassphrase()
     );
-    const sendResponse = await server.sendTransaction(signedTx);
+
+    // sendTransaction accepts both Transaction and FeeBumpTransaction
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let txToSubmit: any = parsedTx;
+
+    // Fee Sponsorship: wrap in a FeeBumpTransaction so the sponsor pays gas
+    if (SPONSOR_SECRET_KEY && parsedTx instanceof Transaction) {
+      try {
+        const sponsorKeypair = Keypair.fromSecret(SPONSOR_SECRET_KEY);
+        const feeBumpTx = TransactionBuilder.buildFeeBumpTransaction(
+          sponsorKeypair,
+          "15000000", // max fee sponsor will pay (1.5 XLM — covers Soroban resource fees)
+          parsedTx,
+          getNetworkPassphrase()
+        );
+        feeBumpTx.sign(sponsorKeypair);
+        txToSubmit = feeBumpTx;
+        console.log("[iPredict] Fee bump applied — sponsor pays gas");
+      } catch (bumpErr) {
+        // If fee bump fails, fall back to user-paid transaction
+        console.warn("[iPredict] Fee bump failed, falling back to user-paid:", bumpErr);
+      }
+    }
+
+    const sendResponse = await server.sendTransaction(txToSubmit);
 
     // 7. Check immediate send status
     if (sendResponse.status === "ERROR") {

@@ -84,6 +84,12 @@
 
 ---
 
+## User Feedback Implementation: Added more filtering and default sorting options to the leaderboard on Active
+|*User Name*| *User Email* | *User Wallet Adddress* | *Commit ID*|
+|----------------------|-------------------------|-------------------------|----------------|
+| best_bettor | `tesinger96@gmail.com` | `GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY` | `77c37784589046eeeb917a9015085dfa6fb26a52` |
+
+
 ## Advance Feature Added: Fee Sponsorship, Gasless Transactions
   > we added a Fee Sponsorship, Gasless Transactions feature to our MVP, allowing users to interact with the prediction market without needing to hold XLM for transaction fees. This significantly lowers the barrier to entry, enabling anyone to place bets and participate in the market seamlessly. The platform covers the transaction fees on behalf of the users, creating a more inclusive and user-friendly experience.
 

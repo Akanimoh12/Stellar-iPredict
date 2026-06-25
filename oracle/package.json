@@ -1,21 +1,8 @@
 {
-  "name": "ipredict-indexer",
+  "name": "ipredict-oracle",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "rebuild:leaderboard": "tsx src/index.ts"
-  },
-  "dependencies": {
-    "pg": "^8.13.3"
-  },
-  "devDependencies": {
-    "@types/node": "^22.13.5",
-    "@types/pg": "^8.11.11",
-    "tsx": "^4.19.2",
-  "description": "iPredict Soroban event indexer — writes on-chain events to PostgreSQL",
+  "description": "iPredict oracle — council aggregator, data adapters, submitter, monitor",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -30,12 +17,10 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.5.0",
-    "ioredis": "^5.4.1",
-    "pg": "^8.12.0"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.13.5",
-    "@types/pg": "^8.11.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"

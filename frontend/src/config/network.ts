@@ -53,7 +53,9 @@ export const NETWORK = {
     (isTestnet
       ? "Test SDF Network ; September 2015"
       : "Public Global Stellar Network ; September 2015"),
-  sorobanUrl: resolveSorobanUrl(),
+  get sorobanUrl() {
+    return resolveSorobanUrl();
+  },
   // Friendbot only exists on testnet — undefined on mainnet (not used)
   friendbotUrl: isTestnet
     ? (process.env.NEXT_PUBLIC_FRIENDBOT_URL || "https://friendbot.stellar.org")

@@ -18,6 +18,12 @@ frontend/.next/
 frontend/out/
 frontend/node_modules/
 
+# Backend stack build output (backend/, indexer/, oracle/)
+dist/
+backend/dist/
+indexer/dist/
+oracle/dist/
+
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
 .env.local

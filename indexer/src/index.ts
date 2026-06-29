@@ -210,4 +210,4 @@ main().catch((err) => {
   console.error("[ipredict-indexer] fatal:", err);
   process.exit(1);
 });
-s
+

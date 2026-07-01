@@ -56,3 +56,6 @@ yarn-error.log*
 
 # ── Stellar CLI local identity keystore ────────────────────────────────────────
 .stellar/
+
+# Coverage output
+coverage/

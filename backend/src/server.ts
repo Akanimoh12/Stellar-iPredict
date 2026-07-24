@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 
 export interface ServerConfig {
   port: number;
@@ -34,6 +35,28 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
   const server = Fastify({ logger: true });
+
+  // Security headers. Locked down for a JSON API: nothing is rendered, so every
+  // content source is denied and the API cannot be framed.
+  server.register(helmet, {
+    global: true,
+    contentSecurityPolicy: {
+      // Without this, helmet merges in its defaults (script-src 'self',
+      // style-src 'unsafe-inline', …) which default-src 'none' is meant to deny.
+      useDefaults: false,
+      directives: {
+        "default-src": ["'none'"],
+        "base-uri": ["'none'"],
+        "form-action": ["'none'"],
+        "frame-ancestors": ["'none'"],
+      },
+    },
+    // Responses are meant to be read cross-origin; which origins may actually
+    // read them is decided by the CORS allowlist below, not by CORP.
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    hsts: { maxAge: 15552000, includeSubDomains: true },
+    referrerPolicy: { policy: "no-referrer" },
+  });
 
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {

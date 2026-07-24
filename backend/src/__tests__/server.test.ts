@@ -109,6 +109,41 @@ describe("CORS", () => {
   });
 });
 
+describe("security headers", () => {
+  it("sets the standard helmet headers", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "GET", url: "/healthz" });
+
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["x-frame-options"]).toBe("SAMEORIGIN");
+    expect(res.headers["referrer-policy"]).toBe("no-referrer");
+    expect(res.headers["strict-transport-security"]).toContain("max-age=15552000");
+    expect(res.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+  });
+
+  it("locks down the content security policy", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "GET", url: "/healthz" });
+
+    const csp = res.headers["content-security-policy"];
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    // helmet's defaults would otherwise re-permit what default-src 'none' denies.
+    expect(csp).not.toContain("script-src");
+    expect(csp).not.toContain("unsafe-inline");
+  });
+
+  it("does not leak the server implementation", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "GET", url: "/healthz" });
+
+    expect(res.headers["x-powered-by"]).toBeUndefined();
+  });
+});
+
 describe("GET /healthz", () => {
   it("still returns ok", async () => {
     const app = makeServer();

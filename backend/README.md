@@ -66,6 +66,8 @@ Each endpoint is tracked as its own issue.
   Requests without an `Origin` header (curl, health checks, service-to-service)
   are unaffected. A disallowed origin gets a normal response with no CORS
   headers, which is what makes the browser block the read.
+- **Security headers** — `@fastify/helmet` with a locked-down CSP (`default-src
+  'none'`), `frame-ancestors 'none'`, HSTS and `Referrer-Policy: no-referrer`.
 
 ## Contributing
 

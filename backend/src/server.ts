@@ -1,6 +1,12 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import {
+  REQUEST_ID_HEADER,
+  createLoggerOptions,
+  genReqId,
+  registerRequestLogging,
+} from "./lib/log.js";
 
 export interface ServerConfig {
   port: number;
@@ -11,6 +17,8 @@ export interface ServerConfig {
 
 export interface BuildServerOptions {
   corsOrigins?: string[];
+  /** Overrides the logger config; tests pass a stream to capture output. */
+  logger?: FastifyServerOptions["logger"];
 }
 
 /** Origin used when `CORS_ORIGINS` is unset — the frontend's dev server. */
@@ -34,7 +42,15 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
-  const server = Fastify({ logger: true });
+  const server = Fastify({
+    logger: options.logger ?? createLoggerOptions(),
+    genReqId,
+    // The onResponse hook in registerRequestLogging is the single per-request
+    // log line; Fastify's built-in pair would just duplicate it.
+    disableRequestLogging: true,
+  });
+
+  registerRequestLogging(server);
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -73,7 +89,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       callback(null, allowedOrigins.includes(origin));
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", REQUEST_ID_HEADER],
+    exposedHeaders: [REQUEST_ID_HEADER],
     credentials: true,
     maxAge: 86400,
   });

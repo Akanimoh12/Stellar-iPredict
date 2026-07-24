@@ -68,6 +68,9 @@ Each endpoint is tracked as its own issue.
   headers, which is what makes the browser block the read.
 - **Security headers** — `@fastify/helmet` with a locked-down CSP (`default-src
   'none'`), `frame-ancestors 'none'`, HSTS and `Referrer-Policy: no-referrer`.
+- **Request logging** — one structured line per request carrying a correlation
+  id, echoed back in the `x-request-id` response header. A valid inbound
+  `x-request-id` is reused so a trace survives the frontend → API hop.
 
 ## Contributing
 

@@ -59,6 +59,28 @@ You need Postgres and Redis running locally (see
 See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#api-endpoints).
 Each endpoint is tracked as its own issue.
 
+Two are live already:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /healthz` | Liveness probe |
+| `GET /api/docs` | OpenAPI 3.1 spec, generated from the route schemas |
+
+## API hardening
+
+- **CORS** — allowlist only, from `CORS_ORIGINS` (comma-separated). Unset falls
+  back to `http://localhost:3000`; an empty value allows no browser origin.
+  Requests without an `Origin` header (curl, health checks, service-to-service)
+  are unaffected. A disallowed origin gets a normal response with no CORS
+  headers, which is what makes the browser block the read.
+- **Security headers** — `@fastify/helmet` with a locked-down CSP (`default-src
+  'none'`), `frame-ancestors 'none'`, HSTS and `Referrer-Policy: no-referrer`.
+- **Request logging** — one structured line per request carrying a correlation
+  id, echoed back in the `x-request-id` response header. A valid inbound
+  `x-request-id` is reused so a trace survives the frontend → API hop.
+- **OpenAPI** — adding a `schema` to a route documents it automatically; there
+  is no separate spec file to keep in sync.
+
 ## Contributing
 
 1. Pick an open issue labelled `area:backend` (or `area:api`).

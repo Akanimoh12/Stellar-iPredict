@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import { registerOpenApi } from "./api/openapi.js";
 import {
   REQUEST_ID_HEADER,
   createLoggerOptions,
@@ -95,8 +96,33 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     maxAge: 86400,
   });
 
-  server.get("/healthz", async (_req, reply) => {
-    reply.status(200).send({ status: "ok" });
+  // OpenAPI spec at /api/docs.
+  registerOpenApi(server);
+
+  // Routes go in a plugin registered after registerOpenApi, not directly on the
+  // root instance: plugins load in registration order, so this guarantees the
+  // spec generator's onRoute hook is listening by the time the routes below are
+  // added. Routes added directly would load first and be missing from the spec.
+  server.register(async (routes) => {
+    routes.get(
+      "/healthz",
+      {
+        schema: {
+          summary: "Liveness probe",
+          tags: ["system"],
+          response: {
+            200: {
+              type: "object",
+              properties: { status: { type: "string" } },
+              required: ["status"],
+            },
+          },
+        },
+      },
+      async (_req, reply) => {
+        reply.status(200).send({ status: "ok" });
+      }
+    );
   });
 
   return server;

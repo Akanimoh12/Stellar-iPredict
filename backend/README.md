@@ -59,6 +59,14 @@ You need Postgres and Redis running locally (see
 See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#api-endpoints).
 Each endpoint is tracked as its own issue.
 
+## API hardening
+
+- **CORS** — allowlist only, from `CORS_ORIGINS` (comma-separated). Unset falls
+  back to `http://localhost:3000`; an empty value allows no browser origin.
+  Requests without an `Origin` header (curl, health checks, service-to-service)
+  are unaffected. A disallowed origin gets a normal response with no CORS
+  headers, which is what makes the browser block the read.
+
 ## Contributing
 
 1. Pick an open issue labelled `area:backend` (or `area:api`).

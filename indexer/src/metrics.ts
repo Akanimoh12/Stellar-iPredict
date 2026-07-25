@@ -28,18 +28,44 @@ export class Counter {
   }
 }
 
+/** A gauge that can be set to any value (can go up or down). */
+export class Gauge {
+  private value = 0;
+
+  /** Set to a specific value. */
+  set(value: number): void {
+    this.value = value;
+  }
+
+  /** Current value. */
+  get(): number {
+    return this.value;
+  }
+
+  /** Reset to zero — primarily for tests. */
+  reset(): void {
+    this.value = 0;
+  }
+}
+
 /**
  * Indexer metrics registry.
  *
  * `eventsProcessed` corresponds to the `events_processed_total` counter
  * documented in `docs/ORACLE_AND_BACKEND.md`; it is incremented once per
  * contract event the indexer successfully handles.
+ *
+ * `indexerLag` corresponds to the `indexer_lag_ledgers` gauge documented in
+ * `docs/ORACLE_AND_BACKEND.md`; it represents the difference between the
+ * latest ledger from the RPC and the indexer's checkpoint ledger.
  */
 export const metrics = {
   eventsProcessed: new Counter(),
+  indexerLag: new Gauge(),
 };
 
 /** Reset all metrics to zero. Intended for tests. */
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
+  metrics.indexerLag.reset();
 }

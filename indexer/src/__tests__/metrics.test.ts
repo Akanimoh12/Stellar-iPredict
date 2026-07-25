@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeEventToDb } from "../event-router.js";
-import { metrics, resetMetrics, Counter } from "../metrics.js";
+import { metrics, resetMetrics, Counter, Gauge } from "../metrics.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 
 function makeDb(): DbClient {
@@ -54,6 +54,30 @@ describe("Counter", () => {
   });
 });
 
+describe("Gauge", () => {
+  it("starts at zero", () => {
+    const gauge = new Gauge();
+    expect(gauge.get()).toBe(0);
+  });
+
+  it("can be set to any value", () => {
+    const gauge = new Gauge();
+    gauge.set(10);
+    expect(gauge.get()).toBe(10);
+    gauge.set(5);
+    expect(gauge.get()).toBe(5);
+    gauge.set(0);
+    expect(gauge.get()).toBe(0);
+  });
+
+  it("resets to zero", () => {
+    const gauge = new Gauge();
+    gauge.set(42);
+    gauge.reset();
+    expect(gauge.get()).toBe(0);
+  });
+});
+
 describe("events_processed metric", () => {
   beforeEach(() => {
     resetMetrics();
@@ -95,5 +119,25 @@ describe("events_processed metric", () => {
     await writeEventToDb(makeEvent(["unknown", "event"], {}), db, redis);
 
     expect(metrics.eventsProcessed.get()).toBe(0);
+  });
+});
+
+describe("indexer_lag metric", () => {
+  beforeEach(() => {
+    resetMetrics();
+  });
+
+  it("can be set to track ledger lag", () => {
+    metrics.indexerLag.set(100);
+    expect(metrics.indexerLag.get()).toBe(100);
+
+    metrics.indexerLag.set(50);
+    expect(metrics.indexerLag.get()).toBe(50);
+  });
+
+  it("is reset by resetMetrics", () => {
+    metrics.indexerLag.set(42);
+    resetMetrics();
+    expect(metrics.indexerLag.get()).toBe(0);
   });
 });

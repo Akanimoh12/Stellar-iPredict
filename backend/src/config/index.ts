@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseCorsOrigins } from "../lib/cors.js";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -26,6 +27,11 @@ const envSchema = z.object({
     .enum(["debug", "info", "warn", "error"])
     .optional()
     .default("info"),
+  // Comma-separated browser origins allowed to call the API.
+  CORS_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) => parseCorsOrigins(v)),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .optional()

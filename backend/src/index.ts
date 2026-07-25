@@ -5,7 +5,7 @@ const PORT = config.PORT;
 const HOST = process.env.HOST ?? "0.0.0.0";
 
 async function main(): Promise<void> {
-  await startServer({ port: PORT, host: HOST });
+  await startServer({ port: PORT, host: HOST, corsOrigins: config.CORS_ORIGINS });
 }
 
 main().catch((err) => {

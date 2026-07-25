@@ -1,3 +1,8 @@
+
+import Fastify, { type FastifyInstance } from "fastify";
+import type { Pool } from "pg";
+import { registerLeaderboardRoutes } from "./api/leaderboard.js";
+
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -16,6 +21,7 @@ import {
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
 export { DEFAULT_CORS_ORIGINS, parseCorsOrigins };
 
+
 export interface ServerConfig {
   port: number;
   host: string;
@@ -28,6 +34,25 @@ export interface BuildServerOptions {
   /** Overrides the logger config; tests pass a stream to capture output. */
   logger?: FastifyServerOptions["logger"];
 }
+
+
+export interface BuildServerOptions {
+  pool?: Pool;
+}
+
+export interface GracefulShutdownOptions {
+  signals?: NodeJS.Signals[];
+  exitProcess?: boolean;
+  shutdownDatabase?: boolean;
+  shutdownDatabaseFn?: () => Promise<void>;
+}
+
+export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
+  const server = Fastify({ logger: true });
+  if (!options.pool) {
+    throw new Error("buildServer requires a database pool");
+  }
+  const databasePool = options.pool;
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
@@ -47,6 +72,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // methods a path accepts from an onRoute hook, which only sees later routes.
   registerErrorHandler(server);
   registerNotFoundHandler(server);
+
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -69,6 +95,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     hsts: { maxAge: 15552000, includeSubDomains: true },
     referrerPolicy: { policy: "no-referrer" },
   });
+
+
+  registerLeaderboardRoutes(server, databasePool);
 
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {
@@ -124,19 +153,62 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // they are infrastructure, not part of the contract clients code against.
   registerApiRoutes(server);
 
+
   return server;
 }
+
+
+export function registerGracefulShutdown(
+  server: FastifyInstance,
+  options: GracefulShutdownOptions = {}
+): void {
+  const signals = options.signals ?? ["SIGTERM", "SIGINT"];
+  const exitProcess = options.exitProcess ?? true;
+  const shutdownDatabase = options.shutdownDatabase ?? true;
+  let isShuttingDown = false;
 
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
   const server = buildServer({ corsOrigins: config.corsOrigins });
 
-  const shutdown = async () => {
-    await server.close();
-    process.exit(0);
+
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (isShuttingDown) {
+      return;
+    }
+
+    isShuttingDown = true;
+    server.log.info({ signal }, "Graceful shutdown started");
+
+    try {
+      await server.close();
+      if (shutdownDatabase) {
+        const shutdown = options.shutdownDatabaseFn ?? (await import("./db/pool.js")).shutdown;
+        await shutdown();
+      }
+      server.log.info({ signal }, "Graceful shutdown complete");
+      if (exitProcess) {
+        process.exit(0);
+      }
+    } catch (error) {
+      server.log.error({ err: error, signal }, "Graceful shutdown failed");
+      if (exitProcess) {
+        process.exit(1);
+      }
+    }
   };
 
-  process.once("SIGTERM", shutdown);
-  process.once("SIGINT", shutdown);
+  for (const signal of signals) {
+    process.once(signal, () => {
+      void shutdown(signal);
+    });
+  }
+}
+
+export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
+  const { pool } = await import("./db/pool.js");
+  const server = buildServer({ pool });
+
+  registerGracefulShutdown(server);
 
   await server.listen({ port: config.port, host: config.host });
 

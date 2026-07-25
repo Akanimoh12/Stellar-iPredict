@@ -1,6 +1,7 @@
 import { invalidateLeaderboardCache, invalidateMarketCache } from "../cache.js";
 import { marketResolvedPayloadSchema, type MarketResolvedPayload } from "../schemas.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const MARKET_RESOLVED_TOPIC = ["market_resolved"] as const;
 export const LEGACY_MARKET_RESOLVED_TOPIC = ["mkt", "resolved"] as const;
@@ -25,24 +26,13 @@ export async function handleMarketResolvedEvent(
 ): Promise<MarketResolvedPayload> {
   const payload = decodeMarketResolvedEvent(event);
 
-  await db.query(
-    `INSERT INTO events (ledger_seq, tx_hash, event_type, market_id, actor, payload)
-     SELECT $1, $2, $3, $4, NULL, $5::jsonb
-     WHERE NOT EXISTS (
-       SELECT 1 FROM events
-       WHERE ledger_seq = $1
-         AND tx_hash = $2
-         AND event_type = $3
-         AND market_id = $4
-     )`,
-    [
-      event.ledger,
-      event.txHash,
-      "market_resolved",
-      payload.market_id,
-      JSON.stringify(payload),
-    ],
-  );
+  const inserted = await insertProcessedEvent(db, {
+    event,
+    eventType: "market_resolved",
+    marketId: payload.market_id,
+    payload: JSON.stringify(payload),
+  });
+  if (!inserted) return payload;
 
   await db.query(
     `UPDATE markets

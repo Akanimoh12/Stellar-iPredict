@@ -83,13 +83,13 @@ describe("handleRewardPoints", () => {
     expect(context.db.query).toHaveBeenCalledTimes(2);
     expect(context.db.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("INSERT INTO leaderboard"),
-      [USER, POINTS, 1, 0],
+      expect.stringContaining("INSERT INTO events"),
+      [event.ledger, event.txHash, 0, REWARD_POINTS_TOPIC, null, USER, { user: USER, points: POINTS, is_winner: true }],
     );
     expect(context.db.query).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("INSERT INTO events"),
-      [event.ledger, event.txHash, REWARD_POINTS_TOPIC, USER, { user: USER, points: POINTS, is_winner: true }],
+      expect.stringContaining("INSERT INTO leaderboard"),
+      [USER, POINTS, 1, 0],
     );
     expect(context.redis?.del).toHaveBeenCalledWith("leaderboard:top20");
   });
@@ -101,7 +101,7 @@ describe("handleRewardPoints", () => {
     await handleRewardPoints(event, context);
 
     expect(context.db.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.stringContaining("INSERT INTO leaderboard"),
       [USER, 10, 0, 1],
     );
@@ -114,7 +114,7 @@ describe("handleRewardPoints", () => {
     await handleRewardPoints(event, context);
 
     expect(context.db.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.stringContaining("INSERT INTO leaderboard"),
       [USER, POINTS, 0, 0],
     );

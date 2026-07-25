@@ -1,4 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const REWARD_POINTS_TOPIC = "reward_points";
 
@@ -67,6 +68,14 @@ export function decodeRewardPoints(event: DecodedEvent): RewardPointsPayload {
 export async function handleRewardPoints(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeRewardPoints(event);
 
+  const inserted = await insertProcessedEvent(context.db, {
+    event,
+    eventType: REWARD_POINTS_TOPIC,
+    actor: payload.user,
+    payload,
+  });
+  if (!inserted) return;
+
   // Update leaderboard points and win/loss counts
   const wonBetsIncrement = payload.is_winner === true ? 1 : 0;
   const lostBetsIncrement = payload.is_winner === false ? 1 : 0;
@@ -80,14 +89,6 @@ export async function handleRewardPoints(event: DecodedEvent, context: HandlerCo
          lost_bets = leaderboard.lost_bets + EXCLUDED.lost_bets,
          updated_at = NOW()`,
     [payload.user, payload.points, wonBetsIncrement, lostBetsIncrement],
-  );
-
-  // Record the raw event for audit trail
-  await context.db.query(
-    `INSERT INTO events (ledger_seq, tx_hash, event_type, actor, payload)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT DO NOTHING`,
-    [event.ledger, event.txHash, REWARD_POINTS_TOPIC, payload.user, payload],
   );
 
   // Invalidate leaderboard cache

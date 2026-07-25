@@ -1,6 +1,7 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "./config/index.js";
 import { pool } from "./db.js";
+import { insertProcessedEvent } from "./handlers/idempotency.js";
 
 // Helper to detect 429 Rate Limit error
 export function isRateLimitError(err: any): boolean {
@@ -34,7 +35,8 @@ export async function writeEventToDb(
   ledgerSeq: number,
   txHash: string,
   topics: any[],
-  data: any
+  data: any,
+  eventIndex = 0,
 ): Promise<void> {
   const eventName = String(topics[0]);
 
@@ -42,12 +44,14 @@ export async function writeEventToDb(
   try {
     const marketId = topics[1] ? Number(topics[1]) : (data?.market_id ? Number(data.market_id) : null);
     const actor = topics[2] ? String(topics[2]) : (data?.user ? String(data.user) : null);
-    await pool.query(
-      `INSERT INTO events (ledger_seq, tx_hash, event_type, market_id, actor, payload)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT DO NOTHING`,
-      [ledgerSeq, txHash, eventName, marketId, actor, JSON.stringify(data)]
-    );
+    const inserted = await insertProcessedEvent(pool, {
+      event: { ledger: ledgerSeq, txHash, eventIndex },
+      eventType: eventName,
+      marketId,
+      actor,
+      payload: JSON.stringify(data),
+    });
+    if (!inserted) return;
   } catch (err) {
     // Audit table might not exist in target database, fail silently but log
     console.debug("Optional events audit logging skipped:", (err as Error).message);
@@ -150,10 +154,10 @@ export async function runBackfill(): Promise<number> {
     }
 
     console.log(`[backfill] Processing ${events.length} events...`);
-    for (const event of events) {
+    for (const [eventIndex, event] of events.entries()) {
       const topics = event.topic.map((t: any) => scValToNative(t));
       const data = scValToNative(event.value);
-      await writeEventToDb(event.ledger, event.txHash, topics, data);
+      await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
     }
 
     const lastEventLedger = events[events.length - 1].ledger;

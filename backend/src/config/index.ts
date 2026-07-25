@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parseCorsOrigins } from "../server.js";
+import { parseCorsOrigins } from "../lib/cors.js";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),

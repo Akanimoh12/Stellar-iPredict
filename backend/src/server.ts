@@ -1,13 +1,20 @@
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
+import { DEFAULT_CORS_ORIGINS, parseCorsOrigins } from "./lib/cors.js";
+import { registerErrorHandler, registerNotFoundHandler } from "./lib/errors.js";
 import {
   REQUEST_ID_HEADER,
   createLoggerOptions,
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+
+// Re-exported so `@/server` stays the entry point callers already import these
+// from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
+export { DEFAULT_CORS_ORIGINS, parseCorsOrigins };
 
 export interface ServerConfig {
   port: number;
@@ -22,24 +29,6 @@ export interface BuildServerOptions {
   logger?: FastifyServerOptions["logger"];
 }
 
-/** Origin used when `CORS_ORIGINS` is unset — the frontend's dev server. */
-export const DEFAULT_CORS_ORIGINS = ["http://localhost:3000"];
-
-/**
- * Parses the `CORS_ORIGINS` env var (comma-separated) into an allowlist.
- *
- * Unset falls back to the local frontend; explicitly empty allows no browser
- * origin at all, which is the right default for a private deployment.
- */
-export function parseCorsOrigins(raw: string | undefined): string[] {
-  if (raw === undefined) return [...DEFAULT_CORS_ORIGINS];
-
-  return raw
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter((origin) => origin.length > 0);
-}
-
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
@@ -52,6 +41,12 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerRequestLogging(server);
+
+  // One error envelope for every failure, including unknown routes and methods.
+  // Registered before anything adds a route: the 404/405 handler learns which
+  // methods a path accepts from an onRoute hook, which only sees later routes.
+  registerErrorHandler(server);
+  registerNotFoundHandler(server);
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -124,6 +119,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       }
     );
   });
+
+  // Feature routes, all of them under /api/v1. Health checks stay unversioned:
+  // they are infrastructure, not part of the contract clients code against.
+  registerApiRoutes(server);
 
   return server;
 }

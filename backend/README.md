@@ -59,12 +59,20 @@ You need Postgres and Redis running locally (see
 See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#api-endpoints).
 Each endpoint is tracked as its own issue.
 
-Two are live already:
+Feature routes are served under `/api/v1`, mounted from the route index in
+[`src/api/index.ts`](src/api/index.ts) — route files declare paths relative to
+the version (`/profile/:address`), never the full `/api/v1/...`. A breaking
+change means mounting a `v2` beside `v1`, not rewriting every route file.
+Operational endpoints (`/healthz`, `/api/docs`) stay unversioned: they are
+infrastructure, not part of the contract clients code against.
+
+Live already:
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /healthz` | Liveness probe |
 | `GET /api/docs` | OpenAPI 3.1 spec, generated from the route schemas |
+| `GET /api/v1/profile/:address` | A user's bets and leaderboard totals |
 
 ## API hardening
 
@@ -80,6 +88,11 @@ Two are live already:
   `x-request-id` is reused so a trace survives the frontend → API hop.
 - **OpenAPI** — adding a `schema` to a route documents it automatically; there
   is no separate spec file to keep in sync.
+- **Errors** — every failure, including unknown routes, is one envelope:
+  `{ "error": { "code": "...", "message": "..." } }`. An unknown path is a `404`
+  (`NOT_FOUND`); a known path called with the wrong method is a `405`
+  (`METHOD_NOT_ALLOWED`) carrying an `Allow` header, rather than Fastify's
+  default 404 that reads as "this resource does not exist" when it does.
 
 ## Contributing
 

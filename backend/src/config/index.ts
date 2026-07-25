@@ -32,6 +32,10 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => parseCorsOrigins(v)),
+  REDIS_URL: z
+    .string()
+    .optional()
+    .default("redis://localhost:6379"),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .optional()

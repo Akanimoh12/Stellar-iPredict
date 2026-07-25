@@ -378,6 +378,30 @@ Set `LOG_LEVEL=debug|info|warn|error` to control how much JSON output the job
 emits while it runs. Each pass logs a structured summary with the number of
 events processed and the current ledger lag.
 
+### bet_count Backfill Job
+
+`markets.bet_count` is maintained incrementally as bet events are indexed, so it
+can drift if events are reprocessed, dropped to the dead-letter queue, or the
+`bets` table is repaired out of band. This job recomputes `bet_count` for every
+market directly from the authoritative `bets` table (which is keyed on
+`(market_id, bettor)`, so the count is the number of bettors per market).
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `markets` and `bets`.
+2. From `indexer/`, run `npm run backfill:bet-count`.
+3. Use `npm run backfill:bet-count -- --dry-run` first to report drift without writing (the recompute runs inside a transaction that is rolled back).
+
+The job recomputes counts for all markets — including resetting markets with no
+bets back to `0` — and only writes rows whose stored value actually differs. It
+logs a structured summary with the number of markets checked and corrected.
+
+The same recompute also runs automatically after each poll iteration when the
+indexer runtime is started with `recomputeBetCounts` enabled (mirroring
+`recomputeTotals`).
+
+Set `LOG_LEVEL=debug|info|warn|error` to control the JSON output volume.
+
 ---
 
 ### API Endpoints

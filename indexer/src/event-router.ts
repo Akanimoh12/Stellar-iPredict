@@ -1,5 +1,6 @@
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
 import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
+import { handleReferralRegisteredEvent } from "./handlers/referral_registered.js";
 import { metrics } from "./metrics.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
 
@@ -21,6 +22,8 @@ export async function writeEventToDb(
     await handleMarketCancelledEvent(event, db, redis);
   } else if (domain === "referral" && action === "reward") {
     await handleReferralRewardEvent(event, db, redis);
+  } else if (domain === "referral" && action === "registered") {
+    await handleReferralRegisteredEvent(event, db, redis);
   } else {
     // Unrecognised event — not indexed, so it does not count as processed.
     return;

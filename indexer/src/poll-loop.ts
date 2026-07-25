@@ -1,4 +1,5 @@
 import type { Logger } from "./log.js";
+import { metrics } from "./metrics.js";
 
 export interface RpcEvent {
   contractId: string;
@@ -50,7 +51,11 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
 
   await db.saveCheckpointLedger(latestLedger);
 
-  logger?.info("poll iteration complete", { eventsWritten: events.length, latestLedger });
+  // Compute and update indexer lag metric
+  const lag = latestLedger - (checkpoint ?? defaultStartLedger);
+  metrics.indexerLag.set(lag);
+
+  logger?.info("poll iteration complete", { eventsWritten: events.length, latestLedger, lag });
 
   return { eventsWritten: events.length, latestLedger };
 }

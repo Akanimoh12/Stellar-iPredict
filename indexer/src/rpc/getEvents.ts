@@ -30,22 +30,33 @@ export class SorobanRpcClient implements RpcClient {
     ];
 
     try {
-      const response = await this.server.getEvents({
-        startLedger,
-        filters,
-        limit,
-      });
+      const allEvents: RpcEvent[] = [];
+      let latestLedger = 0;
+      let cursor: string | undefined;
 
-      const events: RpcEvent[] = response.events.map((ev) => ({
-        contractId: ev.contractId?.toString() ?? "",
-        ledger: Number(ev.ledger),
-        type: ev.type,
-        body: ev,
-      }));
+      do {
+        const request = cursor
+          ? { filters, cursor, limit }
+          : { filters, startLedger, limit };
+
+        const response = await this.server.getEvents(request as any);
+
+        latestLedger = response.latestLedger;
+
+        const mappedEvents: RpcEvent[] = (response.events as any[]).map((ev) => ({
+          contractId: ev.contractId?.toString() ?? "",
+          ledger: Number(ev.ledger),
+          type: ev.type,
+          body: ev,
+        }));
+
+        allEvents.push(...mappedEvents);
+        cursor = response.cursor;
+      } while (cursor);
 
       return {
-        events,
-        latestLedger: response.latestLedger,
+        events: allEvents,
+        latestLedger,
       };
     } catch (error: any) {
       const message = error instanceof Error ? error.message : String(error);
@@ -59,7 +70,7 @@ export class SorobanRpcClient implements RpcClient {
           `CRITICAL: startLedger (${startLedger}) is older than the oldest ledger stored on the RPC node. ` +
           `A ledger reorg or gap has occurred. Recovery path: Please re-backfill from a snapshot or run ` +
           `a leaderboard rebuild using 'npm run rebuild:leaderboard --since-ledger <ledger>'.`;
-        
+
         console.error(remediationMessage);
         throw new LedgerGapError(startLedger, remediationMessage);
       }

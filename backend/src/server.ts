@@ -8,6 +8,9 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+import { registerErrorHandler } from "./lib/errors.js";
+
+import { createMarketsRoutes } from "./api/markets.js";
 
 export interface ServerConfig {
   port: number;
@@ -52,6 +55,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerRequestLogging(server);
+  registerErrorHandler(server);
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -123,6 +127,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         reply.status(200).send({ status: "ok" });
       }
     );
+
+    createMarketsRoutes(routes);
   });
 
   return server;

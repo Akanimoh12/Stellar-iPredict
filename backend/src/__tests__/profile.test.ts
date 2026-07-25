@@ -17,7 +17,7 @@ vi.mock("../db/pool.js", () => ({
 
 import { buildServer } from "../server.js";
 
-describe("GET /api/profile/:address", () => {
+describe("GET /api/v1/profile/:address", () => {
   const address = `G${"A".repeat(55)}`;
 
   beforeEach(() => {
@@ -30,7 +30,7 @@ describe("GET /api/profile/:address", () => {
 
     const response = await server.inject({
       method: "GET",
-      url: "/api/profile/not-a-stellar-address",
+      url: "/api/v1/profile/not-a-stellar-address",
     });
 
     expect(response.statusCode).toBe(400);
@@ -61,7 +61,7 @@ describe("GET /api/profile/:address", () => {
     const server = buildServer();
     const response = await server.inject({
       method: "GET",
-      url: `/api/profile/${address}`,
+      url: `/api/v1/profile/${address}`,
     });
 
     expect(response.statusCode).toBe(200);
@@ -87,7 +87,7 @@ describe("GET /api/profile/:address", () => {
     const server = buildServer();
     const response = await server.inject({
       method: "GET",
-      url: `/api/profile/${address}`,
+      url: `/api/v1/profile/${address}`,
     });
 
     expect(response.statusCode).toBe(200);

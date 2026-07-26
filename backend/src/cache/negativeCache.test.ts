@@ -95,6 +95,57 @@ describe("NegativeCache", () => {
     cache.invalidate("a");
     expect(cache.size).toBe(1);
   });
+
+  describe("metrics", () => {
+    it("starts with 0 hits, 0 misses, and a hit rate of 0", () => {
+      const metrics = cache.getMetrics();
+      expect(metrics.hits).toBe(0);
+      expect(metrics.misses).toBe(0);
+      expect(metrics.hitRate).toBe(0);
+    });
+
+    it("tracks hits when queries are cached", () => {
+      cache.markMiss("market:999");
+      expect(cache.isCachedMiss("market:999")).toBe(true);
+      
+      const metrics = cache.getMetrics();
+      expect(metrics.hits).toBe(1);
+      expect(metrics.misses).toBe(0);
+      expect(metrics.hitRate).toBe(1.0);
+    });
+
+    it("tracks misses when queries are not cached", () => {
+      expect(cache.isCachedMiss("market:notexists")).toBe(false);
+      
+      const metrics = cache.getMetrics();
+      expect(metrics.hits).toBe(0);
+      expect(metrics.misses).toBe(1);
+      expect(metrics.hitRate).toBe(0);
+    });
+
+    it("tracks misses when queries are expired", () => {
+      cache.markMiss("market:999");
+      vi.advanceTimersByTime(NEGATIVE_CACHE_TTL_MS + 100);
+      expect(cache.isCachedMiss("market:999")).toBe(false);
+      
+      const metrics = cache.getMetrics();
+      expect(metrics.hits).toBe(0);
+      expect(metrics.misses).toBe(1);
+      expect(metrics.hitRate).toBe(0);
+    });
+
+    it("calculates partial hit rate correctly", () => {
+      cache.markMiss("market:999");
+      
+      expect(cache.isCachedMiss("market:999")).toBe(true);
+      expect(cache.isCachedMiss("market:notexists")).toBe(false);
+      
+      const metrics = cache.getMetrics();
+      expect(metrics.hits).toBe(1);
+      expect(metrics.misses).toBe(1);
+      expect(metrics.hitRate).toBe(0.5);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

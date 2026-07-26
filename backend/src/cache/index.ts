@@ -22,3 +22,4 @@ export {
 } from "./cacheKeys.js";
 
 export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";
+export { getOrSet, withSingleFlight } from "./cacheAside.js";

@@ -6,6 +6,7 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
+import { healthRoutes } from "./api/health.js";
 import { DEFAULT_CORS_ORIGINS, parseCorsOrigins } from "./lib/cors.js";
 import { registerErrorHandler, registerNotFoundHandler } from "./lib/errors.js";
 import {
@@ -141,6 +142,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       }
     );
   });
+
+  // Readiness probe: verifies DB and Redis are reachable.
+  server.register(healthRoutes);
 
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:
   // they are infrastructure, not part of the contract clients code against.

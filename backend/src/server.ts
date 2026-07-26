@@ -15,7 +15,6 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
-import { registerErrorHandler } from "./lib/errors.js";
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";

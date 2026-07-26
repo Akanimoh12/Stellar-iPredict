@@ -1,9 +1,7 @@
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "pg";
 import { registerLeaderboardRoutes } from "./api/leaderboard.js";
-
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import { registerApiRoutes } from "./api/index.js";
@@ -34,10 +32,6 @@ export interface BuildServerOptions {
   corsOrigins?: string[];
   /** Overrides the logger config; tests pass a stream to capture output. */
   logger?: FastifyServerOptions["logger"];
-}
-
-
-export interface BuildServerOptions {
   pool?: Pool;
 }
 
@@ -49,13 +43,7 @@ export interface GracefulShutdownOptions {
 }
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
-  const server = Fastify({ logger: true });
-  if (!options.pool) {
-    throw new Error("buildServer requires a database pool");
-  }
-  const databasePool = options.pool;
-
-export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
+  const databasePool = options.pool as any;
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
   const server = Fastify({
@@ -172,10 +160,6 @@ export function registerGracefulShutdown(
   const shutdownDatabase = options.shutdownDatabase ?? true;
   let isShuttingDown = false;
 
-export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
-  const server = buildServer({ corsOrigins: config.corsOrigins });
-
-
   const shutdown = async (signal: NodeJS.Signals) => {
     if (isShuttingDown) {
       return;
@@ -187,8 +171,8 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
     try {
       await server.close();
       if (shutdownDatabase) {
-        const shutdown = options.shutdownDatabaseFn ?? (await import("./db/pool.js")).shutdown;
-        await shutdown();
+        const shutdownFn = options.shutdownDatabaseFn ?? (await import("./db/pool.js")).shutdown;
+        await shutdownFn();
       }
       server.log.info({ signal }, "Graceful shutdown complete");
       if (exitProcess) {
@@ -211,7 +195,7 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
 
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
   const { pool } = await import("./db/pool.js");
-  const server = buildServer({ pool });
+  const server = buildServer({ corsOrigins: config.corsOrigins, pool });
 
   registerGracefulShutdown(server);
 

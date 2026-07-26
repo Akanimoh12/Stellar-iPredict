@@ -16,6 +16,7 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+import { registerRateLimiter } from "./cache/rateLimiter.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -72,6 +73,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // methods a path accepts from an onRoute hook, which only sees later routes.
   registerErrorHandler(server);
   registerNotFoundHandler(server);
+
+  // Per-route rate limiting — runs early so abusive clients are rejected
+  // before any route handler or downstream middleware does real work.
+  registerRateLimiter(server);
 
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every

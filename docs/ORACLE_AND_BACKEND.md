@@ -502,6 +502,24 @@ services:
       - redisdata:/data
 ```
 
+#### Indexer Image Runbook
+
+Build the production indexer image from the `indexer/` directory. The Dockerfile
+lives under `indexer/src/` so the build context can still include
+`package-lock.json`, `tsconfig.json`, and the full source tree.
+
+```bash
+cd indexer
+docker build -f src/Dockerfile -t ipredict-indexer:local .
+```
+
+Run the image with the same environment variables documented in
+`indexer/.env.example`.
+
+```bash
+docker run --rm --env-file .env ipredict-indexer:local
+```
+
 ---
 
 ### Monitoring

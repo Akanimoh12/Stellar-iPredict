@@ -1,4 +1,6 @@
+
 import { describe, expect, it } from "vitest";
+
 import { getGlobalStats } from '../stats';
 
 describe('getGlobalStats', () => {

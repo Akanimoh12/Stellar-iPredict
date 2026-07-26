@@ -67,6 +67,16 @@ export async function getLeaderboard(
   return result.rows;
 }
 
+
+export async function getLeaderboardTotal(pool: Pool): Promise<number> {
+  const result = await pool.query<{ total: string }>(
+    "SELECT COUNT(*)::text AS total FROM leaderboard;",
+    []
+  );
+
+  return Number(result.rows[0]?.total ?? 0);
+}
+
 /**
  * Insert or update a leaderboard entry.
  */

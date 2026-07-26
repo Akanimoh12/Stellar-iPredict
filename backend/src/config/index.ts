@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parseCorsOrigins } from "../server.js";
+import { parseCorsOrigins } from "../lib/cors.js";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -32,6 +32,10 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => parseCorsOrigins(v)),
+  REDIS_URL: z
+    .string()
+    .optional()
+    .default("redis://localhost:6379"),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .optional()

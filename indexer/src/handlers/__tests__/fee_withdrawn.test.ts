@@ -71,7 +71,7 @@ describe("handleFeeWithdrawn", () => {
     expect(context.db.query).toHaveBeenCalledTimes(1);
     expect(context.db.query).toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO events"),
-      [event.ledger, event.txHash, FEES_WITHDRAWN_TOPIC, ADMIN, { admin: ADMIN, amount: "150000000" }],
+      [event.ledger, event.txHash, 0, FEES_WITHDRAWN_TOPIC, null, ADMIN, { admin: ADMIN, amount: "150000000" }],
     );
     expect(context.redis?.del).toHaveBeenCalledWith("stats:global");
   });

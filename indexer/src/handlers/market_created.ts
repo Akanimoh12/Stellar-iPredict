@@ -1,6 +1,7 @@
 import { marketCreatedPayloadSchema, type MarketCreatedPayload } from "../schemas.js";
 import { invalidateMarketCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const MARKET_CREATED_TOPIC = ["mkt", "created"] as const;
 
@@ -19,6 +20,15 @@ export async function handleMarketCreatedEvent(
   redis: RedisClient,
 ): Promise<MarketCreatedPayload> {
   const payload = decodeMarketCreatedEvent(event);
+
+  const inserted = await insertProcessedEvent(db, {
+    event,
+    eventType: "market_created",
+    marketId: payload.market_id,
+    actor: payload.creator,
+    payload: JSON.stringify(payload),
+  });
+  if (!inserted) return payload;
 
   await db.query(
     `INSERT INTO markets (id, question, image_url, category, end_time, creator, updated_at)

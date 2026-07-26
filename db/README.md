@@ -88,6 +88,7 @@ Stores raw on-chain event records for auditing, replay, and leaderboard rebuild 
 | `id` | `BIGSERIAL` | Auto-incrementing primary key |
 | `ledger_seq` | `BIGINT` | Ledger sequence for the originating event |
 | `tx_hash` | `CHAR(64)` | Transaction hash |
+| `event_index` | `BIGINT` | Event position within the transaction, used with `tx_hash` for replay dedupe |
 | `event_type` | `VARCHAR(50)` | Event category such as market creation or bet placement |
 | `market_id` | `BIGINT` | Optional market identifier |
 | `actor` | `CHAR(56)` | Wallet address of the actor |
@@ -98,6 +99,7 @@ Indexes:
 - `idx_events_market` on `market_id`
 - `idx_events_type` on `event_type`
 - `idx_events_ledger` on `ledger_seq DESC`
+- `idx_events_tx_hash_event_index` unique on `(tx_hash, event_index)`
 
 ### `oracle_submissions`
 

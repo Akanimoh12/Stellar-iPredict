@@ -118,12 +118,12 @@ describe("referral_registered handler", () => {
     });
 
     expect(db.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, "Alice", 5],
     );
     expect(db.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining("INSERT INTO leaderboard"),
       [BOB, 5],
     );
@@ -136,8 +136,9 @@ describe("referral_registered handler", () => {
 
     await handleReferralRegisteredEvent(sampleEvent({ user: ALICE, display_name: "Alice" }), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(1);
-    expect(db.query).toHaveBeenCalledWith(
+    expect(db.query).toHaveBeenCalledTimes(2);
+    expect(db.query).toHaveBeenNthCalledWith(
+      2,
       expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, "Alice", 5],
     );

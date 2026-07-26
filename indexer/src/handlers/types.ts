@@ -1,6 +1,7 @@
 export interface DecodedEvent {
   ledger: number | bigint;
   txHash: string;
+  eventIndex?: number | bigint;
   topics: unknown[];
   data: unknown;
 }

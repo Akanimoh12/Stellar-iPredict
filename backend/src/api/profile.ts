@@ -5,9 +5,11 @@ import { getBetsByBettor } from "../db/bets.js";
 // Validates a Stellar public key (starts with G, 56 characters, Base32 encoding)
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
 
+// Paths are relative to the API prefix applied by the route index — see
+// `registerApiRoutes` in ./index.ts.
 export const profileRoutes: FastifyPluginAsync = async (server: FastifyInstance) => {
   server.get<{ Params: { address: string } }>(
-    "/api/profile/:address",
+    "/profile/:address",
     async (request, reply) => {
       const { address } = request.params;
 

@@ -55,6 +55,17 @@ const MARKET_COLUMNS = `
   created_at,
   updated_at
 `;
+function getDefaultPool(): Pool {
+  if (!pool) {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      throw new Error("DATABASE_URL is required");
+    }
+    pool = new Pool({ connectionString: databaseUrl });
+  }
+
+  return pool;
+}
 
 const ORDER_BY: Record<MarketSort, string> = {
   newest: "created_at DESC",
@@ -87,8 +98,9 @@ export async function getMarkets(
     page = 1,
     limit = 20
   }: GetMarketsInput,
-  db: Queryable = getDefaultDb()
+  db?: Queryable
 ): Promise<GetMarketsResult> {
+  const queryable = db ?? getDefaultPool();
   if (!Number.isInteger(page) || page < 1) {
     throw new Error("page must be a positive integer");
   }
@@ -127,8 +139,8 @@ export async function getMarkets(
   const countQuery = `SELECT COUNT(*)::INT AS total FROM markets ${whereSql}`;
 
   const [{ rows }, { rows: totalRows }] = await Promise.all([
-    db.query<MarketRow>(rowsQuery, rowsValues),
-    db.query<{ total: number }>(countQuery, baseValues)
+    queryable.query<MarketRow>(rowsQuery, rowsValues),
+    queryable.query<{ total: number }>(countQuery, baseValues)
   ]);
 
   return {

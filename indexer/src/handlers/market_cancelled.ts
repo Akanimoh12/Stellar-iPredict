@@ -1,6 +1,7 @@
 import { marketCancelledPayloadSchema, type MarketCancelledPayload } from "../schemas.js";
 import { invalidateMarketCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const MARKET_CANCELLED_TOPIC = ["mkt", "cancelled"] as const;
 
@@ -19,6 +20,14 @@ export async function handleMarketCancelledEvent(
   redis: RedisClient,
 ): Promise<MarketCancelledPayload> {
   const payload = decodeMarketCancelledEvent(event);
+
+  const inserted = await insertProcessedEvent(db, {
+    event,
+    eventType: "market_cancelled",
+    marketId: payload.market_id,
+    payload: JSON.stringify(payload),
+  });
+  if (!inserted) return payload;
 
   await db.query(
     `UPDATE markets

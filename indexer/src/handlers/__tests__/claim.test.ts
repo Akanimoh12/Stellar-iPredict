@@ -65,13 +65,13 @@ describe("handleClaim", () => {
     expect(context.db.query).toHaveBeenCalledTimes(2);
     expect(context.db.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("UPDATE bets"),
-      [MARKET_ID, USER],
+      expect.stringContaining("INSERT INTO events"),
+      [event.ledger, event.txHash, 0, REWARD_CLAIMED_TOPIC, MARKET_ID, USER, { market_id: MARKET_ID, user: USER, payout_xlm: 500000000 }],
     );
     expect(context.db.query).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("INSERT INTO events"),
-      [event.ledger, event.txHash, REWARD_CLAIMED_TOPIC, MARKET_ID, USER, { market_id: MARKET_ID, user: USER, payout_xlm: 500000000 }],
+      expect.stringContaining("UPDATE bets"),
+      [MARKET_ID, USER],
     );
     expect(context.redis?.del).toHaveBeenCalledWith(`bets:${MARKET_ID}`, "leaderboard:top20");
   });

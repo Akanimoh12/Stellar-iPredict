@@ -20,3 +20,15 @@ export {
   statsKey,
   betsKey,
 } from "./cacheKeys.js";
+
+export {
+  SlidingWindowStore,
+  resolveRateLimit,
+  registerRateLimiter,
+  RATE_LIMITS,
+  type RateLimitConfig,
+  type RateLimitStore,
+  type RateLimitResult,
+} from "./rateLimiter.js";
+
+export { RedisSlidingWindowStore } from "./rateLimiterRedis.js";

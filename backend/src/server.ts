@@ -109,7 +109,13 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", REQUEST_ID_HEADER],
-    exposedHeaders: [REQUEST_ID_HEADER],
+    exposedHeaders: [
+      REQUEST_ID_HEADER,
+      "X-RateLimit-Limit",
+      "X-RateLimit-Remaining",
+      "X-RateLimit-Reset",
+      "Retry-After",
+    ],
     credentials: true,
     maxAge: 86400,
   });

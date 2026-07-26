@@ -20,3 +20,5 @@ export {
   statsKey,
   betsKey,
 } from "./cacheKeys.js";
+
+export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";

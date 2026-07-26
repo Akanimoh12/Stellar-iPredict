@@ -57,7 +57,7 @@ describe("market_resolved handler", () => {
     expect(db.query).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining("INSERT INTO events"),
-      [123456, "abc123", "market_resolved", 42, JSON.stringify({ market_id: 42, outcome: true })],
+      [123456, "abc123", 0, "market_resolved", 42, null, JSON.stringify({ market_id: 42, outcome: true })],
     );
     expect(db.query).toHaveBeenNthCalledWith(
       2,

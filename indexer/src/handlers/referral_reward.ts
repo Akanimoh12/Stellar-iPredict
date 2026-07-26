@@ -1,6 +1,7 @@
 import { referralRewardPayloadSchema, type ReferralRewardPayload } from "../schemas.js";
 import { invalidateLeaderboardCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const REFERRAL_REWARD_TOPIC = ["referral", "reward"] as const;
 
@@ -19,6 +20,14 @@ export async function handleReferralRewardEvent(
   redis: RedisClient,
 ): Promise<ReferralRewardPayload> {
   const payload = decodeReferralRewardEvent(event);
+
+  const inserted = await insertProcessedEvent(db, {
+    event,
+    eventType: "referral_reward",
+    actor: payload.referrer,
+    payload: JSON.stringify(payload),
+  });
+  if (!inserted) return payload;
 
   await db.query(
     `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)

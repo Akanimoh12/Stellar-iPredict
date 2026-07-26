@@ -11,4 +11,5 @@ export interface DecodedContractEvent {
   data: unknown;
   ledger: number;
   txHash: string;
+  eventIndex?: number | bigint;
 }

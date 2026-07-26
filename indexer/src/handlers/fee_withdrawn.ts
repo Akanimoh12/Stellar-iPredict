@@ -1,4 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const FEES_WITHDRAWN_TOPIC = "fees_withdrawn";
 
@@ -45,12 +46,13 @@ export function decodeFeeWithdrawn(event: DecodedEvent): FeeWithdrawnPayload {
 export async function handleFeeWithdrawn(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeFeeWithdrawn(event);
 
-  await context.db.query(
-    `INSERT INTO events (ledger_seq, tx_hash, event_type, actor, payload)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT DO NOTHING`,
-    [event.ledger, event.txHash, FEES_WITHDRAWN_TOPIC, payload.admin, payload],
-  );
+  const inserted = await insertProcessedEvent(context.db, {
+    event,
+    eventType: FEES_WITHDRAWN_TOPIC,
+    actor: payload.admin,
+    payload,
+  });
+  if (!inserted) return;
 
   await context.redis?.del("stats:global");
 }

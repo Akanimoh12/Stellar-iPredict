@@ -1,6 +1,7 @@
 import { referralRegisteredPayloadSchema, type ReferralRegisteredPayload } from "../schemas.js";
 import { invalidateLeaderboardCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const REFERRAL_REGISTERED_TOPIC = ["referral", "registered"] as const;
 
@@ -21,6 +22,14 @@ export async function handleReferralRegisteredEvent(
   redis: RedisClient,
 ): Promise<ReferralRegisteredPayload> {
   const payload = decodeReferralRegisteredEvent(event);
+
+  const inserted = await insertProcessedEvent(db, {
+    event,
+    eventType: "referral_registered",
+    actor: payload.user,
+    payload: JSON.stringify(payload),
+  });
+  if (!inserted) return payload;
 
   // Registrant: record the canonical display name and credit the welcome bonus.
   // COALESCE keeps any existing name when the event omits one; ON CONFLICT keeps

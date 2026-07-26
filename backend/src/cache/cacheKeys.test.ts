@@ -9,6 +9,7 @@ import {
   marketKey,
   marketsAllKey,
   marketsActiveKey,
+  marketsListKey,
   leaderboardKey,
   statsKey,
   betsKey,
@@ -129,6 +130,18 @@ describe("typed key builders", () => {
 
   it("betsKey(3) → ipredict:v1:bets:3", () => {
     expect(betsKey(3)).toBe("ipredict:v1:bets:3");
+  });
+
+  it("marketsListKey encodes filter/category/sort/page/limit", () => {
+    expect(marketsListKey("active", "Crypto", "newest", 1, 20)).toBe(
+      "ipredict:v1:markets:list:active:Crypto:newest:1:20"
+    );
+  });
+
+  it("marketsListKey uses 'all' when category is undefined", () => {
+    expect(marketsListKey("all", undefined, "volume", 2, 10)).toBe(
+      "ipredict:v1:markets:list:all:all:volume:2:10"
+    );
   });
 
   it("typed builders also respect version bumps", () => {

@@ -1,6 +1,7 @@
 
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "pg";
+import type { Redis } from "ioredis";
 import { registerLeaderboardRoutes } from "./api/leaderboard.js";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -15,9 +16,9 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
-import { registerErrorHandler } from "./lib/errors.js";
 
 import { createMarketsRoutes } from "./api/markets.js";
+import { registerStatsRoutes } from "./api/stats.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
@@ -37,6 +38,8 @@ export interface BuildServerOptions {
   /** Overrides the logger config; tests pass a stream to capture output. */
   logger?: FastifyServerOptions["logger"];
   pool?: Pool;
+  /** Redis client for cache-aside reads. When omitted, routes hit the DB directly. */
+  redis?: Redis;
 }
 
 export interface GracefulShutdownOptions {
@@ -48,6 +51,7 @@ export interface GracefulShutdownOptions {
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const databasePool = options.pool as any;
+  const redis = options.redis;
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
   const server = Fastify({
@@ -64,7 +68,6 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // One error envelope for every failure, including unknown routes and methods.
   // Registered before anything adds a route: the 404/405 handler learns which
   // methods a path accepts from an onRoute hook, which only sees later routes.
-  registerErrorHandler(server);
   registerNotFoundHandler(server);
 
   // Per-route rate limiting — runs early so abusive clients are rejected
@@ -95,7 +98,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
 
-  registerLeaderboardRoutes(server, databasePool);
+  registerLeaderboardRoutes(server, databasePool, redis);
+  registerStatsRoutes(server, databasePool, redis);
 
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {
@@ -152,7 +156,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       }
     );
 
-    createMarketsRoutes(routes);
+    createMarketsRoutes(routes, undefined, redis);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.

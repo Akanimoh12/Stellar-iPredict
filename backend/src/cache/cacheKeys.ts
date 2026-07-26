@@ -115,3 +115,21 @@ export function statsKey(): string {
 export function betsKey(marketId: number | string): string {
   return cacheKey("bets", marketId);
 }
+
+/**
+ * Key for a filtered/paginated market list query.
+ *
+ * Encodes every query parameter that affects the result set so that
+ * different filter/category/sort/page/limit combinations never collide.
+ *
+ * Example: `ipredict:v1:markets:list:active:Crypto:newest:1:20`
+ */
+export function marketsListKey(
+  filter: string,
+  category: string | undefined,
+  sort: string,
+  page: number,
+  limit: number
+): string {
+  return cacheKey("markets", "list", filter, category ?? "all", sort, page, limit);
+}

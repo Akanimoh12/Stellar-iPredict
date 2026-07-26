@@ -32,3 +32,5 @@ export {
 } from "./rateLimiter.js";
 
 export { RedisSlidingWindowStore } from "./rateLimiterRedis.js";
+export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";
+export { getOrSet, withSingleFlight } from "./cacheAside.js";

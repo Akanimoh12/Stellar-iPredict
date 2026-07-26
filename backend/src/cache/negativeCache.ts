@@ -46,6 +46,8 @@ export class NegativeCache {
   private readonly store = new Map<string, CacheEntry>();
   private readonly defaultTtlMs: number;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private hits = 0;
+  private misses = 0;
 
   constructor(defaultTtlMs: number = NEGATIVE_CACHE_TTL_MS) {
     this.defaultTtlMs = defaultTtlMs;
@@ -71,14 +73,31 @@ export class NegativeCache {
    */
   isCachedMiss(key: string): boolean {
     const entry = this.store.get(key);
-    if (entry === undefined) return false;
-
-    if (Date.now() >= entry.expiresAt) {
-      this.store.delete(key);
+    if (entry === undefined) {
+      this.misses += 1;
       return false;
     }
 
+    if (Date.now() >= entry.expiresAt) {
+      this.store.delete(key);
+      this.misses += 1;
+      return false;
+    }
+
+    this.hits += 1;
     return true;
+  }
+
+  /**
+   * Returns cache metrics including cumulative hits, misses, and the hit rate.
+   */
+  getMetrics(): { hits: number; misses: number; hitRate: number } {
+    const total = this.hits + this.misses;
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      hitRate: total === 0 ? 0 : this.hits / total,
+    };
   }
 
   /**

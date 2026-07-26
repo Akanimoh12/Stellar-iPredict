@@ -10,6 +10,11 @@
 
 const isTestnet = process.env.NEXT_PUBLIC_NETWORK === "testnet";
 
+// ── Backend Configuration ─────────────────────────────────────────────────────
+// Toggle between direct-RPC and backend reads.
+// Set NEXT_PUBLIC_USE_BACKEND=true to route reads through the backend API.
+export const USE_BACKEND = process.env.NEXT_PUBLIC_USE_BACKEND === "true";
+
 /**
  * Resolve the Soroban RPC URL the SDK talks to.
  *

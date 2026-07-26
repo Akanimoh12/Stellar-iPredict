@@ -17,6 +17,33 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 
 // ---------------------------------------------------------------------------
+// Shared store interface
+// ---------------------------------------------------------------------------
+
+/**
+ * Common contract for rate-limit stores — in-memory, Redis, or otherwise.
+ *
+ * Both {@link SlidingWindowStore} and {@link RedisSlidingWindowStore}
+ * implement this interface so they can be passed transparently to
+ * {@link registerRateLimiter}.
+ */
+export interface RateLimitStore {
+  increment(
+    key: string,
+    limit: number,
+    windowSec: number
+  ): RateLimitResult | Promise<RateLimitResult>;
+  destroy?(): void | Promise<void>;
+}
+
+/** Return shape shared by all rate-limit stores. */
+export interface RateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  resetMs: number;
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -56,7 +83,7 @@ interface WindowEntry {
  * Expired timestamps are lazily pruned on each {@link increment} call,
  * and a periodic sweep removes stale keys to bound memory.
  */
-export class SlidingWindowStore {
+export class SlidingWindowStore implements RateLimitStore {
   private readonly store = new Map<string, WindowEntry>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -222,9 +249,9 @@ export function registerRateLimiter(
   server: FastifyInstance,
   limits: Record<string, RateLimitConfig> = RATE_LIMITS,
   /** @internal override for tests */
-  overrideStore?: SlidingWindowStore
+  overrideStore?: RateLimitStore
 ): void {
-  const s = overrideStore ?? store;
+  const s: RateLimitStore = overrideStore ?? store;
 
   server.addHook(
     "onRequest",
@@ -233,7 +260,8 @@ export function registerRateLimiter(
       const id = clientId(request);
       const key = `${id}:${request.method}:${request.url.split("?")[0]}`;
 
-      const result = s.increment(key, config.requests, config.window);
+      // `await` works with both sync (in-memory) and async (Redis) stores.
+      const result = await s.increment(key, config.requests, config.window);
 
       // Always set informational headers.
       reply.header("X-RateLimit-Limit", config.requests);

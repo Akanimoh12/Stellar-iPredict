@@ -21,5 +21,16 @@ export {
   betsKey,
 } from "./cacheKeys.js";
 
+export {
+  SlidingWindowStore,
+  resolveRateLimit,
+  registerRateLimiter,
+  RATE_LIMITS,
+  type RateLimitConfig,
+  type RateLimitStore,
+  type RateLimitResult,
+} from "./rateLimiter.js";
+
+export { RedisSlidingWindowStore } from "./rateLimiterRedis.js";
 export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";
 export { getOrSet, withSingleFlight } from "./cacheAside.js";

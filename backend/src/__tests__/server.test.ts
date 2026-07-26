@@ -1,7 +1,8 @@
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { registerGracefulShutdown } from "../server.js";
+import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
 
 describe("registerGracefulShutdown", () => {
   it("closes the server once so Fastify stops accepting and drains in-flight requests", async () => {
@@ -23,10 +24,8 @@ describe("registerGracefulShutdown", () => {
     process.emit("SIGUSR2", "SIGUSR2");
     process.emit("SIGUSR2", "SIGUSR2");
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
-
-import { describe, it, expect, afterEach } from "vitest";
-import type { FastifyInstance } from "fastify";
-import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
+  });
+});
 
 const ALLOWED = "https://ipredict.app";
 const DENIED = "https://evil.example";

@@ -15,6 +15,9 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+import { registerErrorHandler } from "./lib/errors.js";
+
+import { createMarketsRoutes } from "./api/markets.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
@@ -56,6 +59,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerRequestLogging(server);
+  registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.
   // Registered before anything adds a route: the 404/405 handler learns which
@@ -147,6 +151,8 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         reply.status(200).send({ status: "ok" });
       }
     );
+
+    createMarketsRoutes(routes);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.

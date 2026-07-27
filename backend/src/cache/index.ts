@@ -16,6 +16,7 @@ export {
   marketKey,
   marketsAllKey,
   marketsActiveKey,
+  marketsListKey,
   leaderboardKey,
   statsKey,
   betsKey,

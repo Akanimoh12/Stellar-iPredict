@@ -1,5 +1,5 @@
 import { marketCreatedPayloadSchema, type MarketCreatedPayload } from "../schemas.js";
-import { invalidateMarketCache } from "../cache.js";
+import { invalidateOnMarketCreated } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
 
@@ -50,7 +50,7 @@ export async function handleMarketCreatedEvent(
     ],
   );
 
-  await invalidateMarketCache(redis, payload.market_id);
+  await invalidateOnMarketCreated(redis);
 
   return payload;
 }

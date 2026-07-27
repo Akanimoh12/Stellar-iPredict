@@ -1,5 +1,6 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
 import { insertProcessedEvent } from "./idempotency.js";
+import { invalidateLeaderboardCache } from "../cache.js";
 
 export const REWARD_POINTS_TOPIC = "reward_points";
 
@@ -92,5 +93,7 @@ export async function handleRewardPoints(event: DecodedEvent, context: HandlerCo
   );
 
   // Invalidate leaderboard cache
-  await context.redis?.del("leaderboard:top20");
+  if (context.redis) {
+    await invalidateLeaderboardCache(context.redis);
+  }
 }

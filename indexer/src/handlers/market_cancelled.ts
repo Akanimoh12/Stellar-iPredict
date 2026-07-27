@@ -1,5 +1,5 @@
 import { marketCancelledPayloadSchema, type MarketCancelledPayload } from "../schemas.js";
-import { invalidateMarketCache } from "../cache.js";
+import { invalidateOnMarketCancelled } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
 
@@ -39,7 +39,7 @@ export async function handleMarketCancelledEvent(
     [payload.market_id],
   );
 
-  await invalidateMarketCache(redis, payload.market_id);
+  await invalidateOnMarketCancelled(redis, payload.market_id);
 
   return payload;
 }

@@ -1,5 +1,6 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
 import { insertProcessedEvent } from "./idempotency.js";
+import { invalidateOnBetPlaced } from "../cache.js";
 
 export const REWARD_CLAIMED_TOPIC = "reward_claimed";
 
@@ -78,4 +79,7 @@ export async function handleClaim(event: DecodedEvent, context: HandlerContext):
   );
 
   await context.redis?.del(`bets:${payload.market_id}`, "leaderboard:top20");
+  if (context.redis) {
+    await invalidateOnBetPlaced(context.redis, payload.market_id);
+  }
 }

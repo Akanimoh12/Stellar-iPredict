@@ -1,4 +1,4 @@
-import { invalidateLeaderboardCache, invalidateMarketCache } from "../cache.js";
+import { invalidateOnMarketResolved } from "../cache.js";
 import { marketResolvedPayloadSchema, type MarketResolvedPayload } from "../schemas.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
@@ -44,8 +44,7 @@ export async function handleMarketResolvedEvent(
     [payload.market_id, payload.outcome],
   );
 
-  await invalidateMarketCache(redis, payload.market_id);
-  await invalidateLeaderboardCache(redis);
+  await invalidateOnMarketResolved(redis, payload.market_id);
 
   return payload;
 }

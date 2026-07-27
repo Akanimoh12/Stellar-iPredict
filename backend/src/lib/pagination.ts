@@ -41,15 +41,16 @@ export function parsePagination(
 
 /**
  * Constructs a standard paginated response envelope.
+ * Defaults data to empty array and total to 0 when null/undefined.
  */
 export function paginatedResponse<T>(
-  data: T[],
-  total: number,
+  data: T[] | null | undefined,
+  total: number | null | undefined,
   params: PaginationParams
 ): PaginatedResponse<T> {
   return {
-    data,
-    total,
+    data: data ?? [],
+    total: total ?? 0,
     limit: params.limit,
     offset: params.offset,
   };

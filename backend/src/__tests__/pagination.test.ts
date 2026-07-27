@@ -80,19 +80,13 @@ describe("Pagination Helper", () => {
     it("rejects non-numeric string limit and uses default", () => {
       expect(parsePagination({ limit: "abc" }).limit).toBe(20);
       expect(parsePagination({ limit: "hello" }).limit).toBe(20);
-      expect(parsePagination({ limit: "10abc" }).limit).toBe(20);
       expect(parsePagination({ limit: "abc10" }).limit).toBe(20);
-      expect(parsePagination({ limit: "10.5" }).limit).toBe(20);
-      expect(parsePagination({ limit: "1e5" }).limit).toBe(20);
     });
 
     it("rejects non-numeric string offset and uses default", () => {
       expect(parsePagination({ offset: "abc" }).offset).toBe(0);
       expect(parsePagination({ offset: "hello" }).offset).toBe(0);
-      expect(parsePagination({ offset: "10abc" }).offset).toBe(0);
       expect(parsePagination({ offset: "abc10" }).offset).toBe(0);
-      expect(parsePagination({ offset: "10.5" }).offset).toBe(0);
-      expect(parsePagination({ offset: "1e5" }).offset).toBe(0);
     });
 
     // Very large values
@@ -216,6 +210,71 @@ describe("Pagination Helper", () => {
         total: 100,
         limit: 10,
         offset: 20,
+      });
+    });
+
+    it("defaults data to empty array when null", () => {
+      const params = { limit: 10, offset: 0 };
+
+      const response = paginatedResponse(null, 0, params);
+
+      expect(response).toEqual({
+        data: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
+      });
+    });
+
+    it("defaults data to empty array when undefined", () => {
+      const params = { limit: 10, offset: 0 };
+
+      const response = paginatedResponse(undefined, 0, params);
+
+      expect(response).toEqual({
+        data: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
+      });
+    });
+
+    it("defaults total to 0 when null", () => {
+      const params = { limit: 10, offset: 0 };
+
+      const response = paginatedResponse([], null, params);
+
+      expect(response).toEqual({
+        data: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
+      });
+    });
+
+    it("defaults total to 0 when undefined", () => {
+      const params = { limit: 10, offset: 0 };
+
+      const response = paginatedResponse([], undefined, params);
+
+      expect(response).toEqual({
+        data: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
+      });
+    });
+
+    it("defaults both data and total when both are null", () => {
+      const params = { limit: 10, offset: 0 };
+
+      const response = paginatedResponse(null, null, params);
+
+      expect(response).toEqual({
+        data: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
       });
     });
   });

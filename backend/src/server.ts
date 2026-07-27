@@ -20,6 +20,7 @@ import {
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
+import { metrics } from "./metrics.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -63,6 +64,16 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerRequestLogging(server);
+
+  // Track server errors (5xx responses) in metrics
+  server.addHook("onResponse", (request, reply, done) => {
+    const statusCode = reply.statusCode;
+    if (statusCode >= 500 && statusCode < 600) {
+      metrics.serverErrors.inc();
+    }
+    done();
+  });
+
   registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.

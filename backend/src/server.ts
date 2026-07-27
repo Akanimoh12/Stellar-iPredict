@@ -19,6 +19,7 @@ import {
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
+import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
@@ -100,6 +101,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
 
   registerLeaderboardRoutes(server, databasePool, redis);
   registerStatsRoutes(server, databasePool, redis);
+  registerOracleRoutes(server, databasePool);
 
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {

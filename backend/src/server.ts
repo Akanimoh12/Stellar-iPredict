@@ -5,6 +5,7 @@ import type { Redis } from "ioredis";
 import { registerLeaderboardRoutes } from "./api/leaderboard.js";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import compress from "@fastify/compress";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
 import { healthRoutes } from "./api/health.js";
@@ -95,6 +96,13 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     crossOriginResourcePolicy: { policy: "cross-origin" },
     hsts: { maxAge: 15552000, includeSubDomains: true },
     referrerPolicy: { policy: "no-referrer" },
+  });
+
+  // Response compression - supports gzip and brotli (when available)
+  // Should be registered after security headers but before CORS and routes
+  server.register(compress, {
+    global: true,
+    threshold: 1024, // Don't compress responses smaller than 1KB
   });
 
 

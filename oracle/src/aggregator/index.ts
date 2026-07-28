@@ -1,0 +1,78 @@
+import { rpc } from "@stellar/stellar-sdk";
+import { Pool } from "pg";
+import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
+
+export interface AggregatorMarket { id: string; cancelled: boolean; }
+export interface AggregatorDependencies {
+  connect(): Promise<void>;
+  listExpiredUnresolvedMarkets(now: Date): Promise<AggregatorMarket[]>;
+  processMarket(market: AggregatorMarket): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createProductionDependencies(config: AggregatorConfig): AggregatorDependencies {
+  const database = new Pool({ connectionString: config.DATABASE_URL });
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  return {
+    async connect() {
+      await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
+    },
+    async listExpiredUnresolvedMarkets(now) {
+      const result = await database.query<AggregatorMarket>(
+        `SELECT id::text, cancelled FROM markets
+         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+         ORDER BY end_time ASC`,
+        [Math.floor(now.getTime() / 1_000)],
+      );
+      return result.rows;
+    },
+    async processMarket() {
+      // Threshold evaluation and finalization are composed by follow-up modules.
+    },
+    async close() { await database.end(); },
+  };
+}
+
+export async function runAggregator(
+  dependencies: AggregatorDependencies,
+  options: { signal: AbortSignal; pollIntervalMs: number },
+): Promise<void> {
+  await dependencies.connect();
+  try {
+    while (!options.signal.aborted) {
+      const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
+      for (const market of markets) {
+        if (options.signal.aborted) break;
+        await dependencies.processMarket(market);
+      }
+      if (!options.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, options.pollIntervalMs);
+          options.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+      }
+    }
+  } finally {
+    await dependencies.close();
+  }
+}
+
+export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const config = loadAggregatorConfig(env);
+  const controller = new AbortController();
+  const shutdown = () => controller.abort();
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  try {
+    await runAggregator(createProductionDependencies(config), {
+      signal: controller.signal,
+      pollIntervalMs: config.POLL_INTERVAL_MS,
+    });
+  } finally {
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+  }
+}

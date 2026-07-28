@@ -14,18 +14,15 @@ function isStrictMajority(threshold: number, size: number): boolean {
   return threshold > size / 2;
 }
 
+const positiveNumber = z.coerce.number().positive();
+const unitFraction = z.coerce.number().min(0).max(1);
+
 const schema = z.object({
   COUNCIL_SIZE: positiveInteger.default(7),
   COUNCIL_THRESHOLD: positiveInteger.default(4),
   DATABASE_URL: z.string().min(1),
   SOROBAN_RPC_URL: z.string().url(),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
-  SUBMIT_MAX_RETRIES: positiveInteger.default(5),
-  SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(500),
-  SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
-  SUBMIT_FAILURE_ALERT_THRESHOLD: positiveInteger.default(3),
-  ALERT_WEBHOOK_URL: z.string().url().optional(),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
   path: ["COUNCIL_THRESHOLD"],

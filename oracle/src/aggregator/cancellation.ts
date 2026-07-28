@@ -1,3 +1,5 @@
+import type { Logger } from "../log.js";
+
 export interface MarketResolutionState {
   cancelled: boolean;
   resolved: boolean;
@@ -19,37 +21,44 @@ export class CancellationAwareFinalizer {
   private readonly claimed = new Set<string>();
   private readonly finalized = new Set<string>();
 
+  constructor(private readonly logger?: Logger) {}
+
   async finalize(
     marketId: string,
     getState: (marketId: string) => Promise<MarketResolutionState>,
     getAgreedOutcome: (marketId: string) => Promise<boolean | null>,
     submit: (marketId: string, outcome: boolean) => Promise<void>,
   ): Promise<FinalizationResult> {
-    if (this.finalized.has(marketId)) return "already-resolved";
-    if (this.claimed.has(marketId)) return "already-processing";
+    const decide = (result: FinalizationResult, extra?: Record<string, unknown>): FinalizationResult => {
+      this.logger?.info("finalization decision", { marketId, decision: result, ...extra });
+      return result;
+    };
+
+    if (this.finalized.has(marketId)) return decide("already-resolved");
+    if (this.claimed.has(marketId)) return decide("already-processing");
 
     this.claimed.add(marketId);
     try {
       const initial = await getState(marketId);
-      if (initial.cancelled) return "cancelled";
+      if (initial.cancelled) return decide("cancelled");
       if (initial.resolved) {
         this.finalized.add(marketId);
-        return "already-resolved";
+        return decide("already-resolved");
       }
 
       const outcome = await getAgreedOutcome(marketId);
-      if (outcome === null) return "below-threshold";
+      if (outcome === null) return decide("below-threshold");
 
       const current = await getState(marketId);
-      if (current.cancelled) return "cancelled";
+      if (current.cancelled) return decide("cancelled");
       if (current.resolved) {
         this.finalized.add(marketId);
-        return "already-resolved";
+        return decide("already-resolved");
       }
 
       await submit(marketId, outcome);
       this.finalized.add(marketId);
-      return "finalized";
+      return decide("finalized", { outcome });
     } finally {
       this.claimed.delete(marketId);
     }

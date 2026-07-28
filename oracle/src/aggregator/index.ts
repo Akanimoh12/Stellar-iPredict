@@ -1,6 +1,7 @@
 import { rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
+import { createLogger, type Logger } from "../log.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {
@@ -10,12 +11,16 @@ export interface AggregatorDependencies {
   close(): Promise<void>;
 }
 
-export function createProductionDependencies(config: AggregatorConfig): AggregatorDependencies {
+export function createProductionDependencies(
+  config: AggregatorConfig,
+  logger: Logger = createLogger({ level: config.LOG_LEVEL }),
+): AggregatorDependencies {
   const database = new Pool({ connectionString: config.DATABASE_URL });
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
+      logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
     },
     async listExpiredUnresolvedMarkets(now) {
       const result = await database.query<AggregatorMarket>(
@@ -29,22 +34,31 @@ export function createProductionDependencies(config: AggregatorConfig): Aggregat
     async processMarket() {
       // Threshold evaluation and finalization are composed by follow-up modules.
     },
-    async close() { await database.end(); },
+    async close() {
+      await database.end();
+      logger.info("aggregator stopped");
+    },
   };
 }
 
 export async function runAggregator(
   dependencies: AggregatorDependencies,
-  options: { signal: AbortSignal; pollIntervalMs: number },
+  options: { signal: AbortSignal; pollIntervalMs: number; logger?: Logger },
 ): Promise<void> {
+  const logger = options.logger;
   await dependencies.connect();
   try {
     while (!options.signal.aborted) {
+      const startedAt = Date.now();
       const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
       for (const market of markets) {
         if (options.signal.aborted) break;
         await dependencies.processMarket(market);
       }
+      logger?.info("poll iteration complete", {
+        marketsChecked: markets.length,
+        durationMs: Date.now() - startedAt,
+      });
       if (!options.signal.aborted) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, options.pollIntervalMs);
@@ -62,14 +76,16 @@ export async function runAggregator(
 
 export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = loadAggregatorConfig(env);
+  const logger = createLogger({ level: config.LOG_LEVEL, bindings: { service: "oracle-aggregator" } });
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   try {
-    await runAggregator(createProductionDependencies(config), {
+    await runAggregator(createProductionDependencies(config, logger), {
       signal: controller.signal,
       pollIntervalMs: config.POLL_INTERVAL_MS,
+      logger,
     });
   } finally {
     process.off("SIGINT", shutdown);

@@ -21,6 +21,32 @@ describe("council aggregator skeleton", () => {
     })).toThrow("COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE");
   });
 
+  it("rejects a threshold that is not a strict majority of the council", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "3",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    })).toThrow("COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)");
+  });
+
+  it("rejects an exact-half threshold on an even-sized council", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "6", COUNCIL_THRESHOLD: "3",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    })).toThrow("COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)");
+  });
+
+  it("accepts a strict-majority threshold on an even-sized council", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "6", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.COUNCIL_SIZE).toBe(6);
+    expect(config.COUNCIL_THRESHOLD).toBe(4);
+  });
+
   it("processes expired unresolved markets and closes cleanly", async () => {
     const controller = new AbortController();
     const dependencies: AggregatorDependencies = {

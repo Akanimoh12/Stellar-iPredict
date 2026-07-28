@@ -62,6 +62,7 @@ function createFakeRedis() {
   };
 }
 
+
 type FakeRedis = ReturnType<typeof createFakeRedis>;
 
 // ---------------------------------------------------------------------------

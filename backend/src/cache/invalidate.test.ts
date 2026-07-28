@@ -59,8 +59,9 @@ function createFakeRedis() {
       }
       return Promise.resolve(count);
     }),
-  };
+  } as any;
 }
+
 
 type FakeRedis = ReturnType<typeof createFakeRedis>;
 

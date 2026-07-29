@@ -7,13 +7,14 @@ SQL migrations live in [`migrations/`](./migrations), applied in filename order.
 
 ## Schema overview
 
-This document is the contributor-facing reference for the core database tables used by the backend and indexer. The current schema covers five tables:
+This document is the contributor-facing reference for the core database tables used by the backend and indexer. The current schema covers six tables:
 
 - `markets` — indexed copy of on-chain market data
 - `bets` — per-bettor positions per market
 - `leaderboard` — denormalized ranking snapshot keyed by wallet address
 - `events` — raw on-chain event audit log used for replay and backfills
 - `oracle_submissions` — oracle workflow submissions and status tracking
+- `council_votes` — Phase 1.5 council member outcome submissions per market
 
 ## Table reference
 
@@ -123,6 +124,26 @@ Indexes:
 - `idx_oracle_submissions_market_id` unique on `market_id`
 - `idx_oracle_submissions_status` on `status`
 
+### `council_votes`
+
+Tracks each Phase 1.5 council member's submitted outcome per market. One row
+per `(market_id, member)` — a member's vote can be updated but never
+double-counted. Read by the aggregator's tally to determine when threshold
+is reached.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `market_id` | `BIGINT` | Market identifier |
+| `member` | `CHAR(56)` | Council member wallet address |
+| `outcome` | `BOOLEAN` | The member's submitted outcome |
+| `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
+
+Primary key:
+- `(market_id, member)`
+
+Index:
+- `idx_council_votes_market_id` on `market_id`
+
 ## Entity relationship diagram
 
 ```mermaid
@@ -130,6 +151,7 @@ erDiagram
     MARKETS ||--o{ BETS : contains
     MARKETS ||--o{ EVENTS : generates
     MARKETS ||--o{ ORACLE_SUBMISSIONS : receives
+    MARKETS ||--o{ COUNCIL_VOTES : receives
 
     MARKETS {
         BIGINT id PK
@@ -187,6 +209,13 @@ erDiagram
         TIMESTAMP submitted_at
         oracle_submission_status status
     }
+
+    COUNCIL_VOTES {
+        BIGINT market_id PK
+        CHAR member PK
+        BOOLEAN outcome
+        TIMESTAMP submitted_at
+    }
 ```
 
 ## Migrations
@@ -197,6 +226,7 @@ Each migration is a numbered SQL file:
 migrations/
   0001_create_markets.sql
   0006_oracle_submissions.sql
+  0008_council_votes.sql
 ```
 
 Apply with the migration runner (tracked as its own issue) or manually:

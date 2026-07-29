@@ -23,6 +23,25 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   SOROBAN_RPC_URL: z.string().url(),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
+
+  /** Fraction (0–1) of dissenting votes that triggers a conflict flag. */
+  CONFLICT_THRESHOLD: unitFraction.default(0.3),
+
+  /** Hours past market expiry before a market is flagged as stuck. */
+  STUCK_MARKET_HOURS: positiveNumber.default(6),
+
+  /** Initial resolver key for signing finalization transactions. */
+  RESOLVER_KEY: z.string().min(1).optional(),
+
+  /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
+  FINALIZE_WEBHOOK_URL: z.string().url().optional(),
+
+  SUBMIT_MAX_RETRIES: positiveInteger.default(5),
+  SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(500),
+  SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
+  SUBMIT_FAILURE_ALERT_THRESHOLD: positiveInteger.default(3),
+  ALERT_WEBHOOK_URL: z.string().url().optional(),
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
   path: ["COUNCIL_THRESHOLD"],

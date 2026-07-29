@@ -4,6 +4,21 @@ import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
 import { createLogger, type Logger } from "../log.js";
 
 export { detectConflict, type ConflictReport } from "./conflict-detection.js";
+export {
+  buildAuditRecord,
+  collectCouncilAudit,
+  exportCouncilAudit,
+  toAuditCsv,
+  toAuditJson,
+  type AuditFormat,
+  type CouncilAuditInput,
+  type CouncilAuditRecord,
+} from "./council-audit.js";
+export {
+  notifyFinalized,
+  type FinalizeNotification,
+  type FinalizeNotifierOptions,
+} from "./finalize-notifier.js";
 export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
 export { ResolverKeyManager } from "./key-rotation.js";
 export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";

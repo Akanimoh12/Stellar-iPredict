@@ -1,4 +1,21 @@
 import { Pool, type PoolClient, type QueryResult } from "pg";
+
+const DEFAULT_POOL_SIZE = Number.parseInt(process.env.DB_POOL_SIZE ?? "10", 10);
+const IDLE_TIMEOUT_MS = Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS ?? "30000", 10);
+const CONNECTION_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_CONNECTION_TIMEOUT_MS ?? "5000",
+  10
+);
+
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL environment variable is required");
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: DEFAULT_POOL_SIZE,
+  idleTimeoutMillis: IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
 import { config } from "../config/index.js";
 
 const pool = new Pool({

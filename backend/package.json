@@ -2,6 +2,15 @@
   "name": "ipredict-backend",
   "version": "0.1.0",
   "private": true,
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
   "description": "Backend API and indexer for iPredict",
   "main": "index.js",
   "scripts": {

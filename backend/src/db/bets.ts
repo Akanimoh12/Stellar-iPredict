@@ -65,6 +65,9 @@ export function getBetsByMarket(
   return { bets: sliced, total, page, limit, totalPages };
 }
 
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+/** Seed bets for a market — for test use only. */
 /**
  * Return all bets across every market, each tagged with its market id.
  * Useful for cross-cutting aggregations (stats, admin reports, etc.).

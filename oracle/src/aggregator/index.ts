@@ -35,6 +35,27 @@ export {
   type OnChainSubmitter,
   type ResolveMarketResult,
 } from "../submitter/resolveMarket.js";
+export {
+  OffChainSubmitterService,
+  type DataAdapter,
+  type OffChainSubmitterOptions,
+  type OffChainSubmitterStore,
+  type SubmittedOutcomeResult,
+} from "../submitter/offChainSubmitter.js";
+export {
+  checkBondMinimum,
+  checkBondMinimumFromDb,
+  type BondAlert,
+  type BondMonitorOptions,
+  type OracleSubmissionRecord,
+} from "./bond-monitor.js";
+export {
+  checkCouncilInactivity,
+  checkCouncilInactivityFromDb,
+  type CouncilInactivityAlert,
+  type CouncilInactivityMonitorOptions,
+  type EscalatedMarketRecord,
+} from "./council-inactivity-monitor.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {

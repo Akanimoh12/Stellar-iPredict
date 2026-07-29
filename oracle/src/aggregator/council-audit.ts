@@ -98,14 +98,14 @@ export function toAuditCsv(records: readonly CouncilAuditRecord[]): string {
   return `${rows.join("\n")}\n`;
 }
 
-interface FinalizedMarketRow {
+interface FinalizedMarketRow extends Record<string, unknown> {
   market_id: string;
   decision: string | null;
   tx_hash: string | null;
   finalized_at: string | null;
 }
 
-interface CouncilVoteRow {
+interface CouncilVoteRow extends Record<string, unknown> {
   market_id: string;
   member: string;
   outcome: boolean;

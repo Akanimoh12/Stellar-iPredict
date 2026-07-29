@@ -4,6 +4,7 @@ export interface ResolveMarketResult {
   marketId: string;
   outcome: boolean;
   txHash: string;
+  dryRun?: boolean;
 }
 
 /** Builds, signs, and submits the on-chain resolution, returning the confirmed tx hash. */
@@ -25,6 +26,8 @@ export interface ResolveMarketDependencies {
   maxRetries?: number;
   /** Base linear backoff between retries, in ms (attempt * this value). */
   retryBackoffMs?: number;
+  /** When true, runs validation/recording without submitting on-chain. */
+  dryRun?: boolean;
 }
 
 const DEFAULT_MAX_RETRIES = 3;
@@ -49,6 +52,17 @@ export async function resolveMarketOnChain(
   if (!trimmedId) throw new Error("marketId is required");
 
   if (await deps.isAlreadyResolved(trimmedId)) return null;
+
+  if (deps.dryRun) {
+    const result: ResolveMarketResult = {
+      marketId: trimmedId,
+      outcome,
+      txHash: `dry-run-${trimmedId}-${Date.now()}`,
+      dryRun: true,
+    };
+    await deps.recordResult(result);
+    return result;
+  }
 
   const maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
   const retryBackoffMs = deps.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;

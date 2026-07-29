@@ -11,6 +11,26 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
+  "description": "Backend API and indexer for iPredict",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.0",
+    "@fastify/swagger": "^9.8.1",
+    "fastify": "^5.8.5",
+    "ioredis": "^5.11.1",
+    "pg": "^8.13.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/ioredis": "^4.28.10",
+    "@types/node": "^20.0.0",
     "@types/pg": "^8.11.10",
     "typescript": "^5.7.3",
     "vitest": "^2.1.9"

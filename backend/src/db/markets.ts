@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { MarketRow } from "./types.js";
 
 export type MarketFilter = "active" | "resolved" | "ended" | "cancelled" | "all";
 export type MarketSort = "newest" | "volume" | "ending_soon" | "bettors";
@@ -28,6 +29,8 @@ export type MarketRow = {
   created_at: Date;
   updated_at: Date;
 };
+// Re-export for backwards compatibility
+export type { MarketRow };
 
 export type GetMarketsResult = {
   rows: MarketRow[];
@@ -41,6 +44,45 @@ export type Queryable = {
 };
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+let pool: Pool | undefined;
+
+function getDefaultDb(): Queryable {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is required");
+  }
+
+  pool ??= new Pool({ connectionString });
+  return pool;
+}
+
+const MARKET_COLUMNS = `
+  id,
+  question,
+  image_url,
+  category,
+  end_time,
+  total_yes,
+  total_no,
+  resolved,
+  outcome,
+  cancelled,
+  creator,
+  bet_count,
+  created_at,
+  updated_at
+`;
+function getDefaultPool(): Pool {
+  if (!pool) {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      throw new Error("DATABASE_URL is required");
+    }
+    pool = new Pool({ connectionString: databaseUrl });
+  }
+
+  return pool;
+}
 
 const ORDER_BY: Record<MarketSort, string> = {
   newest: "created_at DESC",
@@ -75,6 +117,9 @@ export async function getMarkets(
   }: GetMarketsInput,
   db: Queryable = pool
 ): Promise<GetMarketsResult> {
+  db?: Queryable
+): Promise<GetMarketsResult> {
+  const queryable = db ?? getDefaultPool();
   if (!Number.isInteger(page) || page < 1) {
     throw new Error("page must be a positive integer");
   }
@@ -115,6 +160,7 @@ export async function getMarkets(
       bet_count,
       created_at,
       updated_at
+      ${MARKET_COLUMNS}
     FROM markets
     ${whereSql}
     ORDER BY ${ORDER_BY[sort]}
@@ -128,6 +174,8 @@ export async function getMarkets(
   const [{ rows }, { rows: totalRows }] = await Promise.all([
     db.query<MarketRow>(rowsQuery, rowsValues),
     db.query<{ total: number }>(countQuery, baseValues)
+    queryable.query<MarketRow>(rowsQuery, rowsValues),
+    queryable.query<{ total: number }>(countQuery, baseValues)
   ]);
 
   return {
@@ -136,4 +184,24 @@ export async function getMarkets(
     page,
     limit
   };
+}
+
+export async function getMarketById(
+  id: number,
+  db: Queryable = getDefaultDb()
+): Promise<MarketRow | null> {
+  if (!Number.isInteger(id) || id < 1) {
+    throw new Error("id must be a positive integer");
+  }
+
+  const query = `
+    SELECT
+      ${MARKET_COLUMNS}
+    FROM markets
+    WHERE id = $1
+    LIMIT 1
+  `;
+
+  const { rows } = await db.query<MarketRow>(query, [id]);
+  return rows[0] ?? null;
 }

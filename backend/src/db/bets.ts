@@ -1,3 +1,6 @@
+import { Pool } from "pg";
+import { BetRow } from "./types.js";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** A single bet placed by a user on a market. */
@@ -17,6 +20,9 @@ export interface PaginatedBets {
   totalPages: number;
 }
 
+// Re-export for backwards compatibility
+export type { BetRow };
+
 // ── Module-private store ───────────────────────────────────────────────────────
 
 const store = new Map<number, Bet[]>();
@@ -29,6 +35,8 @@ const store = new Map<number, Bet[]>();
  * @param marketId - The market to query (must be >= 0).
  * @param page     - 0-based page index (must be >= 0).
  * @param limit    - Number of bets per page (must be > 0).
+ * @param page - 0-based page index (must be >= 0).
+ * @param limit - Number of bets per page (must be > 0).
  * @returns Paginated result with bets, total count, and page metadata.
  */
 export function getBetsByMarket(
@@ -60,11 +68,37 @@ export function getBetsByMarket(
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 /** Seed bets for a market — for test use only. */
+/**
+ * Fetches all bets placed by a specific bettor.
+ *
+ * @param pool Database pool connection
+ * @param address The Stellar public key (address) of the bettor
+ * @returns Array of bets made by the given bettor
+ */
+export async function getBetsByBettor(
+  pool: Pool,
+  address: string
+): Promise<BetRow[]> {
+  const query = `
+    SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
+    FROM bets
+    WHERE bettor = $1
+    ORDER BY created_at DESC;
+  `;
+
+  const result = await pool.query<BetRow>(query, [address]);
+  return result.rows;
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+/** Seed bets for a market - for test use only. */
 export function seedBets(marketId: number, bets: Bet[]): void {
   store.set(marketId, bets);
 }
 
 /** Clear all stored bets — for test isolation only. */
+/** Clear all stored bets - for test isolation only. */
 export function clearBets(): void {
   store.clear();
 }

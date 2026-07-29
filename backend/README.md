@@ -94,6 +94,28 @@ Live already:
   (`METHOD_NOT_ALLOWED`) carrying an `Allow` header, rather than Fastify's
   default 404 that reads as "this resource does not exist" when it does.
 
+## Testing
+
+Most of `npm test` is unit tests against a stubbed `Queryable`/`Pool`, so it
+runs with no external services. A smaller set of **integration** tests in
+[`test/setup.test.ts`](test/setup.test.ts) boots the real app (`buildServer`,
+no mocked query layer) against an actual Postgres instance:
+
+```bash
+cd ../infra && docker compose -f docker-compose.dev.yml up -d postgres
+cd ../backend
+psql "postgres://ipredict:ipredict@localhost:5432/postgres" -c "CREATE DATABASE ipredict_test"
+npm test
+```
+
+[`test/setup.ts`](test/setup.ts) applies `db/migrations` to whatever database
+`TEST_DATABASE_URL` (or `DATABASE_URL`) points at — defaulting to
+`postgres://ipredict:ipredict@localhost:5432/ipredict_test` — and truncates
+the managed tables between tests. If that database isn't reachable, the
+integration suite skips itself instead of failing, so `npm test` still passes
+on a machine with no Postgres running (there's no CI wired up yet — see
+`CONTRIBUTING.md`).
+
 ## Contributing
 
 1. Pick an open issue labelled `area:backend` (or `area:api`).

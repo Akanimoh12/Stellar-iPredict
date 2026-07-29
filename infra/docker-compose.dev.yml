@@ -1,0 +1,36 @@
+# Local development infrastructure: Postgres + Redis only.
+# The app services (api, indexer, oracle) run on the host via `npm run dev`
+# during development. See docker-compose.production.yml for the full stack.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ipredict
+      POSTGRES_PASSWORD: ipredict
+      POSTGRES_DB: ipredict
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ipredict"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:

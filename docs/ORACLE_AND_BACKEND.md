@@ -359,6 +359,49 @@ while (true) {
 }
 ```
 
+### Leaderboard Rebuild Job
+
+When the `events` table needs a clean backfill, rebuild the leaderboard snapshot
+from the raw event log with the standalone job in `indexer/src/`.
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `events` and `leaderboard`.
+2. From `indexer/`, run `npm run rebuild:leaderboard`.
+3. Use `npm run rebuild:leaderboard -- --dry-run` first if you want to validate the replay without mutating the table.
+4. If you only want to replay from a specific ledger onward, pass `--since-ledger <number>`.
+
+The job replays claim and referral-style events, clears `leaderboard`, and
+re-inserts the derived rows in score order.
+
+Set `LOG_LEVEL=debug|info|warn|error` to control how much JSON output the job
+emits while it runs. Each pass logs a structured summary with the number of
+events processed and the current ledger lag.
+
+### bet_count Backfill Job
+
+`markets.bet_count` is maintained incrementally as bet events are indexed, so it
+can drift if events are reprocessed, dropped to the dead-letter queue, or the
+`bets` table is repaired out of band. This job recomputes `bet_count` for every
+market directly from the authoritative `bets` table (which is keyed on
+`(market_id, bettor)`, so the count is the number of bettors per market).
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `markets` and `bets`.
+2. From `indexer/`, run `npm run backfill:bet-count`.
+3. Use `npm run backfill:bet-count -- --dry-run` first to report drift without writing (the recompute runs inside a transaction that is rolled back).
+
+The job recomputes counts for all markets — including resetting markets with no
+bets back to `0` — and only writes rows whose stored value actually differs. It
+logs a structured summary with the number of markets checked and corrected.
+
+The same recompute also runs automatically after each poll iteration when the
+indexer runtime is started with `recomputeBetCounts` enabled (mirroring
+`recomputeTotals`).
+
+Set `LOG_LEVEL=debug|info|warn|error` to control the JSON output volume.
+
 ---
 
 ### API Endpoints
@@ -457,6 +500,24 @@ services:
     image: redis:7-alpine
     volumes:
       - redisdata:/data
+```
+
+#### Indexer Image Runbook
+
+Build the production indexer image from the `indexer/` directory. The Dockerfile
+lives under `indexer/src/` so the build context can still include
+`package-lock.json`, `tsconfig.json`, and the full source tree.
+
+```bash
+cd indexer
+docker build -f src/Dockerfile -t ipredict-indexer:local .
+```
+
+Run the image with the same environment variables documented in
+`indexer/.env.example`.
+
+```bash
+docker run --rm --env-file .env ipredict-indexer:local
 ```
 
 ---

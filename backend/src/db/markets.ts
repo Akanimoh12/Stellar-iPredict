@@ -21,6 +21,7 @@ export type MarketRow = {
   end_time: string;
   total_yes: string;
   total_no: string;
+  volume: string;
   resolved: boolean;
   outcome: boolean | null;
   cancelled: boolean;
@@ -44,6 +45,10 @@ export type Queryable = {
 };
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+const ORDER_BY: Record<MarketSort, string> = {
+  newest: "created_at DESC",
+  volume: "volume DESC, created_at DESC",
 let pool: Pool | undefined;
 
 function getDefaultDb(): Queryable {
@@ -141,6 +146,10 @@ export async function getMarkets(
     whereConditions.push(filterClause);
   }
 
+  if (sort === "ending_soon") {
+    whereConditions.push("resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
+  }
+
   const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
   const offset = (page - 1) * limit;
 
@@ -153,6 +162,7 @@ export async function getMarkets(
       end_time,
       total_yes,
       total_no,
+      (total_yes + total_no) AS volume,
       resolved,
       outcome,
       cancelled,

@@ -14,6 +14,7 @@ describe("getMarkets", () => {
         end_time: "1735689600",
         total_yes: "10.0000000",
         total_no: "5.0000000",
+        volume: "15.0000000",
         resolved: false,
         outcome: null,
         cancelled: false,
@@ -53,6 +54,8 @@ describe("getMarkets", () => {
     expect(firstCall[0]).toContain("FROM markets");
     expect(firstCall[0]).toContain("WHERE category = $1");
     expect(firstCall[0]).toContain("resolved = false");
+    expect(firstCall[0]).toContain("(total_yes + total_no) AS volume");
+    expect(firstCall[0]).toContain("ORDER BY volume DESC");
     expect(firstCall[0]).toContain("ORDER BY (total_yes + total_no) DESC");
     expect(firstCall[1]).toEqual(["Crypto", 10, 10]);
 
@@ -67,6 +70,25 @@ describe("getMarkets", () => {
       limit: 10
     });
   });
+
+  it("excludes resolved and cancelled markets when sort is ending_soon", async () => {
+    const queryMock = vi
+      .fn<Queryable["query"]>()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    const db: Queryable = {
+      query: <T>(text: string, values?: unknown[]) =>
+        queryMock(text, values) as Promise<{ rows: T[] }>
+    };
+
+    await getMarkets({ sort: "ending_soon" }, db);
+
+    expect(queryMock).toHaveBeenCalledTimes(2);
+    const firstCall = queryMock.mock.calls[0];
+    expect(firstCall[0]).toContain("resolved = false AND cancelled = false");
+    expect(firstCall[0]).toContain("end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
+    expect(firstCall[0]).toContain("ORDER BY end_time ASC");
 });
 
 describe("getMarketById", () => {

@@ -77,3 +77,26 @@ export interface EventRow {
   payload: unknown; // JSONB
   created_at: Date;
 }
+
+// ── Oracle Submission Row ───────────────────────────────────────────────────
+
+export type OracleSubmissionStatus =
+  | "submitted"
+  | "challenged"
+  | "finalized"
+  | "rejected";
+
+/**
+ * Represents a row from the oracle_submissions table.
+ * Mirrors the schema defined in db/migrations/0006_oracle_submissions.sql
+ */
+export interface OracleSubmissionRow {
+  id: number;
+  market_id: number;
+  submitter: string;
+  outcome: string;
+  bond_amount: string; // NUMERIC as string
+  submitted_at: Date;
+  status: OracleSubmissionStatus;
+}
+

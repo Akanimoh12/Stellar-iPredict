@@ -39,6 +39,61 @@ export {
 export { CouncilVoteManager } from "./council-votes.js";
 export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
 
+export { detectConflict, type ConflictReport } from "./conflict-detection.js";
+export {
+  buildAuditRecord,
+  collectCouncilAudit,
+  exportCouncilAudit,
+  toAuditCsv,
+  toAuditJson,
+  type AuditFormat,
+  type CouncilAuditInput,
+  type CouncilAuditRecord,
+} from "./council-audit.js";
+export {
+  notifyFinalized,
+  type FinalizeNotification,
+  type FinalizeNotifierOptions,
+} from "./finalize-notifier.js";
+export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
+export { ResolverKeyManager } from "./key-rotation.js";
+export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
+export {
+  computeTally,
+  createPostgresSubmissionStore,
+  SubmissionTracker,
+  type MarketTally,
+  type SubmissionStore,
+} from "./tally.js";
+export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
+export {
+  resolveMarketOnChain,
+  createStellarSubmitter,
+  type OnChainSubmitter,
+  type ResolveMarketResult,
+} from "../submitter/resolveMarket.js";
+export {
+  OffChainSubmitterService,
+  type DataAdapter,
+  type OffChainSubmitterOptions,
+  type OffChainSubmitterStore,
+  type SubmittedOutcomeResult,
+} from "../submitter/offChainSubmitter.js";
+export {
+  checkBondMinimum,
+  checkBondMinimumFromDb,
+  type BondAlert,
+  type BondMonitorOptions,
+  type OracleSubmissionRecord,
+} from "./bond-monitor.js";
+export {
+  checkCouncilInactivity,
+  checkCouncilInactivityFromDb,
+  type CouncilInactivityAlert,
+  type CouncilInactivityMonitorOptions,
+  type EscalatedMarketRecord,
+} from "./council-inactivity-monitor.js";
+
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {
   connect(): Promise<void>;

@@ -158,7 +158,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       }
     );
 
-    createMarketsRoutes(routes, undefined, redis);
+    createMarketsRoutes(routes, databasePool, redis);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.

@@ -416,3 +416,8 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 Built by **Akan** for the Stellar Build-a-10M-Startup challenge.
 
 - Stellar Admin Wallet: `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD`
+
+## Backend Database Foundation
+
+Added Oracle submissions table (migration 0006). Implemented typed market upsert helper in backend/src/db/markets.ts.
+

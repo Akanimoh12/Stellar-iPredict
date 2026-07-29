@@ -1,4 +1,17 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
+import { Pool } from "pg";
+import { LeaderboardRow } from "./types.js";
+
+export type SortOption = "points" | "bets";
+
+export interface GetLeaderboardParams {
+  limit: number;
+  offset: number;
+  sort: SortOption;
+}
+
+// Re-export for backwards compatibility
+export type { LeaderboardRow };
 
 /** Persistent leaderboard record for a single player. */
 export interface LeaderboardEntry {
@@ -21,6 +34,8 @@ const store = new Map<string, LeaderboardEntry>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const store = new Map<string, LeaderboardEntry>();
+
 function generateId(): string {
   return `lb_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -38,6 +53,52 @@ function generateId(): string {
  * @param pointsDelta - Points to add (must be >= 0).
  * @param outcome    - Whether the player won or lost.
  * @returns `TransactionResult` indicating success or failure.
+/**
+ * Fetches a paginated and sorted leaderboard.
+ *
+ * @param pool Database pool connection
+ * @param params Pagination and sorting parameters
+ * @returns Array of leaderboard entries
+ */
+export async function getLeaderboard(
+  pool: Pool,
+  params: GetLeaderboardParams
+): Promise<LeaderboardRow[]> {
+  const { limit, offset, sort } = params;
+
+  if (sort === "bets") {
+    const query = `
+      SELECT address, display_name, points, won_bets, lost_bets, updated_at
+      FROM leaderboard
+      ORDER BY (won_bets + lost_bets) DESC
+      LIMIT $1 OFFSET $2;
+    `;
+    const result = await pool.query<LeaderboardRow>(query, [limit, offset]);
+    return result.rows;
+  }
+
+  const query = `
+    SELECT address, display_name, points, won_bets, lost_bets, updated_at
+    FROM leaderboard
+    ORDER BY points DESC
+    LIMIT $1 OFFSET $2;
+  `;
+  const result = await pool.query<LeaderboardRow>(query, [limit, offset]);
+  return result.rows;
+}
+
+
+export async function getLeaderboardTotal(pool: Pool): Promise<number> {
+  const result = await pool.query<{ total: string }>(
+    "SELECT COUNT(*)::text AS total FROM leaderboard;",
+    []
+  );
+
+  return Number(result.rows[0]?.total ?? 0);
+}
+
+/**
+ * Insert or update a leaderboard entry.
  */
 export function upsertLeaderboardEntry(
   address: string,

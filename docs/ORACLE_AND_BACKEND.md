@@ -67,6 +67,10 @@ const DISPUTE_WINDOW: u64 = 172800;  // 48 hours to dispute
 
 ### Option B — Optimistic Oracle (For Binary Markets)
 
+> **Implemented** in `contracts/prediction_market/src/lib.rs`. The contract
+> entrypoints are `submit_outcome`, `challenge`, `finalize_outcome` and
+> `resolve_challenge`; see "Optimistic Oracle Contract API" below.
+
 **Model:** Anyone can submit an outcome. There is a challenge period. If unchallenged, it finalizes. If challenged, escalates to a dispute council.
 
 #### States
@@ -96,6 +100,79 @@ const DISPUTER_BOND:  i128 = 200_0000000;  // 200 XLM (must exceed submitter)
 - Fast resolution for obvious outcomes (bond posted, no challenge → auto-finalize in 24h)
 - Challenge mechanism adds security for disputed outcomes
 - No oracle providers need to be registered in advance
+
+---
+
+### Optimistic Oracle Contract API
+
+Constants as deployed (`contracts/prediction_market/src/lib.rs`):
+
+```rust
+const SUBMITTER_BOND:  i128 = 100_0000000; // 100 XLM — minimum submitter bond
+const DISPUTER_BOND:   i128 = 200_0000000; // 200 XLM — minimum disputer bond
+const CHALLENGE_WINDOW: u64 = 86_400;      // 24h to challenge a submission
+const COUNCIL_WINDOW:   u64 = 259_200;     // 72h for the council to rule
+const COUNCIL_FEE_BPS: i128 = 1_000;       // 10% of the loser's bond
+```
+
+| Function | Caller | Effect |
+|---|---|---|
+| `submit_outcome(submitter, market_id, outcome, bond)` | anyone | Escrows `bond` (≥ `SUBMITTER_BOND`), records the submission in state `Submitted`, starts the challenge window. Market must be expired, unresolved and not cancelled; one submission per market. |
+| `challenge(challenger, market_id, bond)` | anyone | Escrows `bond` (≥ `DISPUTER_BOND` **and** strictly greater than the submitter's bond) inside the window, asserts the opposite outcome, moves the submission to `Escalated`. |
+| `finalize_outcome(market_id)` | anyone | After the challenge window with no challenge: returns the bond in full and resolves the market with the submitted outcome. |
+| `resolve_challenge(caller, market_id, outcome)` | admin or registered resolver (the council) | Rules on an escalated market, distributes the bonds and resolves the market. |
+| `get_oracle_submission(market_id)` | view | Returns the full `OracleSubmission` record. |
+
+Bond settlement on a council ruling (escrow always nets to zero):
+
+| Ruling | Winner receives | Credited to `AccumulatedFees` |
+|---|---|---|
+| Submitter correct | own bond + ½ of the disputer bond | remainder of the disputer bond (includes the 10% council fee) |
+| Disputer correct | both bonds, less the 10% council fee | 10% council fee on the submitter bond |
+
+An unchallenged finalization takes no fee — the bond is returned whole.
+
+If a market is cancelled or force-resolved (via `resolve_market`) while an
+oracle submission is open, the finalizers still run so bonds are never stranded
+in escrow — they simply skip the resolution step and leave the market as it is.
+
+Oracle-specific contract errors: `21` submission exists, `22` submission not
+found, `23` already challenged, `24` challenge window not elapsed, `25` bond
+transfer failed (reserved — bond escrow traps rather than returning it),
+`26` challenge window closed, `27` invalid state transition, `28` bond too
+small. Codes `21`–`25` were already declared on `implementation-drips` and keep
+their numbering and names.
+
+---
+
+### Oracle Event Topics
+
+Every state transition publishes one typed event. Topics are
+`(Symbol "oracle", Symbol <action>)` — the same domain/action shape the indexer
+already routes on for `mkt` and `referral`. Event data is a map keyed by the
+field names below, so handlers read `payload.market_id`, `payload.outcome`, …
+exactly as `market_resolved` does.
+
+| Topics | Emitted by | Data fields |
+|---|---|---|
+| `["oracle", "submitted"]` | `submit_outcome` | `market_id: u64`, `submitter: Address`, `outcome: bool`, `bond: i128`, `submitted_at: u64`, `challenge_deadline: u64` |
+| `["oracle", "challenged"]` | `challenge` | `market_id: u64`, `challenger: Address`, `outcome: bool` (challenger's side), `bond: i128`, `submitter: Address`, `submitter_bond: i128`, `challenged_at: u64` |
+| `["oracle", "escalated"]` | `challenge` | `market_id: u64`, `submitter: Address`, `challenger: Address`, `outcome: bool` (disputed submission), `total_bond: i128`, `escalated_at: u64`, `council_deadline: u64` |
+| `["oracle", "finalized"]` | `finalize_outcome`, `resolve_challenge` | `market_id: u64`, `outcome: bool`, `challenged: bool`, `submitter: Address`, `challenger: Option<Address>`, `submitter_payout: i128`, `challenger_payout: i128`, `council_fee: i128`, `protocol_credit: i128`, `finalized_at: u64` |
+
+Notes for indexer handlers:
+
+- `challenge` emits `challenged` **and** `escalated` in that order, in one
+  transaction — the `Challenged` state is never observable on-chain.
+- `finalized.challenged` distinguishes the two paths: `false` for an
+  unchallenged auto-finalization (all payout/fee fields are the returned bond
+  and zeros), `true` for a council ruling.
+- `protocol_credit` is the total added to `AccumulatedFees`; `council_fee` is
+  the 10% share of the loser's bond within it.
+- A `finalized` event normally means the market is now resolved, so it should
+  invalidate the same caches as `market_resolved`. The exception is a market
+  cancelled or force-resolved out of band — there the event only settles bonds,
+  so handlers should read market state rather than assume the outcome.
 
 ---
 
@@ -359,6 +436,49 @@ while (true) {
 }
 ```
 
+### Leaderboard Rebuild Job
+
+When the `events` table needs a clean backfill, rebuild the leaderboard snapshot
+from the raw event log with the standalone job in `indexer/src/`.
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `events` and `leaderboard`.
+2. From `indexer/`, run `npm run rebuild:leaderboard`.
+3. Use `npm run rebuild:leaderboard -- --dry-run` first if you want to validate the replay without mutating the table.
+4. If you only want to replay from a specific ledger onward, pass `--since-ledger <number>`.
+
+The job replays claim and referral-style events, clears `leaderboard`, and
+re-inserts the derived rows in score order.
+
+Set `LOG_LEVEL=debug|info|warn|error` to control how much JSON output the job
+emits while it runs. Each pass logs a structured summary with the number of
+events processed and the current ledger lag.
+
+### bet_count Backfill Job
+
+`markets.bet_count` is maintained incrementally as bet events are indexed, so it
+can drift if events are reprocessed, dropped to the dead-letter queue, or the
+`bets` table is repaired out of band. This job recomputes `bet_count` for every
+market directly from the authoritative `bets` table (which is keyed on
+`(market_id, bettor)`, so the count is the number of bettors per market).
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `markets` and `bets`.
+2. From `indexer/`, run `npm run backfill:bet-count`.
+3. Use `npm run backfill:bet-count -- --dry-run` first to report drift without writing (the recompute runs inside a transaction that is rolled back).
+
+The job recomputes counts for all markets — including resetting markets with no
+bets back to `0` — and only writes rows whose stored value actually differs. It
+logs a structured summary with the number of markets checked and corrected.
+
+The same recompute also runs automatically after each poll iteration when the
+indexer runtime is started with `recomputeBetCounts` enabled (mirroring
+`recomputeTotals`).
+
+Set `LOG_LEVEL=debug|info|warn|error` to control the JSON output volume.
+
 ---
 
 ### API Endpoints
@@ -457,6 +577,24 @@ services:
     image: redis:7-alpine
     volumes:
       - redisdata:/data
+```
+
+#### Indexer Image Runbook
+
+Build the production indexer image from the `indexer/` directory. The Dockerfile
+lives under `indexer/src/` so the build context can still include
+`package-lock.json`, `tsconfig.json`, and the full source tree.
+
+```bash
+cd indexer
+docker build -f src/Dockerfile -t ipredict-indexer:local .
+```
+
+Run the image with the same environment variables documented in
+`indexer/.env.example`.
+
+```bash
+docker run --rm --env-file .env ipredict-indexer:local
 ```
 
 ---

@@ -20,6 +20,7 @@ export type MarketRow = {
   end_time: string;
   total_yes: string;
   total_no: string;
+  volume: string;
   resolved: boolean;
   outcome: boolean | null;
   cancelled: boolean;
@@ -44,7 +45,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 const ORDER_BY: Record<MarketSort, string> = {
   newest: "created_at DESC",
-  volume: "(total_yes + total_no) DESC, created_at DESC",
+  volume: "volume DESC, created_at DESC",
   ending_soon: "end_time ASC",
   bettors: "bet_count DESC, created_at DESC"
 };
@@ -112,6 +113,7 @@ export async function getMarkets(
       end_time,
       total_yes,
       total_no,
+      (total_yes + total_no) AS volume,
       resolved,
       outcome,
       cancelled,

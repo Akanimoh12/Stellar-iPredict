@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
     Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
@@ -26,11 +26,18 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
-// Challenge window duration (seconds) after a submission before it can be auto‑finalized
-const CHALLENGE_WINDOW: u64 = 86_400; // 24 hours
-// Bond constants (example values, adjust as needed)
-const SUBMITTER_BOND: i128 = 100_0000000; // 100 XLM in stroops
-const DISPUTER_BOND: i128 = 200_0000000; // 200 XLM in stroops
+
+// ── Optimistic oracle (docs/ORACLE_AND_BACKEND.md — Option B) ─────────────────
+// Anyone may post an outcome with a bond once a market has expired. If nobody
+// challenges inside CHALLENGE_WINDOW the outcome finalizes and the bond is
+// returned. A challenger posting a strictly larger bond escalates the market to
+// the resolution council.
+
+const SUBMITTER_BOND: i128 = 100_0000000; // 100 XLM — minimum submitter bond
+const DISPUTER_BOND: i128  = 200_0000000; // 200 XLM — minimum disputer bond
+const CHALLENGE_WINDOW: u64 = 86_400;     // 24h to challenge a submission
+const COUNCIL_WINDOW: u64   = 259_200;    // 72h for the council to rule
+const COUNCIL_FEE_BPS: i128 = 1_000;      // 10% of the loser's bond
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -58,11 +65,15 @@ pub enum MarketError {
     NotAuthorized      = 18,
     MarketNotCancelled = 19,
     RateLimitExceeded  = 20,
-    SubmissionExists   = 21,
-    SubmissionNotFound = 22,
-    AlreadyChallenged  = 23,
-    ChallengeWindowNotElapsed = 24,
-    BondTransferFailed = 25,
+    // ── Optimistic oracle ──
+    SubmissionExists   = 21,          // a submission already exists for this market
+    SubmissionNotFound = 22,          // no submission exists for this market
+    AlreadyChallenged  = 23,          // the submission has already been disputed
+    ChallengeWindowNotElapsed = 24,   // challenge window has not elapsed yet
+    BondTransferFailed = 25,          // reserved: bond escrow could not be moved
+    OracleWindowClosed = 26,          // challenge window has already elapsed
+    OracleInvalidState = 27,          // transition not legal from the current state
+    OracleBondTooSmall = 28,          // bond below the minimum / not larger than submitter's
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -82,7 +93,7 @@ pub enum DataKey {
     FeeRecipient(Address),
     HasReferrer(Address),
     RateWindow,            // packed u64: high32=window_start_hi, low32=count
-    Submission(u64),       // stores Submission struct for optimistic oracle
+    Submission(u64),       // market_id → OracleSubmission (optimistic oracle)
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -143,6 +154,99 @@ pub struct Bet {
     pub amount:  i128,
     pub is_yes:  bool,
     pub claimed: bool,
+}
+
+// ── Optimistic Oracle State Machine ───────────────────────────────────────────
+//
+//   OPEN → SUBMITTED (anyone posts outcome + bond)
+//        → CHALLENGED (disputer posts larger bond within CHALLENGE_WINDOW)
+//          → ESCALATED (council rules within COUNCIL_WINDOW)
+//            → FINALIZED (council decision, bonds distributed)
+//        → FINALIZED (unchallenged after CHALLENGE_WINDOW)
+//
+// `Challenged` is the instant a disputer's bond lands; the same call escalates
+// to the council, so it is only ever observed through the `challenged` event.
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OracleState {
+    Submitted,
+    Challenged,
+    Escalated,
+    Finalized,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    pub market_id:          u64,
+    pub submitter:          Address,
+    pub outcome:            bool,    // outcome asserted by the submitter
+    pub bond:               i128,    // submitter bond held in escrow
+    pub state:              OracleState,
+    pub submitted_at:       u64,
+    pub challenge_deadline: u64,     // submitted_at + CHALLENGE_WINDOW
+    pub challenger:         Option<Address>,
+    pub challenger_bond:    i128,    // 0 while unchallenged
+    pub escalated_at:       u64,     // 0 while unchallenged
+    pub council_deadline:   u64,     // escalated_at + COUNCIL_WINDOW, 0 while unchallenged
+    pub finalized_at:       u64,     // 0 until finalized
+}
+
+// ── Oracle Events ─────────────────────────────────────────────────────────────
+// Topics are (Symbol "oracle", Symbol <action>) so the indexer can route on
+// domain/action exactly as it does for "mkt"/"referral". Payload structs are
+// emitted as maps — field names below are the indexer contract.
+// See docs/ORACLE_AND_BACKEND.md → "Oracle Event Topics".
+
+#[contractevent(topics = ["oracle", "submitted"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmittedEvent {
+    pub market_id:          u64,
+    pub submitter:          Address,
+    pub outcome:            bool,
+    pub bond:               i128,
+    pub submitted_at:       u64,
+    pub challenge_deadline: u64,
+}
+
+#[contractevent(topics = ["oracle", "challenged"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleChallengedEvent {
+    pub market_id:      u64,
+    pub challenger:     Address,
+    pub outcome:        bool, // outcome asserted by the challenger (opposite side)
+    pub bond:           i128,
+    pub submitter:      Address,
+    pub submitter_bond: i128,
+    pub challenged_at:  u64,
+}
+
+#[contractevent(topics = ["oracle", "escalated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleEscalatedEvent {
+    pub market_id:        u64,
+    pub submitter:        Address,
+    pub challenger:       Address,
+    pub outcome:          bool, // outcome under dispute (the submitter's)
+    pub total_bond:       i128, // submitter bond + challenger bond in escrow
+    pub escalated_at:     u64,
+    pub council_deadline: u64,
+}
+
+#[contractevent(topics = ["oracle", "finalized"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleFinalizedEvent {
+    pub market_id:         u64,
+    pub outcome:           bool,
+    pub challenged:        bool, // false = unchallenged auto-finalize, true = council ruling
+    pub submitter:         Address,
+    pub challenger:        Option<Address>,
+    pub submitter_payout:  i128,
+    pub challenger_payout: i128,
+    pub council_fee:       i128, // 10% of the loser's bond (0 when unchallenged)
+    pub protocol_credit:   i128, // total added to AccumulatedFees (fee + residual)
+    pub finalized_at:      u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -419,23 +523,272 @@ impl PredictionMarketContract {
         if market.cancelled { return Err(MarketError::MarketCancelled); }
         if env.ledger().timestamp() < market.end_time { return Err(MarketError::MarketNotExpired); }
 
-        let winning_side = if outcome { market.total_yes } else { market.total_no };
-        if winning_side == 0 {
-            let total_pool = market.total_yes + market.total_no;
-            if total_pool > 0 {
-                let mut acc: i128 = env.storage().instance()
-                    .get(&DataKey::AccumulatedFees).unwrap_or(0);
-                acc += total_pool;
-                env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
-            }
+        Self::apply_resolution(&env, &mut market, outcome);
+        Ok(())
+    }
+
+    // ── Optimistic Oracle ─────────────────────────────────────────────────
+    // Bonded, permissionless resolution. See docs/ORACLE_AND_BACKEND.md.
+
+    /// Post an outcome for an expired market with a bond, opening the challenge
+    /// window. Callable by anyone. The bond is escrowed in this contract and
+    /// returned on finalization (or forfeited if a challenge succeeds).
+    pub fn submit_outcome(
+        env: Env,
+        submitter: Address,
+        market_id: u64,
+        outcome: bool,
+        bond: i128,
+    ) -> Result<(), MarketError> {
+        submitter.require_auth();
+
+        if bond < SUBMITTER_BOND { return Err(MarketError::OracleBondTooSmall); }
+
+        let market = Self::load_market(&env, market_id)?;
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+        if env.ledger().timestamp() < market.end_time {
+            return Err(MarketError::MarketNotExpired);
+        }
+        if env.storage().persistent().has(&DataKey::Submission(market_id)) {
+            return Err(MarketError::SubmissionExists);
         }
 
-        market.resolved = true;
-        market.outcome = outcome;
-        let mkt_key = DataKey::Market(market_id);
-        env.storage().persistent().set(&mkt_key, &market);
-        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        // Escrow the bond before recording anything.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&submitter, &env.current_contract_address(), &bond);
+
+        let now = env.ledger().timestamp();
+        let challenge_deadline = now + CHALLENGE_WINDOW;
+
+        let submission = OracleSubmission {
+            market_id,
+            submitter: submitter.clone(),
+            outcome,
+            bond,
+            state: OracleState::Submitted,
+            submitted_at: now,
+            challenge_deadline,
+            challenger: None,
+            challenger_bond: 0,
+            escalated_at: 0,
+            council_deadline: 0,
+            finalized_at: 0,
+        };
+        Self::store_submission(&env, &submission);
+
+        OracleSubmittedEvent {
+            market_id,
+            submitter,
+            outcome,
+            bond,
+            submitted_at: now,
+            challenge_deadline,
+        }
+        .publish(&env);
         Ok(())
+    }
+
+    /// Dispute an open submission by posting a strictly larger bond inside the
+    /// challenge window. The challenger implicitly asserts the opposite outcome.
+    /// Escalates straight to the council — emits both `challenged` and
+    /// `escalated`.
+    pub fn challenge(
+        env: Env,
+        challenger: Address,
+        market_id: u64,
+        bond: i128,
+    ) -> Result<(), MarketError> {
+        challenger.require_auth();
+
+        let mut submission = Self::load_submission(&env, market_id)?;
+        match submission.state {
+            OracleState::Submitted => {}
+            OracleState::Challenged | OracleState::Escalated => {
+                return Err(MarketError::AlreadyChallenged)
+            }
+            OracleState::Finalized => return Err(MarketError::OracleInvalidState),
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= submission.challenge_deadline {
+            return Err(MarketError::OracleWindowClosed);
+        }
+        if bond < DISPUTER_BOND || bond <= submission.bond {
+            return Err(MarketError::OracleBondTooSmall);
+        }
+
+        let market = Self::load_market(&env, market_id)?;
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+
+        // Escrow the disputer bond alongside the submitter's.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&challenger, &env.current_contract_address(), &bond);
+
+        let council_deadline = now + COUNCIL_WINDOW;
+        submission.state = OracleState::Escalated;
+        submission.challenger = Some(challenger.clone());
+        submission.challenger_bond = bond;
+        submission.escalated_at = now;
+        submission.council_deadline = council_deadline;
+        Self::store_submission(&env, &submission);
+
+        OracleChallengedEvent {
+            market_id,
+            challenger: challenger.clone(),
+            outcome: !submission.outcome,
+            bond,
+            submitter: submission.submitter.clone(),
+            submitter_bond: submission.bond,
+            challenged_at: now,
+        }
+        .publish(&env);
+        OracleEscalatedEvent {
+            market_id,
+            submitter: submission.submitter.clone(),
+            challenger,
+            outcome: submission.outcome,
+            total_bond: submission.bond + bond,
+            escalated_at: now,
+            council_deadline,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Finalize an unchallenged submission once the challenge window has
+    /// elapsed. Callable by anyone. Returns the submitter's bond and resolves
+    /// the market with the submitted outcome.
+    pub fn finalize_outcome(env: Env, market_id: u64) -> Result<(), MarketError> {
+        let mut submission = Self::load_submission(&env, market_id)?;
+        match submission.state {
+            OracleState::Submitted => {}
+            // A disputed submission can only be settled by the council.
+            OracleState::Challenged | OracleState::Escalated => {
+                return Err(MarketError::AlreadyChallenged)
+            }
+            OracleState::Finalized => return Err(MarketError::OracleInvalidState),
+        }
+        let now = env.ledger().timestamp();
+        if now < submission.challenge_deadline {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        let mut market = Self::load_market(&env, market_id)?;
+
+        // Unchallenged: the bond always comes back in full.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&env.current_contract_address(), &submission.submitter, &submission.bond);
+
+        // A market cancelled or force-resolved out of band while the window was
+        // open still releases the bond — it just does not resolve again.
+        if !market.resolved && !market.cancelled {
+            Self::apply_resolution(&env, &mut market, submission.outcome);
+        }
+
+        submission.state = OracleState::Finalized;
+        submission.finalized_at = now;
+        Self::store_submission(&env, &submission);
+
+        OracleFinalizedEvent {
+            market_id,
+            outcome: submission.outcome,
+            challenged: false,
+            submitter: submission.submitter.clone(),
+            challenger: None,
+            submitter_payout: submission.bond,
+            challenger_payout: 0,
+            council_fee: 0,
+            protocol_credit: 0,
+            finalized_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Council ruling on an escalated market. Admin or a registered resolver
+    /// stands in for the council multisig (docs/ORACLE_AND_BACKEND.md Option C).
+    ///
+    /// Bond distribution follows the design doc:
+    ///  - submitter correct → own bond back + half the disputer bond
+    ///  - disputer correct  → both bonds, less a 10% council fee on the loser's bond
+    /// Whatever the winner does not take is credited to AccumulatedFees, so the
+    /// escrow always nets to zero.
+    pub fn resolve_challenge(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+        outcome: bool,
+    ) -> Result<(), MarketError> {
+        caller.require_auth();
+        Self::require_admin_or_resolver(&env, &caller)?;
+
+        let mut submission = Self::load_submission(&env, market_id)?;
+        if submission.state != OracleState::Escalated {
+            return Err(MarketError::OracleInvalidState);
+        }
+        let challenger = submission.challenger.clone().ok_or(MarketError::OracleInvalidState)?;
+
+        let mut market = Self::load_market(&env, market_id)?;
+
+        let submitter_won = outcome == submission.outcome;
+        let loser_bond = if submitter_won { submission.challenger_bond } else { submission.bond };
+        let council_fee = loser_bond * COUNCIL_FEE_BPS / BPS_DENOM;
+        let winner_share = if submitter_won { loser_bond / 2 } else { loser_bond - council_fee };
+        let protocol_credit = loser_bond - winner_share;
+
+        let (submitter_payout, challenger_payout) = if submitter_won {
+            (submission.bond + winner_share, 0)
+        } else {
+            (0, submission.challenger_bond + winner_share)
+        };
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let xlm = token::Client::new(&env, &cfg.xlm_sac);
+        let this = env.current_contract_address();
+        if submitter_payout > 0 { xlm.transfer(&this, &submission.submitter, &submitter_payout); }
+        if challenger_payout > 0 { xlm.transfer(&this, &challenger, &challenger_payout); }
+
+        if protocol_credit > 0 {
+            let mut acc: i128 = env.storage().instance()
+                .get(&DataKey::AccumulatedFees).unwrap_or(0);
+            acc += protocol_credit;
+            env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
+        }
+
+        // As in `finalize_outcome`: a market cancelled or resolved out of band
+        // still settles its bonds, it just does not resolve again.
+        if !market.resolved && !market.cancelled {
+            Self::apply_resolution(&env, &mut market, outcome);
+        }
+
+        let now = env.ledger().timestamp();
+        submission.state = OracleState::Finalized;
+        submission.finalized_at = now;
+        Self::store_submission(&env, &submission);
+
+        OracleFinalizedEvent {
+            market_id,
+            outcome,
+            challenged: true,
+            submitter: submission.submitter.clone(),
+            challenger: Some(challenger),
+            submitter_payout,
+            challenger_payout,
+            council_fee,
+            protocol_credit,
+            finalized_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn get_oracle_submission(env: Env, market_id: u64) -> Result<OracleSubmission, MarketError> {
+        Self::load_submission(&env, market_id)
     }
 
     // ── Cancellation ──────────────────────────────────────────────────────
@@ -617,6 +970,41 @@ impl PredictionMarketContract {
     #[inline]
     fn load_market(env: &Env, market_id: u64) -> Result<Market, MarketError> {
         env.storage().persistent().get(&DataKey::Market(market_id)).ok_or(MarketError::MarketNotFound)
+    }
+
+    /// Mark a market resolved and sweep the pool when the winning side is empty.
+    /// Shared by `resolve_market` and the optimistic oracle finalizers.
+    fn apply_resolution(env: &Env, market: &mut Market, outcome: bool) {
+        let winning_side = if outcome { market.total_yes } else { market.total_no };
+        if winning_side == 0 {
+            let total_pool = market.total_yes + market.total_no;
+            if total_pool > 0 {
+                let mut acc: i128 = env.storage().instance()
+                    .get(&DataKey::AccumulatedFees).unwrap_or(0);
+                acc += total_pool;
+                env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
+            }
+        }
+
+        market.resolved = true;
+        market.outcome = outcome;
+        let mkt_key = DataKey::Market(market.id);
+        env.storage().persistent().set(&mkt_key, &*market);
+        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+    }
+
+    #[inline]
+    fn load_submission(env: &Env, market_id: u64) -> Result<OracleSubmission, MarketError> {
+        env.storage().persistent()
+            .get(&DataKey::Submission(market_id))
+            .ok_or(MarketError::SubmissionNotFound)
+    }
+
+    #[inline]
+    fn store_submission(env: &Env, submission: &OracleSubmission) {
+        let key = DataKey::Submission(submission.market_id);
+        env.storage().persistent().set(&key, submission);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
     }
 
     #[inline]

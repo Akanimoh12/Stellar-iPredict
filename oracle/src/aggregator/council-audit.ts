@@ -103,12 +103,14 @@ interface FinalizedMarketRow extends Record<string, unknown> {
   decision: string | null;
   tx_hash: string | null;
   finalized_at: string | null;
+  [key: string]: unknown;
 }
 
 interface CouncilVoteRow extends Record<string, unknown> {
   market_id: string;
   member: string;
   outcome: boolean;
+  [key: string]: unknown;
 }
 
 /**

@@ -47,6 +47,45 @@ describe("council aggregator skeleton", () => {
     expect(config.COUNCIL_THRESHOLD).toBe(4);
   });
 
+  it("loads optimistic oracle bond defaults", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.SUBMITTER_BOND_XLM).toBe(100);
+    expect(config.DISPUTER_BOND_XLM).toBe(200);
+  });
+
+  it("loads optimistic oracle window defaults", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.CHALLENGE_WINDOW_SECONDS).toBe(86_400);
+    expect(config.COUNCIL_WINDOW_SECONDS).toBe(259_200);
+  });
+
+  it("loads optimistic oracle fee default", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.COUNCIL_FEE_BPS).toBe(1_000);
+  });
+
+  it("rejects a disputer bond that does not exceed the submitter bond", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      SUBMITTER_BOND_XLM: "200",
+      DISPUTER_BOND_XLM: "100",
+    })).toThrow();
+  });
+
   it("processes expired unresolved markets and closes cleanly", async () => {
     const controller = new AbortController();
     const dependencies: AggregatorDependencies = {

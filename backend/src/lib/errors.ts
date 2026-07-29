@@ -11,6 +11,8 @@ export class HttpError extends Error {
 }
 
 export const badRequest = (message = "Bad request") => new HttpError(400, "BAD_REQUEST", message);
+export const unauthorized = (message = "Unauthorized") => new HttpError(401, "UNAUTHORIZED", message);
+export const forbidden = (message = "Forbidden") => new HttpError(403, "FORBIDDEN", message);
 export const notFound = (message = "Not found") => new HttpError(404, "NOT_FOUND", message);
 export const methodNotAllowed = (message = "Method not allowed") => new HttpError(405, "METHOD_NOT_ALLOWED", message);
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
@@ -22,10 +24,13 @@ function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: 
   const maybeStatus = (error as FastifyErrorLike).statusCode;
   const statusCode = typeof maybeStatus === "number" && maybeStatus >= 400 && maybeStatus < 500 ? maybeStatus : 500;
   if (statusCode < 500) {
-    return { statusCode, code: (error as FastifyErrorLike).code ?? "BAD_REQUEST", message: error.message || "Request failed" };
+    const rawCode = (error as FastifyErrorLike).code;
+    const code = rawCode === "FST_ERR_VALIDATION" ? "BAD_REQUEST" : (rawCode ?? "BAD_REQUEST");
+    return { statusCode, code, message: error.message || "Request failed" };
   }
   return { statusCode: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" };
 }
+
 
 export function errorHandler(error: FastifyErrorLike, _request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);

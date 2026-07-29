@@ -103,12 +103,14 @@ interface FinalizedMarketRow {
   decision: string | null;
   tx_hash: string | null;
   finalized_at: string | null;
+  [key: string]: unknown;
 }
 
 interface CouncilVoteRow {
   market_id: string;
   member: string;
   outcome: boolean;
+  [key: string]: unknown;
 }
 
 /**

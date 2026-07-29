@@ -64,4 +64,24 @@ describe("getMarkets", () => {
       limit: 10
     });
   });
+
+  it("excludes resolved and cancelled markets when sort is ending_soon", async () => {
+    const queryMock = vi
+      .fn<Queryable["query"]>()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+
+    const db: Queryable = {
+      query: <T>(text: string, values?: unknown[]) =>
+        queryMock(text, values) as Promise<{ rows: T[] }>
+    };
+
+    await getMarkets({ sort: "ending_soon" }, db);
+
+    expect(queryMock).toHaveBeenCalledTimes(2);
+    const firstCall = queryMock.mock.calls[0];
+    expect(firstCall[0]).toContain("resolved = false AND cancelled = false");
+    expect(firstCall[0]).toContain("end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
+    expect(firstCall[0]).toContain("ORDER BY end_time ASC");
+  });
 });

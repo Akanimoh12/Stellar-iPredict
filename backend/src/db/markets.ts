@@ -96,6 +96,10 @@ export async function getMarkets(
     whereConditions.push(filterClause);
   }
 
+  if (sort === "ending_soon") {
+    whereConditions.push("resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
+  }
+
   const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
   const offset = (page - 1) * limit;
 

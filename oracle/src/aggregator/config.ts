@@ -24,9 +24,18 @@ const schema = z.object({
   FINALIZE_WEBHOOK_URL: z.string().url().optional(),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
+  path: ["COUNCIL_THRESHOLD"],
+}).refine((value) => isStrictMajority(value.COUNCIL_THRESHOLD, value.COUNCIL_SIZE), {
+  message: "COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)",
+  path: ["COUNCIL_THRESHOLD"],
+}).refine((value) => value.SUBMIT_BASE_BACKOFF_MS <= value.SUBMIT_MAX_BACKOFF_MS, {
+  message: "SUBMIT_BASE_BACKOFF_MS cannot exceed SUBMIT_MAX_BACKOFF_MS",
+  path: ["SUBMIT_BASE_BACKOFF_MS"],
 });
 
 export type AggregatorConfig = z.infer<typeof schema>;
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
   return schema.parse(env);
 }
+
+export { isStrictMajority };

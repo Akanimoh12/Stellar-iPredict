@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CancellationAwareFinalizer } from "../src/aggregator/cancellation.js";
+import { createLogger } from "../src/log.js";
 
 describe("CancellationAwareFinalizer", () => {
   it("skips a market that is already cancelled", async () => {
@@ -51,5 +52,24 @@ describe("CancellationAwareFinalizer", () => {
     expect(await finalizer.finalize("42", state, async () => false, submit)).toBe("already-resolved");
     expect(submit).toHaveBeenCalledOnce();
     expect(submit).toHaveBeenCalledWith("42", false);
+  });
+
+  it("logs each finalization decision as structured JSON", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (line) => lines.push(line) });
+    const finalizer = new CancellationAwareFinalizer(logger);
+    const submit = vi.fn(async () => undefined);
+    const state = async () => ({ cancelled: false, resolved: false });
+
+    await finalizer.finalize("42", state, async () => true, submit);
+
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      message: "finalization decision",
+      marketId: "42",
+      decision: "finalized",
+      outcome: true,
+    });
   });
 });

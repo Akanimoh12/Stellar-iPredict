@@ -7,6 +7,20 @@ export { detectConflict, type ConflictReport } from "./conflict-detection.js";
 export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
 export { ResolverKeyManager } from "./key-rotation.js";
 export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
+export {
+  computeTally,
+  createPostgresSubmissionStore,
+  SubmissionTracker,
+  type MarketTally,
+  type SubmissionStore,
+} from "./tally.js";
+export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
+export {
+  resolveMarketOnChain,
+  createStellarSubmitter,
+  type OnChainSubmitter,
+  type ResolveMarketResult,
+} from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
 export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
 

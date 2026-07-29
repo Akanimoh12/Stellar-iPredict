@@ -4,6 +4,10 @@ const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
 const unitFraction = z.coerce.number().min(0).max(1);
 
+function isStrictMajority(threshold: number, size: number): boolean {
+  return threshold > size / 2;
+}
+
 const schema = z.object({
   COUNCIL_SIZE: positiveInteger.default(7),
   COUNCIL_THRESHOLD: positiveInteger.default(4),
@@ -22,6 +26,10 @@ const schema = z.object({
 
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: z.string().url().optional(),
+
+  SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
+  SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
+  LOG_LEVEL: z.string().default("info"),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
   path: ["COUNCIL_THRESHOLD"],

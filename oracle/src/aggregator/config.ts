@@ -1,19 +1,6 @@
 import { z } from "zod";
 
 const positiveInteger = z.coerce.number().int().positive();
-
-/**
- * A quorum threshold that is not a strict majority (<= half of the council)
- * lets two disjoint subsets of the council each reach threshold on opposing
- * outcomes, or lets a minority finalize a market outcome the rest of the
- * council never agreed to. Both break the single-finalization guarantee this
- * aggregator exists to provide, so this is validated at boot rather than left
- * to be caught later by `selectThresholdOutcome`'s ambiguous-result check.
- */
-function isStrictMajority(threshold: number, size: number): boolean {
-  return threshold > size / 2;
-}
-
 const positiveNumber = z.coerce.number().positive();
 const unitFraction = z.coerce.number().min(0).max(1);
 
@@ -35,13 +22,6 @@ const schema = z.object({
 
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: z.string().url().optional(),
-
-  SUBMIT_MAX_RETRIES: positiveInteger.default(5),
-  SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(500),
-  SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
-  SUBMIT_FAILURE_ALERT_THRESHOLD: positiveInteger.default(3),
-  ALERT_WEBHOOK_URL: z.string().url().optional(),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
   path: ["COUNCIL_THRESHOLD"],

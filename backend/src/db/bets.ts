@@ -57,6 +57,20 @@ export function getBetsByMarket(
   return { bets: sliced, total, page, limit, totalPages };
 }
 
+/**
+ * Return all bets across every market, each tagged with its market id.
+ * Useful for cross-cutting aggregations (stats, admin reports, etc.).
+ */
+export function getAllBets(): { marketId: number; bet: Bet }[] {
+  const result: { marketId: number; bet: Bet }[] = [];
+  for (const [marketId, bets] of store) {
+    for (const bet of bets) {
+      result.push({ marketId, bet });
+    }
+  }
+  return result;
+}
+
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
 /** Seed bets for a market — for test use only. */

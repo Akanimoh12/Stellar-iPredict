@@ -77,6 +77,11 @@ export function getLeaderboardEntry(
   return entry ? { ...entry } : undefined;
 }
 
+/** Return every leaderboard entry (shallow copies). */
+export function getAllLeaderboardEntries(): LeaderboardEntry[] {
+  return Array.from(store.values()).map((e) => ({ ...e }));
+}
+
 /** Clear all entries — for test isolation only. */
 export function clearLeaderboard(): void {
   store.clear();

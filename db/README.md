@@ -114,9 +114,13 @@ Tracks oracle submissions for dispute and resolution workflows.
 | `bond_amount` | `NUMERIC` | Bond attached to the submission |
 | `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
 | `status` | `oracle_submission_status` | Lifecycle state: `submitted`, `challenged`, `finalized`, or `rejected` |
+| `decision` | `VARCHAR(255)` | Finalized decision (`yes`/`no`) |
+| `tx_hash` | `CHAR(64)` | Finalization transaction hash |
+| `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
+| `council_votes` | `JSONB` | Council vote records used to resolve the market |
 
 Indexes:
-- `idx_oracle_submissions_market_id` on `market_id`
+- `idx_oracle_submissions_market_id` unique on `market_id`
 - `idx_oracle_submissions_status` on `status`
 
 ## Entity relationship diagram

@@ -6,6 +6,8 @@ export { detectConflict, type ConflictReport } from "./conflict-detection.js";
 export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
 export { ResolverKeyManager } from "./key-rotation.js";
 export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
+export { CouncilVoteManager } from "./council-votes.js";
+export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {

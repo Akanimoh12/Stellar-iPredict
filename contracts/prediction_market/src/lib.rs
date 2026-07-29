@@ -26,6 +26,11 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+// Challenge window duration (seconds) after a submission before it can be auto‑finalized
+const CHALLENGE_WINDOW: u64 = 86_400; // 24 hours
+// Bond constants (example values, adjust as needed)
+const SUBMITTER_BOND: i128 = 100_0000000; // 100 XLM in stroops
+const DISPUTER_BOND: i128 = 200_0000000; // 200 XLM in stroops
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +58,11 @@ pub enum MarketError {
     NotAuthorized      = 18,
     MarketNotCancelled = 19,
     RateLimitExceeded  = 20,
+    SubmissionExists   = 21,
+    SubmissionNotFound = 22,
+    AlreadyChallenged  = 23,
+    ChallengeWindowNotElapsed = 24,
+    BondTransferFailed = 25,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -72,6 +82,7 @@ pub enum DataKey {
     FeeRecipient(Address),
     HasReferrer(Address),
     RateWindow,            // packed u64: high32=window_start_hi, low32=count
+    Submission(u64),       // stores Submission struct for optimistic oracle
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────

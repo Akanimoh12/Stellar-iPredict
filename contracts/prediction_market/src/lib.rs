@@ -145,6 +145,67 @@ pub struct Bet {
     pub claimed: bool,
 }
 
+// ── Optimistic Oracle (Phase 2) ─────────────────────────────────────────────
+//
+// Bonded optimistic resolution lifecycle. A submitter posts a bonded outcome,
+// which enters a challenge window. If nobody challenges before the window
+// elapses the submission finalizes; a challenge (with its own bond) moves the
+// submission into dispute and, if unresolved off-chain, on to escalation.
+//
+//   OPEN ──submit──▶ SUBMITTED ──challenge──▶ CHALLENGED ──escalate──▶ ESCALATED
+//     │                  │                         │                       │
+//     └──────────────────┴────────── finalize ─────┴───────────────────────┘
+//                                       ▼
+//                                   FINALIZED
+//
+// State is stored under `DataKey::Submission(market_id)` (see Storage Keys),
+// which is disjoint from every existing key, so no collision with markets,
+// bets, resolvers, etc.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionState {
+    /// No submission exists yet for this market.
+    Open,
+    /// An outcome has been submitted with a bond; challenge window is open.
+    Submitted,
+    /// The submission has been challenged with a disputer bond.
+    Challenged,
+    /// Escalated to council/arbitration after a challenge.
+    Escalated,
+    /// Terminal state — the outcome is settled and cannot change.
+    Finalized,
+}
+
+/// Bonded optimistic-oracle submission for a single market.
+///
+/// One `Submission` per market, keyed by `DataKey::Submission(market_id)`.
+/// `challenger`/`disputer_bond`/`challenged_at` stay zero-valued until the
+/// submission is challenged. `state` is the single source of truth for the
+/// lifecycle and guards against illegal transitions (e.g. double-finalize).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Submission {
+    pub market_id:     u64,
+    /// Proposed outcome (true = YES).
+    pub outcome:       bool,
+    /// Account that posted the submission bond.
+    pub submitter:     Address,
+    /// Submitter bond, in stroops.
+    pub bond:          i128,
+    /// Ledger timestamp (seconds) when the outcome was submitted.
+    pub submitted_at:  u64,
+    /// Timestamp after which an unchallenged submission may be finalized.
+    pub challenge_end: u64,
+    /// Current lifecycle state.
+    pub state:         SubmissionState,
+    /// Account that challenged the submission, if any.
+    pub challenger:    Option<Address>,
+    /// Disputer bond, in stroops (0 while unchallenged).
+    pub disputer_bond: i128,
+    /// Ledger timestamp (seconds) when the challenge was raised (0 if none).
+    pub challenged_at: u64,
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -596,6 +657,13 @@ impl PredictionMarketContract {
 
     pub fn get_accumulated_fees(env: Env) -> i128 {
         env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0)
+    }
+
+    /// Read the optimistic-oracle submission for a market, if one exists.
+    /// Returns `None` while the market is still in the `Open` (no submission)
+    /// state. Used by the off-chain indexer/aggregator to track lifecycle.
+    pub fn get_submission(env: Env, market_id: u64) -> Option<Submission> {
+        env.storage().persistent().get(&DataKey::Submission(market_id))
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {

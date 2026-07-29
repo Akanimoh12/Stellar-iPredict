@@ -19,6 +19,9 @@ const schema = z.object({
 
   /** Initial resolver key for signing finalization transactions. */
   RESOLVER_KEY: z.string().min(1).optional(),
+
+  /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
+  FINALIZE_WEBHOOK_URL: z.string().url().optional(),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
 });

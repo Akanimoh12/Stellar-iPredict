@@ -1034,3 +1034,123 @@ fn test_e2e_full_inter_contract_flow() {
     assert_eq!(t.xlm.balance(&charlie), charlie_before);
 }
 
+// ── Optimistic Oracle: DataKey / state (Phase 2) ────────────────────────────
+
+#[test]
+fn test_get_submission_defaults_to_none() {
+    let t = setup();
+    let market = create_test_market(&t);
+    // A freshly created market has no oracle submission (conceptually Open).
+    assert_eq!(t.client.get_submission(&market), None);
+}
+
+#[test]
+fn test_submission_state_machine_round_trips_through_storage() {
+    let t = setup();
+    let market = create_test_market(&t);
+    let submitter = Address::generate(&t.env);
+    let challenger = Address::generate(&t.env);
+
+    // The lifecycle fields persist and read back intact through the new
+    // DataKey::Submission variant, covering every SubmissionState the doc
+    // models: OPEN → SUBMITTED → CHALLENGED → ESCALATED → FINALIZED.
+    let stored: Submission = t.env.as_contract(&t.market_id, || {
+        let submission = Submission {
+            market_id: market,
+            outcome: true,
+            submitter: submitter.clone(),
+            bond: 100_0000000,
+            submitted_at: t.env.ledger().timestamp(),
+            challenge_end: t.env.ledger().timestamp() + 86_400,
+            state: SubmissionState::Submitted,
+            challenger: None,
+            disputer_bond: 0,
+            challenged_at: 0,
+        };
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Submission(market), &submission);
+        t.env
+            .storage()
+            .persistent()
+            .get(&DataKey::Submission(market))
+            .unwrap()
+    });
+
+    assert_eq!(stored.market_id, market);
+    assert_eq!(stored.outcome, true);
+    assert_eq!(stored.submitter, submitter);
+    assert_eq!(stored.bond, 100_0000000);
+    assert_eq!(stored.state, SubmissionState::Submitted);
+    assert_eq!(stored.challenger, None);
+
+    // Advance the lifecycle and confirm each subsequent state also persists.
+    for (state, challenger_opt, disputer_bond) in [
+        (SubmissionState::Challenged, Some(challenger.clone()), 200_0000000_i128),
+        (SubmissionState::Escalated, Some(challenger.clone()), 200_0000000_i128),
+        (SubmissionState::Finalized, Some(challenger.clone()), 200_0000000_i128),
+    ] {
+        let read_back: Submission = t.env.as_contract(&t.market_id, || {
+            let mut s: Submission = t
+                .env
+                .storage()
+                .persistent()
+                .get(&DataKey::Submission(market))
+                .unwrap();
+            s.state = state;
+            s.challenger = challenger_opt.clone();
+            s.disputer_bond = disputer_bond;
+            s.challenged_at = t.env.ledger().timestamp();
+            t.env
+                .storage()
+                .persistent()
+                .set(&DataKey::Submission(market), &s);
+            t.env
+                .storage()
+                .persistent()
+                .get(&DataKey::Submission(market))
+                .unwrap()
+        });
+        assert_eq!(read_back.state, state);
+        assert_eq!(read_back.challenger, challenger_opt);
+        assert_eq!(read_back.disputer_bond, disputer_bond);
+    }
+
+    assert_eq!(t.client.get_submission(&market).unwrap().state, SubmissionState::Finalized);
+}
+
+#[test]
+fn test_submission_key_does_not_collide_with_market_state() {
+    let t = setup();
+    let market = create_test_market(&t);
+
+    // Writing a Submission under DataKey::Submission(id) must not clobber the
+    // Market stored under DataKey::Market(id) for the same id.
+    t.env.as_contract(&t.market_id, || {
+        let submission = Submission {
+            market_id: market,
+            outcome: false,
+            submitter: t.admin.clone(),
+            bond: SUBMITTER_BOND,
+            submitted_at: t.env.ledger().timestamp(),
+            challenge_end: t.env.ledger().timestamp() + CHALLENGE_WINDOW,
+            state: SubmissionState::Submitted,
+            challenger: None,
+            disputer_bond: 0,
+            challenged_at: 0,
+        };
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Submission(market), &submission);
+    });
+
+    // Market row is untouched and still readable.
+    let stored_market = t.client.get_market(&market);
+    assert_eq!(stored_market.id, market);
+    assert_eq!(stored_market.resolved, false);
+    // And the submission for the same id reads back independently.
+    assert_eq!(t.client.get_submission(&market).unwrap().bond, SUBMITTER_BOND);
+}
+

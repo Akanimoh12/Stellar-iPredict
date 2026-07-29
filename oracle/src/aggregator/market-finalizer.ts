@@ -10,6 +10,7 @@ import {
 } from "@stellar/stellar-sdk";
 import type { Pool } from "pg";
 import type { CouncilVote } from "./threshold.js";
+import { notifyFinalized, type FinalizeNotifierOptions } from "./finalize-notifier.js";
 
 export class MarketAlreadyFinalizedError extends Error {
   constructor(marketId: string) {
@@ -181,6 +182,7 @@ export async function finalizeMarketDecision(
   decision: boolean,
   councilVotes: CouncilVote[],
   networkPassphrase: string = Networks.TESTNET,
+  notifierOptions?: FinalizeNotifierOptions,
 ): Promise<string> {
   const txHash = await submitResolutionTransaction(
     server,
@@ -190,6 +192,8 @@ export async function finalizeMarketDecision(
     decision,
     networkPassphrase,
   );
+  // persistFinalDecision throws MarketAlreadyFinalizedError on a duplicate, so
+  // the notification below only ever fires once per market — no double-notify.
   await persistFinalDecision(
     db,
     marketId,
@@ -201,6 +205,19 @@ export async function finalizeMarketDecision(
   console.info(
     `Persisted finalized decision for market ${marketId} with tx_hash=${txHash} and decision=${decisionLabel(decision)}`,
   );
+
+  // Best-effort side effect — a webhook failure must not undo the finalization.
+  await notifyFinalized(
+    {
+      marketId: String(marketId),
+      decision,
+      txHash,
+      councilVotes,
+      finalizedAt: new Date().toISOString(),
+    },
+    notifierOptions,
+  );
+
   return txHash;
 }
 

@@ -16,6 +16,14 @@ async function main(): Promise<void> {
   console.log(`[ipredict-backend] scaffold up — API server not yet implemented`);
   console.log(`[ipredict-backend] intended port: ${PORT}`);
   console.log(`[ipredict-backend] pick an issue labelled "area:backend" to start`);
+import { startServer } from "./server.js";
+import { config } from "./config/index.js";
+
+const PORT = config.PORT;
+const HOST = process.env.HOST ?? "0.0.0.0";
+
+async function main(): Promise<void> {
+  await startServer({ port: PORT, host: HOST, corsOrigins: config.CORS_ORIGINS });
 }
 
 main().catch((err) => {

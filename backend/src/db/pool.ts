@@ -16,6 +16,13 @@ const pool = new Pool({
   max: DEFAULT_POOL_SIZE,
   idleTimeoutMillis: IDLE_TIMEOUT_MS,
   connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+import { config } from "../config/index.js";
+
+const pool = new Pool({
+  connectionString: config.DATABASE_URL,
+  max: config.DB_POOL_SIZE,
+  idleTimeoutMillis: config.DB_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
 });
 
 pool.on("error", (err) => {

@@ -75,6 +75,29 @@ export {
   type DisputeEscalationRecord,
   type DisputeEscalationWatcherOptions,
 } from "./dispute-escalation-watcher.js";
+export {
+  loadCategoryResolverConfig,
+  getResolversForCategory,
+  isAuthorizedResolverForCategory,
+  describeCategoryResolverConfig,
+  type CategoryResolverConfig,
+  type MarketCategory,
+  MARKET_CATEGORIES,
+} from "./category-resolvers.js";
+export {
+  validateSubmissionData,
+  assertCanFinalize,
+  createDefaultValidationConfig,
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./submission-validator.js";
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./submission-validator.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {

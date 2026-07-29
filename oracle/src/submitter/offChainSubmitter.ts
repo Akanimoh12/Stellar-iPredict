@@ -106,6 +106,17 @@ export class OffChainSubmitterService {
     const sourceAccount = await server.getAccount(caller);
     const contract = new Contract(contractId);
 
+    // On-chain Replay Protection
+    const checkTx = new TransactionBuilder(sourceAccount, { fee: "100", networkPassphrase })
+      .addOperation(contract.call("get_oracle_submission", nativeToScVal(BigInt(marketId), { type: "u64" })))
+      .setTimeout(30)
+      .build();
+
+    const simResponse = await server.simulateTransaction(checkTx);
+    if (!rpc.Api.isSimulationError(simResponse) && simResponse.result) {
+      throw new Error(`Submission already exists on-chain for market ${marketId}`);
+    }
+
     const operation = contract.call(
       "submit_outcome",
       new Address(caller).toScVal(),

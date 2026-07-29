@@ -951,6 +951,13 @@ impl PredictionMarketContract {
         env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0)
     }
 
+    /// Read the optimistic-oracle submission for a market, if one exists.
+    /// Returns `None` while the market is still in the `Open` (no submission)
+    /// state. Used by the off-chain indexer/aggregator to track lifecycle.
+    pub fn get_submission(env: Env, market_id: u64) -> Option<Submission> {
+        env.storage().persistent().get(&DataKey::Submission(market_id))
+    }
+
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
         env.storage().persistent()
             .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))

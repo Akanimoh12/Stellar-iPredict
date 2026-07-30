@@ -5,6 +5,8 @@ export interface FetchWithRetryOptions {
   maxRetries?: number;
   /** Base linear backoff between retries, in ms (attempt * this value). */
   retryBackoffMs?: number;
+  /** Successful adapter responses are cached for this many milliseconds. Defaults to 5 seconds. */
+  cacheTtlMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;

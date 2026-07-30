@@ -38,40 +38,6 @@ export {
 } from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
 export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
-
-export { detectConflict, type ConflictReport } from "./conflict-detection.js";
-export {
-  buildAuditRecord,
-  collectCouncilAudit,
-  exportCouncilAudit,
-  toAuditCsv,
-  toAuditJson,
-  type AuditFormat,
-  type CouncilAuditInput,
-  type CouncilAuditRecord,
-} from "./council-audit.js";
-export {
-  notifyFinalized,
-  type FinalizeNotification,
-  type FinalizeNotifierOptions,
-} from "./finalize-notifier.js";
-export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
-export { ResolverKeyManager } from "./key-rotation.js";
-export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
-export {
-  computeTally,
-  createPostgresSubmissionStore,
-  SubmissionTracker,
-  type MarketTally,
-  type SubmissionStore,
-} from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
-export {
-  resolveMarketOnChain,
-  createStellarSubmitter,
-  type OnChainSubmitter,
-  type ResolveMarketResult,
-} from "../submitter/resolveMarket.js";
 export {
   OffChainSubmitterService,
   type DataAdapter,
@@ -93,6 +59,22 @@ export {
   type CouncilInactivityMonitorOptions,
   type EscalatedMarketRecord,
 } from "./council-inactivity-monitor.js";
+export {
+  detectNewSubmissions,
+  SubmissionWatcher,
+  type DetectNewSubmissionsResult,
+  type NewSubmissionAlert,
+  type SubmissionRecord,
+  type SubmissionWatcherOptions,
+} from "./submission-watcher.js";
+export {
+  detectDisputeEscalations,
+  DisputeEscalationWatcher,
+  type DetectDisputeEscalationsResult,
+  type DisputeEscalationAlert,
+  type DisputeEscalationRecord,
+  type DisputeEscalationWatcherOptions,
+} from "./dispute-escalation-watcher.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {

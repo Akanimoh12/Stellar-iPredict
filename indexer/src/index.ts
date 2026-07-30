@@ -106,6 +106,8 @@ export function installShutdownHandlers(indexer: Indexer): void {
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
 import { handleMarketCreatedEvent } from "./handlers/market_created.js";
 import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
+import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
+import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
 import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
 
@@ -120,6 +122,12 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
     await handleMarketCancelledEvent(event, db, redis);
   } else if (domain === "referral" && action === "reward") {
     await handleReferralRewardEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "challenged") {
+    await handleOracleChallengedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "escalated") {
+    await handleOracleEscalatedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "finalized") {
+    await handleOracleFinalizedEvent(event, db, redis);
   }
 }
 

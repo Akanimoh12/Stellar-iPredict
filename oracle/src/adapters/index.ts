@@ -13,6 +13,13 @@ export interface CryptoMarketParams {
   threshold: number;
 }
 
+export interface PoliticsMarketParams {
+  /** Market identifier or slug for the politics data source. */
+  marketId: string;
+  /** Expected outcome to check against (e.g., "YES", "NO", or specific candidate/event). */
+  expectedOutcome: string;
+}
+
 export interface Market {
   id: string;
   category: MarketCategory;
@@ -45,6 +52,18 @@ export function isCryptoMarketParams(
     (params.comparator === "gte" || params.comparator === "lte") &&
     typeof params.threshold === "number" &&
     Number.isFinite(params.threshold)
+  );
+}
+
+/** Type guard shared by politics adapters (Polymarket, Reuters, ...) to validate `market.params`. */
+export function isPoliticsMarketParams(
+  params: Record<string, unknown>,
+): params is Record<string, unknown> & PoliticsMarketParams {
+  return (
+    typeof params.marketId === "string" &&
+    params.marketId.length > 0 &&
+    typeof params.expectedOutcome === "string" &&
+    params.expectedOutcome.length > 0
   );
 }
 

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { z } from "zod";
@@ -18,6 +20,39 @@ type MarketParams = {
 const MARKET_DETAIL_TTL = 30;
 const MARKETS_ACTIVE_TTL = 15;
 const MARKETS_DEFAULT_TTL = 30;
+
+/**
+ * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
+ * its canonical `JSON.stringify` form, per RFC 7232 §2.3.
+ */
+export function computeEtag(payload: unknown): string {
+  const hash = createHash("sha1").update(JSON.stringify(payload)).digest("hex");
+  return `"${hash}"`;
+}
+
+/**
+ * Whether an `If-None-Match` request header matches `etag`.
+ *
+ * The header may carry a comma-separated list and/or the `*` wildcard
+ * (RFC 7232 §3.2); a weak comparison (leading `W/`) is treated as a match
+ * since we only ever compare full representations here.
+ */
+export function matchesIfNoneMatch(
+  header: string | string[] | undefined,
+  etag: string
+): boolean {
+  if (!header) {
+    return false;
+  }
+
+  const values = Array.isArray(header) ? header : [header];
+  return values.some((value) =>
+    value
+      .split(",")
+      .map((candidate) => candidate.trim())
+      .some((candidate) => candidate === "*" || candidate === etag || candidate === `W/${etag}`)
+  );
+}
 
 export function parsePositiveInteger(value: string): number | null {
   if (!/^\d+$/.test(value)) {
@@ -162,6 +197,7 @@ export function createMarketsRoutes(
             },
             required: ["markets", "total", "page", "limit"],
           },
+          304: { type: "null", description: "Not Modified" },
           400: errorResponseSchema,
         },
       },
@@ -190,12 +226,21 @@ export function createMarketsRoutes(
           )
         : await getMarkets({ filter, category, sort, page, limit }, db);
 
-      return reply.status(200).send({
+      const body = {
         markets: result.rows,
         total: result.total,
         page: result.page,
         limit: result.limit,
-      });
+      };
+
+      const etag = computeEtag(body);
+      reply.header("ETag", etag);
+
+      if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
+        return reply.status(304).send();
+      }
+
+      return reply.status(200).send(body);
     }
   );
 

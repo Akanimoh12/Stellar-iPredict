@@ -1,6 +1,15 @@
+import type { Logger } from "../log.js";
+
 export interface CouncilVote {
   member: string;
   outcome: boolean;
+}
+
+export interface VoteTally {
+  yes: number;
+  no: number;
+  threshold: number;
+  totalMembers: number;
 }
 
 /**
@@ -12,6 +21,8 @@ export interface CouncilVote {
 export function selectThresholdOutcome(
   votes: readonly CouncilVote[],
   threshold: number,
+  logger?: Logger,
+  marketId?: string,
 ): boolean | null {
   if (!Number.isInteger(threshold) || threshold <= 0) {
     throw new RangeError("threshold must be a positive integer");
@@ -30,8 +41,18 @@ export function selectThresholdOutcome(
     else no += 1;
   }
 
+  const tally: VoteTally = { yes, no, threshold, totalMembers: votesByMember.size };
   const yesReached = yes >= threshold;
   const noReached = no >= threshold;
-  if (yesReached === noReached) return null;
-  return yesReached;
+  const ambiguous = yesReached === noReached;
+  const result = ambiguous ? null : yesReached;
+
+  logger?.info("vote tally", {
+    marketId: marketId ?? null,
+    ...tally,
+    ambiguous,
+    outcome: result,
+  });
+
+  return result;
 }

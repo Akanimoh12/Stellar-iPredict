@@ -29,7 +29,16 @@ export {
   type MarketTally,
   type SubmissionStore,
 } from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
+export {
+  loadCouncilConfig,
+  isCouncilMember,
+  describeCouncilConfig,
+  hasQuorum,
+  meetsThreshold,
+  COUNCIL_SIZE,
+  COUNCIL_DEFAULT_THRESHOLD,
+  type CouncilConfig,
+} from "../config/council.js";
 export {
   resolveMarketOnChain,
   createStellarSubmitter,
@@ -38,40 +47,6 @@ export {
 } from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
 export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
-
-export { detectConflict, type ConflictReport } from "./conflict-detection.js";
-export {
-  buildAuditRecord,
-  collectCouncilAudit,
-  exportCouncilAudit,
-  toAuditCsv,
-  toAuditJson,
-  type AuditFormat,
-  type CouncilAuditInput,
-  type CouncilAuditRecord,
-} from "./council-audit.js";
-export {
-  notifyFinalized,
-  type FinalizeNotification,
-  type FinalizeNotifierOptions,
-} from "./finalize-notifier.js";
-export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
-export { ResolverKeyManager } from "./key-rotation.js";
-export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
-export {
-  computeTally,
-  createPostgresSubmissionStore,
-  SubmissionTracker,
-  type MarketTally,
-  type SubmissionStore,
-} from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
-export {
-  resolveMarketOnChain,
-  createStellarSubmitter,
-  type OnChainSubmitter,
-  type ResolveMarketResult,
-} from "../submitter/resolveMarket.js";
 export {
   OffChainSubmitterService,
   type DataAdapter,
@@ -86,6 +61,17 @@ export {
   type BondMonitorOptions,
   type OracleSubmissionRecord,
 } from "./bond-monitor.js";
+export {
+  reconcileBonds,
+  runBondReconciliation,
+  recordSettlement,
+  type BondRefundDiscrepancy,
+  type BondReconciliationOptions,
+  type BondReconciliationResult,
+  type BondSettlement,
+  type RecordSettlementInput,
+  type TerminalSubmission,
+} from "./bond-reconciliation.js";
 export {
   checkCouncilInactivity,
   checkCouncilInactivityFromDb,

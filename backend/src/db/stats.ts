@@ -1,7 +1,5 @@
-import { getAllBets } from "@/db/bets";
-import { getAllLeaderboardEntries } from "@/db/leaderboard";
-import type { Bet } from "@/db/bets";
-import type { LeaderboardEntry } from "@/db/leaderboard";
+import { getAllBets } from "./bets.js";
+import type { Bet } from "./bets.js";
 
 export interface BetAggregates {
   totalBets: number;
@@ -15,16 +13,8 @@ export interface BetAggregates {
   unclaimedCount: number;
 }
 
-export interface LeaderboardAggregates {
-  totalPoints: number;
-  totalWins: number;
-  totalLosses: number;
-  totalEntries: number;
-}
-
 export interface PlatformStats {
   bets: BetAggregates;
-  leaderboard: LeaderboardAggregates;
 }
 
 function computeBetAggregates(bets: { marketId: number; bet: Bet }[]): BetAggregates {
@@ -69,39 +59,15 @@ function computeBetAggregates(bets: { marketId: number; bet: Bet }[]): BetAggreg
   };
 }
 
-function computeLeaderboardAggregates(entries: LeaderboardEntry[]): LeaderboardAggregates {
-  let totalPoints = 0;
-  let totalWins = 0;
-  let totalLosses = 0;
-
-  for (const entry of entries) {
-    totalPoints += entry.points;
-    totalWins += entry.won;
-    totalLosses += entry.lost;
-  }
-
+export function getPlatformStats(): PlatformStats {
+  const allBets = getAllBets();
   return {
-    totalPoints,
-    totalWins,
-    totalLosses,
-    totalEntries: entries.length,
+    bets: computeBetAggregates(allBets),
   };
 }
 
-export function getPlatformStats(): PlatformStats {
-  const allBets = getAllBets();
-  const allEntries = getAllLeaderboardEntries();
-
-  return {
-    bets: computeBetAggregates(allBets),
-    leaderboard: computeLeaderboardAggregates(allEntries),
-  };
-/**
- * Global statistics query function
- * Data-access layer for API and indexer
- */
-
-interface GlobalStats {
+/** Global statistics shape returned by the API. */
+export interface GlobalStats {
   totalMarkets: number;
   volume: bigint;
   totalUsers: number;
@@ -109,19 +75,14 @@ interface GlobalStats {
 }
 
 /**
- * Retrieves global statistics
- * @returns GlobalStats object with market, volume, user, and bet counts
+ * Retrieves global statistics.
+ * TODO: Replace with a real DB query once the stats table is populated.
  */
 export async function getGlobalStats(): Promise<GlobalStats> {
-  // TODO: Implement database query logic
-  // This should be parameterized queries - NO string interpolation
-  
-  const stats: GlobalStats = {
+  return {
     totalMarkets: 0,
     volume: BigInt(0),
     totalUsers: 0,
     totalBets: 0,
   };
-
-  return stats;
 }

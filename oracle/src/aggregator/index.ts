@@ -29,7 +29,16 @@ export {
   type MarketTally,
   type SubmissionStore,
 } from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
+export {
+  loadCouncilConfig,
+  isCouncilMember,
+  describeCouncilConfig,
+  hasQuorum,
+  meetsThreshold,
+  COUNCIL_SIZE,
+  COUNCIL_DEFAULT_THRESHOLD,
+  type CouncilConfig,
+} from "../config/council.js";
 export {
   resolveMarketOnChain,
   createStellarSubmitter,
@@ -52,6 +61,17 @@ export {
   type BondMonitorOptions,
   type OracleSubmissionRecord,
 } from "./bond-monitor.js";
+export {
+  reconcileBonds,
+  runBondReconciliation,
+  recordSettlement,
+  type BondRefundDiscrepancy,
+  type BondReconciliationOptions,
+  type BondReconciliationResult,
+  type BondSettlement,
+  type RecordSettlementInput,
+  type TerminalSubmission,
+} from "./bond-reconciliation.js";
 export {
   checkCouncilInactivity,
   checkCouncilInactivityFromDb,

@@ -1,4 +1,6 @@
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
+import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
+import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
 import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
 import { handleReferralRegisteredEvent } from "./handlers/referral_registered.js";
 import { metrics } from "./metrics.js";
@@ -24,6 +26,12 @@ export async function writeEventToDb(
     await handleReferralRewardEvent(event, db, redis);
   } else if (domain === "referral" && action === "registered") {
     await handleReferralRegisteredEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "challenged") {
+    await handleOracleChallengedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "escalated") {
+    await handleOracleEscalatedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "finalized") {
+    await handleOracleFinalizedEvent(event, db, redis);
   } else {
     // Unrecognised event — not indexed, so it does not count as processed.
     return;

@@ -1,3 +1,6 @@
+export { resolveMarket } from "./resolve.js";
+export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+
 export type MarketCategory = "crypto" | "sports" | "politics" | "science";
 
 /** Comparator applied between the fetched value and `params.threshold` for threshold-style markets. */

@@ -53,6 +53,11 @@ npm install
 npm run dev
 ```
 
+## Documentation
+
+- **[Council Runbook](./docs/COUNCIL_RUNBOOK.md)** — operational guide for council members and aggregator operators
+- **[Architecture Overview](../docs/ORACLE_AND_BACKEND.md)** — design document for oracle and backend systems
+
 ## Contributing
 
 Pick an open issue labelled `area:oracle`, claim it, branch off

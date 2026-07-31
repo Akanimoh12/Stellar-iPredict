@@ -1,0 +1,298 @@
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import type { FastifyInstance } from "fastify";
+import {
+  observe,
+  getSnapshot,
+  getHistogram,
+  resetHistogram,
+  configureBuckets,
+  normaliseLabel,
+  cumulativeCounts,
+  DEFAULT_BUCKETS,
+  registerMetricsHook,
+} from "../metrics.js";
+import { buildServer } from "@/server";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+beforeEach(() => {
+  resetHistogram();
+});
+
+// ---------------------------------------------------------------------------
+// normaliseLabel
+// ---------------------------------------------------------------------------
+describe("normaliseLabel", () => {
+  it("upper-cases the method", () => {
+    expect(normaliseLabel("get", "/api/markets")).toBe("GET /api/markets");
+  });
+
+  it("preserves path as-is", () => {
+    expect(normaliseLabel("POST", "/api/markets/:id/bets")).toBe(
+      "POST /api/markets/:id/bets"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// configureBuckets validation
+// ---------------------------------------------------------------------------
+describe("configureBuckets", () => {
+  afterEach(() => {
+    // Restore default buckets so other tests are unaffected.
+    // Re-import is not needed — resetHistogram() clears entries; the buckets
+    // setting only affects *new* entries, so resetting to defaults here is
+    // enough for isolation.
+    configureBuckets([...DEFAULT_BUCKETS]);
+  });
+
+  it("throws when buckets array is empty", () => {
+    expect(() => configureBuckets([])).toThrow(RangeError);
+  });
+
+  it("throws when buckets are not strictly ascending", () => {
+    expect(() => configureBuckets([10, 10, Infinity])).toThrow(RangeError);
+    expect(() => configureBuckets([50, 10, Infinity])).toThrow(RangeError);
+  });
+
+  it("throws when the last bucket is not Infinity", () => {
+    expect(() => configureBuckets([10, 50, 100])).toThrow(RangeError);
+  });
+
+  it("accepts a valid custom bucket list", () => {
+    expect(() => configureBuckets([10, 50, 100, Infinity])).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// observe / getSnapshot
+// ---------------------------------------------------------------------------
+describe("observe + getSnapshot", () => {
+  it("returns undefined when no observations have been made", () => {
+    expect(getSnapshot("GET", "/api/markets")).toBeUndefined();
+  });
+
+  it("creates an entry on the first observation", () => {
+    observe("GET", "/api/markets", 42);
+    const snap = getSnapshot("GET", "/api/markets");
+    expect(snap).not.toBeUndefined();
+    expect(snap!.count).toBe(1);
+    expect(snap!.sum).toBeCloseTo(42);
+  });
+
+  it("places the observation in the correct bucket", () => {
+    // 42 ms → should land in the ≤50 ms bucket (index 3 in DEFAULT_BUCKETS)
+    observe("GET", "/api/markets", 42);
+    const snap = getSnapshot("GET", "/api/markets")!;
+    const idx = snap.buckets.findIndex((b) => b >= 42);
+    expect(snap.counts[idx]).toBe(1);
+    // Every other bucket must be zero.
+    snap.counts.forEach((c, i) => {
+      if (i !== idx) expect(c).toBe(0);
+    });
+  });
+
+  it("accumulates multiple observations correctly", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets", 300);
+
+    const snap = getSnapshot("GET", "/api/markets")!;
+    expect(snap.count).toBe(3);
+    expect(snap.sum).toBeCloseTo(320);
+  });
+
+  it("tracks separate histograms per route", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets/:id", 200);
+
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+    expect(getSnapshot("GET", "/api/markets/:id")!.count).toBe(1);
+  });
+
+  it("tracks separate histograms per method", () => {
+    observe("GET", "/api/markets", 10);
+    observe("POST", "/api/markets", 100);
+
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+    expect(getSnapshot("POST", "/api/markets")!.count).toBe(1);
+  });
+
+  it("places a very fast request (< first bucket) in bucket[0]", () => {
+    observe("GET", "/healthz", 1); // 1 ms < 5 ms (DEFAULT_BUCKETS[0])
+    const snap = getSnapshot("GET", "/healthz")!;
+    expect(snap.counts[0]).toBe(1);
+  });
+
+  it("places an extremely slow request in the Infinity bucket", () => {
+    observe("GET", "/healthz", 99_999);
+    const snap = getSnapshot("GET", "/healthz")!;
+    const lastIdx = snap.buckets.length - 1;
+    expect(snap.buckets[lastIdx]).toBe(Infinity);
+    expect(snap.counts[lastIdx]).toBe(1);
+  });
+
+  it("snapshot is immutable (frozen)", () => {
+    observe("GET", "/api/markets", 50);
+    const snap = getSnapshot("GET", "/api/markets")!;
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.counts)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getHistogram
+// ---------------------------------------------------------------------------
+describe("getHistogram", () => {
+  it("returns an empty array when no observations exist", () => {
+    expect(getHistogram()).toEqual([]);
+  });
+
+  it("returns all routes sorted alphabetically by label", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/leaderboard", 20);
+    observe("GET", "/api/stats", 30);
+
+    const routes = getHistogram().map((s) => s.route);
+    expect(routes).toEqual([
+      "GET /api/leaderboard",
+      "GET /api/markets",
+      "GET /api/stats",
+    ]);
+  });
+
+  it("includes correct count and sum for each route", () => {
+    observe("GET", "/api/markets", 40);
+    observe("GET", "/api/markets", 60);
+    observe("GET", "/api/stats", 100);
+
+    const hist = getHistogram();
+    const markets = hist.find((s) => s.route === "GET /api/markets")!;
+    const stats = hist.find((s) => s.route === "GET /api/stats")!;
+
+    expect(markets.count).toBe(2);
+    expect(markets.sum).toBeCloseTo(100);
+    expect(stats.count).toBe(1);
+    expect(stats.sum).toBeCloseTo(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resetHistogram
+// ---------------------------------------------------------------------------
+describe("resetHistogram", () => {
+  it("clears all entries", () => {
+    observe("GET", "/api/markets", 10);
+    resetHistogram();
+    expect(getHistogram()).toEqual([]);
+    expect(getSnapshot("GET", "/api/markets")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cumulativeCounts
+// ---------------------------------------------------------------------------
+describe("cumulativeCounts", () => {
+  it("produces running totals from per-bucket counts", () => {
+    expect(cumulativeCounts([0, 3, 1, 0, 2])).toEqual([0, 3, 4, 4, 6]);
+  });
+
+  it("handles all-zero input", () => {
+    expect(cumulativeCounts([0, 0, 0])).toEqual([0, 0, 0]);
+  });
+
+  it("handles a single bucket", () => {
+    expect(cumulativeCounts([7])).toEqual([7]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: registerMetricsHook wired into a real Fastify server
+// ---------------------------------------------------------------------------
+describe("registerMetricsHook (Fastify integration)", () => {
+  let server: FastifyInstance;
+
+  beforeEach(() => {
+    resetHistogram();
+    server = buildServer({ corsOrigins: [] });
+  });
+
+  afterEach(async () => {
+    await server.close();
+    resetHistogram();
+  });
+
+  it("records an observation after a real request to GET /healthz", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const snap = getSnapshot("GET", "/healthz");
+    expect(snap).not.toBeUndefined();
+    expect(snap!.count).toBe(1);
+    expect(snap!.sum).toBeGreaterThanOrEqual(0);
+  });
+
+  it("accumulates observations across multiple requests to the same route", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const snap = getSnapshot("GET", "/healthz")!;
+    expect(snap.count).toBe(3);
+  });
+
+  it("uses the route template, not the filled-in URL, for parameterised routes", async () => {
+    // /api/markets/:id — the id 999 must not appear in the label.
+    await server.inject({ method: "GET", url: "/api/markets/999" });
+
+    const byTemplate = getSnapshot("GET", "/api/markets/:id");
+    const byRaw = getSnapshot("GET", "/api/markets/999");
+
+    expect(byTemplate).not.toBeUndefined();
+    expect(byRaw).toBeUndefined();
+  });
+
+  it("records all routes independently without cross-contamination", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/api/markets" });
+
+    expect(getSnapshot("GET", "/healthz")!.count).toBe(1);
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+  });
+
+  it("does not throw and still records a metric for a 404 request", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/this-route-does-not-exist",
+    });
+    expect(res.statusCode).toBe(404);
+
+    // At least one entry must exist (the 404 handler path or raw url fallback).
+    expect(getHistogram().length).toBeGreaterThan(0);
+  });
+
+  it("does not break existing endpoints — /healthz still returns 200 ok", async () => {
+    const res = await server.inject({ method: "GET", url: "/healthz" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ status: "ok" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerMetricsHook can also be used with a bare Fastify instance
+// ---------------------------------------------------------------------------
+describe("registerMetricsHook (standalone)", () => {
+  it("does not throw when called on a bare app that has no routes", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    expect(() => registerMetricsHook(app)).not.toThrow();
+    await app.close();
+  });
+});

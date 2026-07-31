@@ -79,6 +79,7 @@ export {
   type CouncilInactivityMonitorOptions,
   type EscalatedMarketRecord,
 } from "./council-inactivity-monitor.js";
+export { ChallengeBot, startChallengeBot, type ChallengeBotOptions, type OracleSubmission, type ChallengeDecision, type ChallengeResult } from "./challenge-bot.js";
 export {
   detectNewSubmissions,
   SubmissionWatcher,

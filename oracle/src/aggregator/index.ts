@@ -29,7 +29,16 @@ export {
   type MarketTally,
   type SubmissionStore,
 } from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
+export {
+  loadCouncilConfig,
+  isCouncilMember,
+  describeCouncilConfig,
+  hasQuorum,
+  meetsThreshold,
+  COUNCIL_SIZE,
+  COUNCIL_DEFAULT_THRESHOLD,
+  type CouncilConfig,
+} from "../config/council.js";
 export {
   resolveMarketOnChain,
   createStellarSubmitter,
@@ -53,6 +62,17 @@ export {
   type OracleSubmissionRecord,
 } from "./bond-monitor.js";
 export {
+  reconcileBonds,
+  runBondReconciliation,
+  recordSettlement,
+  type BondRefundDiscrepancy,
+  type BondReconciliationOptions,
+  type BondReconciliationResult,
+  type BondSettlement,
+  type RecordSettlementInput,
+  type TerminalSubmission,
+} from "./bond-reconciliation.js";
+export {
   checkCouncilInactivity,
   checkCouncilInactivityFromDb,
   type CouncilInactivityAlert,
@@ -60,6 +80,45 @@ export {
   type EscalatedMarketRecord,
 } from "./council-inactivity-monitor.js";
 export { ChallengeBot, startChallengeBot, type ChallengeBotOptions, type OracleSubmission, type ChallengeDecision, type ChallengeResult } from "./challenge-bot.js";
+export {
+  detectNewSubmissions,
+  SubmissionWatcher,
+  type DetectNewSubmissionsResult,
+  type NewSubmissionAlert,
+  type SubmissionRecord,
+  type SubmissionWatcherOptions,
+} from "./submission-watcher.js";
+export {
+  detectDisputeEscalations,
+  DisputeEscalationWatcher,
+  type DetectDisputeEscalationsResult,
+  type DisputeEscalationAlert,
+  type DisputeEscalationRecord,
+  type DisputeEscalationWatcherOptions,
+} from "./dispute-escalation-watcher.js";
+export {
+  loadCategoryResolverConfig,
+  getResolversForCategory,
+  isAuthorizedResolverForCategory,
+  describeCategoryResolverConfig,
+  type CategoryResolverConfig,
+  type MarketCategory,
+  MARKET_CATEGORIES,
+} from "./category-resolvers.js";
+export {
+  validateSubmissionData,
+  assertCanFinalize,
+  createDefaultValidationConfig,
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./submission-validator.js";
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./submission-validator.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {

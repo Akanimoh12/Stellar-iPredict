@@ -76,6 +76,39 @@ describe("council aggregator skeleton", () => {
     expect(config.COUNCIL_FEE_BPS).toBe(1_000);
   });
 
+  it("allows configurable poll interval with default", () => {
+    const configDefault = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(configDefault.POLL_INTERVAL_MS).toBe(5_000);
+
+    const configCustom = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "10000",
+    });
+    expect(configCustom.POLL_INTERVAL_MS).toBe(10_000);
+  });
+
+  it("rejects negative or zero poll interval", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "0",
+    })).toThrow();
+
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "-1000",
+    })).toThrow();
+  });
+
   it("rejects a disputer bond that does not exceed the submitter bond", () => {
     expect(() => loadAggregatorConfig({
       COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",

@@ -2,15 +2,6 @@
   "name": "ipredict-backend",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "pg": "^8.13.1"
-  },
-  "devDependencies": {
   "description": "Backend API and indexer for iPredict",
   "main": "index.js",
   "scripts": {
@@ -24,6 +15,7 @@
     "@fastify/cors": "^11.3.0",
     "@fastify/helmet": "^13.1.0",
     "@fastify/swagger": "^9.8.1",
+    "@stellar/stellar-sdk": "^16.2.0",
     "fastify": "^5.8.5",
     "ioredis": "^5.11.1",
     "pg": "^8.13.1",

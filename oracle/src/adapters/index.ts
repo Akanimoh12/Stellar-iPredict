@@ -1,5 +1,11 @@
 export { resolveMarket } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export {
+  ADAPTER_API_KEY_ENV,
+  loadAdapterApiKeys,
+  requireAdapterApiKey,
+} from "./config.js";
+export type { AdapterApiKeyName, AdapterApiKeys, AdapterEnvironment } from "./config.js";
 
 export type MarketCategory = "crypto" | "sports" | "politics" | "science";
 

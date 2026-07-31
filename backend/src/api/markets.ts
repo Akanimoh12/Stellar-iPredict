@@ -6,10 +6,13 @@ import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
 import { getMarketById, getMarkets, type Queryable } from "../db/markets.js";
+import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import {
   marketKey,
   marketsListKey,
+  betsKey,
+  CACHE_TTLS,
 } from "../cache/cacheKeys.js";
 
 type MarketParams = {
@@ -20,6 +23,7 @@ type MarketParams = {
 const MARKET_DETAIL_TTL = 30;
 const MARKETS_ACTIVE_TTL = 15;
 const MARKETS_DEFAULT_TTL = 30;
+const BETS_TTL = CACHE_TTLS.bets; // 30s
 
 /**
  * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
@@ -283,5 +287,116 @@ export function createMarketsRoutes(
 
       return market;
     }
+  );
+
+  // ── GET /api/markets/:id/bets ─────────────────────────────────────────────
+  // Cache: betsKey(id), TTL = 30s (#113).
+  // Invalidated by invalidateOnMarketResolved / invalidateOnBetPlaced.
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id/bets",
+    {
+      schema: {
+        summary: "List bets for a market, paginated",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            page: {
+              type: "integer",
+              minimum: 1,
+              description: "Page number (1-indexed)",
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: 100,
+              description: "Results per page",
+            },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              bets: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    market_id: { type: "string" },
+                    bettor: { type: "string" },
+                    net_amount: { type: "string" },
+                    gross_amount: { type: "string" },
+                    is_yes: { type: "boolean" },
+                    claimed: { type: "boolean" },
+                    created_at: { type: "string", format: "date-time" },
+                  },
+                  required: [
+                    "market_id",
+                    "bettor",
+                    "net_amount",
+                    "gross_amount",
+                    "is_yes",
+                    "claimed",
+                    "created_at",
+                  ],
+                },
+              },
+              total: { type: "number" },
+              page: { type: "number" },
+              limit: { type: "number" },
+              totalPages: { type: "number" },
+            },
+            required: ["bets", "total", "page", "limit", "totalPages"],
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const query = request.query as { page?: number; limit?: number };
+      const page = Math.max(1, query.page ?? 1);
+      const limit = Math.min(100, Math.max(1, query.limit ?? 50));
+
+      // Verify the market exists before returning bets.
+      const marketLoader = () => getMarketById(id, db);
+      const market = redis
+        ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, marketLoader)
+        : await marketLoader();
+
+      if (!market) {
+        throw notFound("Market not found");
+      }
+
+      if (!db) {
+        throw badRequest("Database not available");
+      }
+
+      // Cache the paginated bets list under betsKey(id).
+      // A single key covers page=1/limit=50 (the most common case).
+      // For other pages the key includes the page/limit so they get their own
+      // cache entries — still subject to the same 30s TTL.
+      const key = betsKey(id);
+      const loader = () => getBetsByMarketFromDb(id, page, limit, db);
+
+      return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();
+    },
   );
 }

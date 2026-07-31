@@ -21,7 +21,13 @@ export {
 } from "./finalize-notifier.js";
 export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
 export { ResolverKeyManager } from "./key-rotation.js";
-export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
+export {
+  AggregatorMetrics,
+  ORACLE_RESOLUTION_LAG_H_METRIC,
+  type AggregatorMetricsSnapshot,
+  type NamedMetric,
+  type ResolutionLagEntry,
+} from "./metrics.js";
 export {
   computeTally,
   createPostgresSubmissionStore,

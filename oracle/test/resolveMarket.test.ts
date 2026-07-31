@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveMarketOnChain, type OnChainSubmitter, type ResolveMarketResult } from "../src/submitter/resolveMarket.js";
+import { AggregatorMetrics, ORACLE_RESOLUTION_LAG_H_METRIC } from "../src/aggregator/metrics.js";
 
 function makeDeps(overrides: {
   submitter?: OnChainSubmitter;
   isAlreadyResolved?: (marketId: string) => Promise<boolean>;
   maxRetries?: number;
+  metrics?: AggregatorMetrics;
 }) {
   const recorded: ResolveMarketResult[] = [];
   const retries: { marketId: string; attempt: number }[] = [];
@@ -22,6 +24,7 @@ function makeDeps(overrides: {
     },
     maxRetries: overrides.maxRetries,
     retryBackoffMs: 1,
+    metrics: overrides.metrics,
   };
 }
 
@@ -84,5 +87,70 @@ describe("resolveMarketOnChain", () => {
   it("rejects a blank marketId", async () => {
     const deps = makeDeps({});
     await expect(resolveMarketOnChain(deps, "  ", true)).rejects.toThrow("marketId is required");
+  });
+
+  // ── oracle_resolution_lag_h integration ────────────────────────────────────
+
+  it("records oracle_resolution_lag_h when metrics and endTime are provided", async () => {
+    const metrics = new AggregatorMetrics();
+    const endTime = 1_000_000; // Unix seconds in the past
+    const deps = makeDeps({ metrics });
+
+    const result = await resolveMarketOnChain(deps, "77", true, endTime);
+
+    // lag should be positive (resolved after expiry)
+    expect(result).not.toBeNull();
+    expect(typeof result!.lagHours).toBe("number");
+    expect(result!.lagHours).toBeGreaterThanOrEqual(0);
+
+    // metric is recorded in the collector
+    expect(metrics.totalResolved).toBe(1);
+    const named = metrics.getMetric(ORACLE_RESOLUTION_LAG_H_METRIC, "77");
+    expect(named).not.toBeNull();
+    expect(named!.name).toBe("oracle_resolution_lag_h");
+    expect(named!.marketId).toBe("77");
+  });
+
+  it("does not record metrics when metrics dependency is absent", async () => {
+    const deps = makeDeps({}); // no metrics
+    const result = await resolveMarketOnChain(deps, "42", true, 1_000_000);
+
+    expect(result).not.toBeNull();
+    expect(result!.lagHours).toBeUndefined();
+  });
+
+  it("does not record metrics when endTime is absent even if metrics is provided", async () => {
+    const metrics = new AggregatorMetrics();
+    const deps = makeDeps({ metrics });
+
+    const result = await resolveMarketOnChain(deps, "42", true); // no endTime
+
+    expect(result).not.toBeNull();
+    expect(result!.lagHours).toBeUndefined();
+    expect(metrics.totalResolved).toBe(0);
+  });
+
+  it("records lag in dry-run mode when metrics and endTime are provided", async () => {
+    const metrics = new AggregatorMetrics();
+    const endTime = 1_000_000;
+    const deps = { ...makeDeps({ metrics }), dryRun: true };
+
+    const result = await resolveMarketOnChain(deps, "55", false, endTime);
+
+    expect(result).not.toBeNull();
+    expect(result!.dryRun).toBe(true);
+    expect(typeof result!.lagHours).toBe("number");
+    expect(metrics.totalResolved).toBe(1);
+  });
+
+  it("serializeMetric produces correct Prometheus line after resolution", async () => {
+    const metrics = new AggregatorMetrics();
+    const endTime = 1_000_000;
+    const deps = makeDeps({ metrics });
+
+    await resolveMarketOnChain(deps, "88", true, endTime);
+
+    const line = metrics.serializeMetric(ORACLE_RESOLUTION_LAG_H_METRIC, "88");
+    expect(line).toMatch(/^oracle_resolution_lag_h\{market_id="88"\} /);
   });
 });

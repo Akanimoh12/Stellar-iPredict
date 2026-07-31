@@ -1,5 +1,11 @@
 export { resolveMarket } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export {
+  ADAPTER_API_KEY_ENV,
+  loadAdapterApiKeys,
+  requireAdapterApiKey,
+} from "./config.js";
+export type { AdapterApiKeyName, AdapterApiKeys, AdapterEnvironment } from "./config.js";
 
 export type MarketCategory = "crypto" | "sports" | "politics" | "science";
 
@@ -11,6 +17,13 @@ export interface CryptoMarketParams {
   symbol: string;
   comparator: ThresholdComparator;
   threshold: number;
+}
+
+export interface PoliticsMarketParams {
+  /** Market identifier or slug for the politics data source. */
+  marketId: string;
+  /** Expected outcome to check against (e.g., "YES", "NO", or specific candidate/event). */
+  expectedOutcome: string;
 }
 
 export interface Market {
@@ -45,6 +58,18 @@ export function isCryptoMarketParams(
     (params.comparator === "gte" || params.comparator === "lte") &&
     typeof params.threshold === "number" &&
     Number.isFinite(params.threshold)
+  );
+}
+
+/** Type guard shared by politics adapters (Polymarket, Reuters, ...) to validate `market.params`. */
+export function isPoliticsMarketParams(
+  params: Record<string, unknown>,
+): params is Record<string, unknown> & PoliticsMarketParams {
+  return (
+    typeof params.marketId === "string" &&
+    params.marketId.length > 0 &&
+    typeof params.expectedOutcome === "string" &&
+    params.expectedOutcome.length > 0
   );
 }
 

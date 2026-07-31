@@ -1,3 +1,23 @@
+/**
+ * Leaderboard rebuild job — replays all events from the events table
+ * to recompute the leaderboard snapshot from scratch.
+ *
+ * This module provides:
+ * 1. buildLeaderboardSnapshot() — stateless aggregation of events into leaderboard entries
+ * 2. rebuildLeaderboardTable() — end-to-end rebuild with DB mutations (wrapped in TX)
+ * 3. Comprehensive event filtering and error handling
+ *
+ * Usage:
+ *   npm run rebuild:leaderboard [--dry-run] [--since-ledger N]
+ *
+ * The job:
+ * - Fetches all events (or from sinceLedger if specified)
+ * - Aggregates them into user leaderboard entries with points, win rate, rankings
+ * - Truncates the leaderboard table (or upserts on conflict)
+ * - Logs progress and completion with structured JSON
+ * - Handles errors gracefully — logs and continues per user, never crashes indexer
+ */
+
 export interface EventLogRow {
   id: number;
   ledgerSeq: number;

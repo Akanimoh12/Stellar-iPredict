@@ -3,7 +3,23 @@
  * market's expiry (`endTime`) and its actual resolution timestamp.
  *
  * All timestamps are Unix seconds.
+ *
+ * ## Named metric: oracle_resolution_lag_h
+ *
+ * The canonical metric name for resolution lag is `oracle_resolution_lag_h`.
+ * Use `serializeMetric()` to obtain a Prometheus-compatible text line, or
+ * `getMetric()` to retrieve the current value by name.
+ *
+ * ```ts
+ * const metrics = new AggregatorMetrics();
+ * metrics.recordResolution(marketId, endTime, resolvedAt);
+ * console.log(metrics.serializeMetric(ORACLE_RESOLUTION_LAG_H_METRIC));
+ * // oracle_resolution_lag_h{market_id="42"} 2.5
+ * ```
  */
+
+/** Canonical Prometheus-style metric name for resolution lag in hours. */
+export const ORACLE_RESOLUTION_LAG_H_METRIC = "oracle_resolution_lag_h" as const;
 
 export interface ResolutionLagEntry {
   marketId: string;
@@ -30,19 +46,37 @@ export interface AggregatorMetricsSnapshot {
   entries: readonly ResolutionLagEntry[];
 }
 
+/**
+ * A single named metric value, keyed by `ORACLE_RESOLUTION_LAG_H_METRIC`.
+ * Returned by `AggregatorMetrics.getMetric()`.
+ */
+export interface NamedMetric {
+  /** Canonical metric name, e.g. `"oracle_resolution_lag_h"`. */
+  name: typeof ORACLE_RESOLUTION_LAG_H_METRIC;
+  /** Market ID this observation belongs to. */
+  marketId: string;
+  /** Lag value in hours (seconds-precision float). */
+  value: number;
+}
+
 export class AggregatorMetrics {
   private readonly entries: ResolutionLagEntry[] = [];
   private _totalSubmissions = 0;
   private _totalDisputes = 0;
 
   /**
-   * Record a resolution event.
+   * Record a resolution event and return a `NamedMetric` for
+   * `oracle_resolution_lag_h` alongside the raw entry.
    *
-   * @param marketId  - unique market identifier
-   * @param endTime   - market expiry Unix timestamp (seconds)
-   * @param resolvedAt - moment the resolution was submitted (seconds)
+   * @param marketId   - unique market identifier
+   * @param endTime    - market expiry Unix timestamp (seconds)
+   * @param resolvedAt - moment the resolution was confirmed on-chain (seconds)
    */
-  recordResolution(marketId: string, endTime: number, resolvedAt: number): ResolutionLagEntry {
+  recordResolution(
+    marketId: string,
+    endTime: number,
+    resolvedAt: number,
+  ): ResolutionLagEntry {
     const lagSeconds = resolvedAt - endTime;
     const lagHours = lagSeconds / 3_600;
     const entry: ResolutionLagEntry = { marketId, endTime, resolvedAt, lagHours };
@@ -58,6 +92,60 @@ export class AggregatorMetrics {
   /** Record a new dispute (escalated market) event. */
   recordDispute(): void {
     this._totalDisputes += 1;
+  /**
+   * Return the latest `oracle_resolution_lag_h` metric for a given market,
+   * or `null` if no resolution has been recorded for it yet.
+   *
+   * @param name     - must be `ORACLE_RESOLUTION_LAG_H_METRIC`
+   * @param marketId - market to look up
+   */
+  getMetric(
+    name: typeof ORACLE_RESOLUTION_LAG_H_METRIC,
+    marketId: string,
+  ): NamedMetric | null {
+    // Walk backwards to return the most recent entry for this market.
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const entry = this.entries[i];
+      if (entry.marketId === marketId) {
+        return { name, marketId, value: entry.lagHours };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Serialize the most recent `oracle_resolution_lag_h` observation for
+   * `marketId` as a Prometheus text-format line.
+   *
+   * Returns `null` when no resolution has been recorded for that market.
+   *
+   * Example output:
+   * ```
+   * oracle_resolution_lag_h{market_id="42"} 2.5
+   * ```
+   *
+   * @param name     - must be `ORACLE_RESOLUTION_LAG_H_METRIC`
+   * @param marketId - market to serialize
+   */
+  serializeMetric(
+    name: typeof ORACLE_RESOLUTION_LAG_H_METRIC,
+    marketId: string,
+  ): string | null {
+    const metric = this.getMetric(name, marketId);
+    if (!metric) return null;
+    return `${metric.name}{market_id="${metric.marketId}"} ${metric.value}`;
+  }
+
+  /**
+   * Return all recorded `oracle_resolution_lag_h` observations as
+   * Prometheus text-format lines, newest-first.
+   *
+   * Useful for exposing a `/metrics` endpoint.
+   */
+  serializeAll(name: typeof ORACLE_RESOLUTION_LAG_H_METRIC): string[] {
+    return [...this.entries]
+      .reverse()
+      .map((e) => `${name}{market_id="${e.marketId}"} ${e.lagHours}`);
   }
 
   /** Build a snapshot of all collected metrics. */

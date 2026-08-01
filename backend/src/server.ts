@@ -5,6 +5,7 @@ import type { Redis } from "ioredis";
 import { registerLeaderboardRoutes } from "./api/leaderboard.js";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
+import compress from "@fastify/compress";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
 import { healthRoutes } from "./api/health.js";
@@ -19,7 +20,9 @@ import {
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
+import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
+import { registerMetricsHook } from "./metrics.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -63,6 +66,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerRequestLogging(server);
+  registerMetricsHook(server);
   registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.
@@ -97,9 +101,17 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     referrerPolicy: { policy: "no-referrer" },
   });
 
+  // Response compression - supports gzip and brotli (when available)
+  // Should be registered after security headers but before CORS and routes
+  server.register(compress, {
+    global: true,
+    threshold: 1024, // Don't compress responses smaller than 1KB
+  });
+
 
   registerLeaderboardRoutes(server, databasePool, redis);
   registerStatsRoutes(server, databasePool, redis);
+  registerOracleRoutes(server, databasePool);
 
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {
@@ -156,7 +168,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       }
     );
 
-    createMarketsRoutes(routes, undefined, redis);
+    createMarketsRoutes(routes, databasePool, redis);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.

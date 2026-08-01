@@ -1,7 +1,12 @@
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 
-import { createMarketsRoutes, parsePositiveInteger } from "./markets";
+import {
+  computeEtag,
+  createMarketsRoutes,
+  matchesIfNoneMatch,
+  parsePositiveInteger
+} from "./markets";
 import { registerErrorHandler } from "../lib/errors.js";
 import type { MarketRow, Queryable } from "../db/markets.js";
 
@@ -31,6 +36,17 @@ async function buildTestServer(db: Queryable) {
   createMarketsRoutes(server, db);
   await server.ready();
   return server;
+}
+
+function createListDb(markets: MarketRow[]): Queryable {
+  return {
+    query: vi.fn(async (sql: string) => {
+      if (sql.includes("COUNT")) {
+        return { rows: [{ total: markets.length }] };
+      }
+      return { rows: markets };
+    }) as Queryable["query"]
+  };
 }
 
 describe("parsePositiveInteger", () => {
@@ -102,6 +118,100 @@ describe("GET /api/markets/:id", () => {
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("computeEtag", () => {
+  it("is a quoted hex digest", () => {
+    const etag = computeEtag({ a: 1 });
+    expect(etag).toMatch(/^"[0-9a-f]{40}"$/);
+  });
+
+  it("is stable for the same payload", () => {
+    expect(computeEtag({ a: 1, b: [1, 2, 3] })).toBe(
+      computeEtag({ a: 1, b: [1, 2, 3] })
+    );
+  });
+
+  it("differs when the payload changes", () => {
+    expect(computeEtag({ a: 1 })).not.toBe(computeEtag({ a: 2 }));
+  });
+});
+
+describe("matchesIfNoneMatch", () => {
+  const etag = '"abc123"';
+
+  it("returns false when the header is absent", () => {
+    expect(matchesIfNoneMatch(undefined, etag)).toBe(false);
+  });
+
+  it("matches an exact value", () => {
+    expect(matchesIfNoneMatch(etag, etag)).toBe(true);
+  });
+
+  it("matches one entry in a comma-separated list", () => {
+    expect(matchesIfNoneMatch(`"other", ${etag}`, etag)).toBe(true);
+  });
+
+  it("matches the wildcard", () => {
+    expect(matchesIfNoneMatch("*", etag)).toBe(true);
+  });
+
+  it("returns false when nothing matches", () => {
+    expect(matchesIfNoneMatch('"other"', etag)).toBe(false);
+  });
+});
+
+describe("GET /api/markets — ETag / conditional GET", () => {
+  it("sets an ETag header on the list response", async () => {
+    const server = await buildTestServer(createListDb([createMarket()]));
+
+    const response = await server.inject({ method: "GET", url: "/api/markets" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers.etag).toMatch(/^"[0-9a-f]{40}"$/);
+  });
+
+  it("returns 304 with no body when If-None-Match matches the current ETag", async () => {
+    const server = await buildTestServer(createListDb([createMarket()]));
+
+    const first = await server.inject({ method: "GET", url: "/api/markets" });
+    const etag = first.headers.etag as string;
+
+    const second = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { "if-none-match": etag }
+    });
+
+    expect(second.statusCode).toBe(304);
+    expect(second.body).toBe("");
+    expect(second.headers.etag).toBe(etag);
+  });
+
+  it("returns 200 with the full body when If-None-Match is stale", async () => {
+    const server = await buildTestServer(createListDb([createMarket()]));
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { "if-none-match": '"stale-value"' }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().markets).toHaveLength(1);
+  });
+
+  it("changes the ETag when the underlying data changes", async () => {
+    const serverA = await buildTestServer(createListDb([createMarket({ id: 1 })]));
+    const serverB = await buildTestServer(
+      createListDb([createMarket({ id: 1 }), createMarket({ id: 2 })])
+    );
+
+    const responseA = await serverA.inject({ method: "GET", url: "/api/markets" });
+    const responseB = await serverB.inject({ method: "GET", url: "/api/markets" });
+
+    expect(responseA.headers.etag).not.toBe(responseB.headers.etag);
   });
 });
 

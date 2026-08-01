@@ -58,9 +58,10 @@ function createFakeRedis() {
         if (store.delete(k)) count++;
       }
       return Promise.resolve(count);
-    }),
+    }) as any,
   };
 }
+
 
 type FakeRedis = ReturnType<typeof createFakeRedis>;
 

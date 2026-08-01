@@ -71,13 +71,39 @@ export function parsePositiveInteger(value: string): number | null {
   return parsed;
 }
 
+const VALID_CATEGORIES = [
+  "Crypto",
+  "Sports",
+  "Politics",
+  "Entertainment",
+  "Science",
+] as const;
+
+const categorySchema = z
+  .string()
+  .optional()
+  .transform((val: string | undefined) => {
+    if (!val) return undefined;
+    // Trim whitespace
+    const trimmed = val.trim();
+    if (!trimmed) return undefined;
+    // Convert to TitleCase (first letter uppercase, rest lowercase)
+    const normalized =
+      trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+    return normalized;
+  })
+  .refine((val: string | undefined) => {
+    if (!val) return true;
+    return VALID_CATEGORIES.includes(val as (typeof VALID_CATEGORIES)[number]);
+  }, {
+    message: "Invalid category. Must be one of: Crypto, Sports, Politics, Entertainment, Science",
+  });
+
 const marketsQuerySchema = z.object({
   filter: z
     .enum(["active", "resolved", "ended", "cancelled", "all"])
     .default("all"),
-  category: z
-    .enum(["Crypto", "Sports", "Politics", "Entertainment", "Science"])
-    .optional(),
+  category: categorySchema,
   sort: z
     .enum(["newest", "volume", "ending_soon", "bettors"])
     .default("newest"),
@@ -162,14 +188,7 @@ export function createMarketsRoutes(
             },
             category: {
               type: "string",
-              enum: [
-                "Crypto",
-                "Sports",
-                "Politics",
-                "Entertainment",
-                "Science",
-              ],
-              description: "Filter by market category",
+              description: "Filter by market category. Accepts: Crypto, Sports, Politics, Entertainment, Science. Case-insensitive and whitespace-trimming.",
             },
             sort: {
               type: "string",

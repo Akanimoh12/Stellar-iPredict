@@ -21,6 +21,14 @@ import type { FastifyInstance } from "fastify";
  * Thread safety: Node.js is single-threaded; no locking is required.
  */
 
+/**
+ * Error-rate counter — issue #86
+ *
+ * Counts 5xx server error responses for monitoring.
+ * Provides a simple counter that can be used to track API error rates
+ * and alert on elevated error levels.
+ */
+
 // ---------------------------------------------------------------------------
 // Bucket boundaries (milliseconds, upper-inclusive)
 // ---------------------------------------------------------------------------
@@ -58,6 +66,14 @@ export interface HistogramSnapshot {
   readonly count: number;
 }
 
+/** Immutable snapshot of error counts — safe to serialise. */
+export interface ErrorCountSnapshot {
+  /** Fully normalised route label, e.g. `"GET /api/markets"`. */
+  readonly route: string;
+  /** Total number of 5xx responses for this route. */
+  readonly count: number;
+}
+
 /**
  * Internal mutable state for a single route.
  * Not exposed externally — callers always get a frozen snapshot.
@@ -78,6 +94,13 @@ const registry = new Map<string, HistogramEntry>();
 
 /** Bucket configuration used for new entries. Settable once at startup. */
 let activeBuckets: readonly number[] = DEFAULT_BUCKETS;
+
+// ---------------------------------------------------------------------------
+// Error counter registry
+// ---------------------------------------------------------------------------
+
+/** Key: normalised route label (`"METHOD /path"`). Value: 5xx response count. */
+const errorRegistry = new Map<string, number>();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -179,6 +202,62 @@ export function resetHistogram(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Error counter API
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a 5xx server error response.
+ *
+ * @param method    HTTP method in upper-case, e.g. `"GET"`.
+ * @param routePath Fastify route path (with parameter names, not values),
+ *                  e.g. `"/api/markets/:id"`.
+ */
+export function recordError(method: string, routePath: string): void {
+  const label = normaliseLabel(method, routePath);
+  const current = errorRegistry.get(label) ?? 0;
+  errorRegistry.set(label, current + 1);
+}
+
+/**
+ * Return the error count for a single route, or `undefined` if no errors
+ * have been recorded for that route yet.
+ *
+ * @param method    HTTP method in upper-case.
+ * @param routePath Fastify route path (template, not the actual URL).
+ */
+export function getErrorCount(
+  method: string,
+  routePath: string
+): number | undefined {
+  const label = normaliseLabel(method, routePath);
+  return errorRegistry.get(label);
+}
+
+/**
+ * Return error counts for **all** routes that have recorded at least one error,
+ * sorted alphabetically by route label.
+ */
+export function getErrorCounts(): ErrorCountSnapshot[] {
+  return Array.from(errorRegistry.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, count]) =>
+      Object.freeze({
+        route: label,
+        count,
+      })
+    );
+}
+
+/**
+ * Reset all error count data.
+ *
+ * Useful in tests and for rolling-window metric resets.
+ */
+export function resetErrorCounts(): void {
+  errorRegistry.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -207,7 +286,7 @@ export function cumulativeCounts(counts: readonly number[]): number[] {
 
 /**
  * Register an `onResponse` hook that records every completed request into the
- * histogram.
+ * histogram and counts 5xx server errors.
  *
  * Route template (e.g. `/api/markets/:id`) is used as the label rather than
  * the raw URL so wildcard and parameterised routes are grouped correctly.
@@ -223,6 +302,11 @@ export function registerMetricsHook(app: FastifyInstance): void {
     const routePath: string =
       (request.routeOptions as { url?: string }).url ?? request.url;
     observe(request.method, routePath, reply.elapsedTime);
+
+    // Record 5xx server errors for monitoring
+    if (reply.statusCode >= 500 && reply.statusCode < 600) {
+      recordError(request.method, routePath);
+    }
   });
 }
 

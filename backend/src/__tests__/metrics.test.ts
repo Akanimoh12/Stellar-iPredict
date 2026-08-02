@@ -17,6 +17,10 @@ import {
   cumulativeCounts,
   DEFAULT_BUCKETS,
   registerMetricsHook,
+  recordError,
+  getErrorCount,
+  getErrorCounts,
+  resetErrorCounts,
 } from "../metrics.js";
 import { buildServer } from "@/server";
 
@@ -25,6 +29,7 @@ import { buildServer } from "@/server";
 // ---------------------------------------------------------------------------
 beforeEach(() => {
   resetHistogram();
+  resetErrorCounts();
 });
 
 // ---------------------------------------------------------------------------
@@ -52,6 +57,7 @@ describe("configureBuckets", () => {
     // setting only affects *new* entries, so resetting to defaults here is
     // enough for isolation.
     configureBuckets([...DEFAULT_BUCKETS]);
+    resetErrorCounts();
   });
 
   it("throws when buckets array is empty", () => {
@@ -215,6 +221,91 @@ describe("cumulativeCounts", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Error counter API
+// ---------------------------------------------------------------------------
+describe("recordError + getErrorCount", () => {
+  it("returns undefined when no errors have been recorded", () => {
+    expect(getErrorCount("GET", "/api/markets")).toBeUndefined();
+  });
+
+  it("increments error count for a route", () => {
+    recordError("GET", "/api/markets");
+    expect(getErrorCount("GET", "/api/markets")).toBe(1);
+  });
+
+  it("accumulates multiple errors for the same route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    expect(getErrorCount("GET", "/api/markets")).toBe(3);
+  });
+
+  it("tracks separate error counts per route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets/:id");
+    recordError("GET", "/api/markets");
+
+    expect(getErrorCount("GET", "/api/markets")).toBe(2);
+    expect(getErrorCount("GET", "/api/markets/:id")).toBe(1);
+  });
+
+  it("tracks separate error counts per method", () => {
+    recordError("GET", "/api/markets");
+    recordError("POST", "/api/markets");
+
+    expect(getErrorCount("GET", "/api/markets")).toBe(1);
+    expect(getErrorCount("POST", "/api/markets")).toBe(1);
+  });
+});
+
+describe("getErrorCounts", () => {
+  it("returns an empty array when no errors have been recorded", () => {
+    expect(getErrorCounts()).toEqual([]);
+  });
+
+  it("returns all routes with errors sorted alphabetically by label", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/leaderboard");
+    recordError("GET", "/api/stats");
+
+    const routes = getErrorCounts().map((s) => s.route);
+    expect(routes).toEqual([
+      "GET /api/leaderboard",
+      "GET /api/markets",
+      "GET /api/stats",
+    ]);
+  });
+
+  it("includes correct error count for each route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/stats");
+
+    const errors = getErrorCounts();
+    const markets = errors.find((s) => s.route === "GET /api/markets")!;
+    const stats = errors.find((s) => s.route === "GET /api/stats")!;
+
+    expect(markets.count).toBe(2);
+    expect(stats.count).toBe(1);
+  });
+
+  it("snapshot is immutable (frozen)", () => {
+    recordError("GET", "/api/markets");
+    const snapshot = getErrorCounts()[0]!;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+});
+
+describe("resetErrorCounts", () => {
+  it("clears all error entries", () => {
+    recordError("GET", "/api/markets");
+    resetErrorCounts();
+    expect(getErrorCounts()).toEqual([]);
+    expect(getErrorCount("GET", "/api/markets")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Integration: registerMetricsHook wired into a real Fastify server
 // ---------------------------------------------------------------------------
 describe("registerMetricsHook (Fastify integration)", () => {
@@ -222,12 +313,14 @@ describe("registerMetricsHook (Fastify integration)", () => {
 
   beforeEach(() => {
     resetHistogram();
+    resetErrorCounts();
     server = buildServer({ corsOrigins: [] });
   });
 
   afterEach(async () => {
     await server.close();
     resetHistogram();
+    resetErrorCounts();
   });
 
   it("records an observation after a real request to GET /healthz", async () => {
@@ -282,6 +375,36 @@ describe("registerMetricsHook (Fastify integration)", () => {
     const res = await server.inject({ method: "GET", url: "/healthz" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ status: "ok" });
+  });
+
+  it("does not record non-5xx responses as errors", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const errorCount = getErrorCount("GET", "/healthz");
+    expect(errorCount).toBeUndefined();
+  });
+
+  it("records 5xx errors when recordError is called directly", async () => {
+    recordError("GET", "/api/test");
+    recordError("GET", "/api/test");
+    recordError("POST", "/api/test");
+
+    expect(getErrorCount("GET", "/api/test")).toBe(2);
+    expect(getErrorCount("POST", "/api/test")).toBe(1);
+  });
+
+  it("records 5xx errors via the Fastify hook when statusCode is 500-599", async () => {
+    // Add a temporary route that returns a 500 error
+    server.get("/test-500", async () => {
+      throw new Error("Test 500 error");
+    });
+
+    const res = await server.inject({ method: "GET", url: "/test-500" });
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+    expect(res.statusCode).toBeLessThan(600);
+
+    const errorCount = getErrorCount("GET", "/test-500");
+    expect(errorCount).toBe(1);
   });
 });
 

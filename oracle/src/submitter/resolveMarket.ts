@@ -1,10 +1,16 @@
 import { Address, Contract, Keypair, TransactionBuilder, nativeToScVal, rpc } from "@stellar/stellar-sdk";
+import { AggregatorMetrics, ORACLE_RESOLUTION_LAG_H_METRIC } from "../aggregator/metrics.js";
 
 export interface ResolveMarketResult {
   marketId: string;
   outcome: boolean;
   txHash: string;
   dryRun?: boolean;
+  /**
+   * Hours between market expiry and finalization, recorded as
+   * `oracle_resolution_lag_h`. Present only when `endTime` was provided.
+   */
+  lagHours?: number;
 }
 
 /** Builds, signs, and submits the on-chain resolution, returning the confirmed tx hash. */
@@ -28,6 +34,12 @@ export interface ResolveMarketDependencies {
   retryBackoffMs?: number;
   /** When true, runs validation/recording without submitting on-chain. */
   dryRun?: boolean;
+  /**
+   * Optional metrics collector. When provided, a successful resolution records
+   * `oracle_resolution_lag_h` (hours from market expiry to finalization).
+   * Requires `endTime` to be supplied to `resolveMarketOnChain`.
+   */
+  metrics?: AggregatorMetrics;
 }
 
 const DEFAULT_MAX_RETRIES = 3;
@@ -42,11 +54,21 @@ const DEFAULT_RETRY_BACKOFF_MS = 1_000;
  * double-resolves a market. Transient submission failures are retried with
  * linear backoff; `onRetry` fires on every failed attempt so the caller can
  * alert, and the final error is thrown once retries are exhausted.
+ *
+ * When `deps.metrics` and `endTime` are provided, a successful resolution
+ * records `oracle_resolution_lag_h` on the metrics collector so the lag
+ * from market expiry to on-chain finalization is observable.
+ *
+ * @param deps      - injected dependencies (submitter, store, optional metrics)
+ * @param marketId  - market to resolve
+ * @param outcome   - oracle ruling (true = "yes", false = "no")
+ * @param endTime   - market expiry as Unix seconds; required for lag recording
  */
 export async function resolveMarketOnChain(
   deps: ResolveMarketDependencies,
   marketId: string,
   outcome: boolean,
+  endTime?: number,
 ): Promise<ResolveMarketResult | null> {
   const trimmedId = marketId.trim();
   if (!trimmedId) throw new Error("marketId is required");
@@ -54,11 +76,18 @@ export async function resolveMarketOnChain(
   if (await deps.isAlreadyResolved(trimmedId)) return null;
 
   if (deps.dryRun) {
+    const resolvedAt = Math.floor(Date.now() / 1_000);
+    let lagHours: number | undefined;
+    if (deps.metrics && endTime !== undefined) {
+      const entry = deps.metrics.recordResolution(trimmedId, endTime, resolvedAt);
+      lagHours = entry.lagHours;
+    }
     const result: ResolveMarketResult = {
       marketId: trimmedId,
       outcome,
       txHash: `dry-run-${trimmedId}-${Date.now()}`,
       dryRun: true,
+      ...(lagHours !== undefined ? { lagHours } : {}),
     };
     await deps.recordResult(result);
     return result;
@@ -71,7 +100,18 @@ export async function resolveMarketOnChain(
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const txHash = await deps.submitter.submitResolution(trimmedId, outcome);
-      const result: ResolveMarketResult = { marketId: trimmedId, outcome, txHash };
+      const resolvedAt = Math.floor(Date.now() / 1_000);
+      let lagHours: number | undefined;
+      if (deps.metrics && endTime !== undefined) {
+        const entry = deps.metrics.recordResolution(trimmedId, endTime, resolvedAt);
+        lagHours = entry.lagHours;
+      }
+      const result: ResolveMarketResult = {
+        marketId: trimmedId,
+        outcome,
+        txHash,
+        ...(lagHours !== undefined ? { lagHours } : {}),
+      };
       await deps.recordResult(result);
       return result;
     } catch (error) {

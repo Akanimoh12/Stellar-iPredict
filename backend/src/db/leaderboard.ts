@@ -1,6 +1,5 @@
-// ── Types ─────────────────────────────────────────────────────────────────────
 import { Pool } from "pg";
-import { LeaderboardRow } from "./types.js";
+import type { LeaderboardRow } from "./types.js";
 
 export type SortOption = "points" | "bets";
 
@@ -13,7 +12,7 @@ export interface GetLeaderboardParams {
 // Re-export for backwards compatibility
 export type { LeaderboardRow };
 
-/** Persistent leaderboard record for a single player. */
+/** Persistent leaderboard record for a single player (in-memory store shape). */
 export interface LeaderboardEntry {
   address: string;
   points: number;
@@ -28,41 +27,18 @@ export interface TransactionResult {
   error?: string;
 }
 
-// ── Module-private store ───────────────────────────────────────────────────────
+// ── Module-private in-memory store (used by tests) ────────────────────────────
 
 const store = new Map<string, LeaderboardEntry>();
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const store = new Map<string, LeaderboardEntry>();
-
-function generateId(): string {
-  return `lb_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── DB-backed public API ──────────────────────────────────────────────────────
 
 /**
- * Insert or update a leaderboard entry.
- *
- * - If the player does not exist, creates a new entry.
- * - Adds `pointsDelta` to the current points.
- * - Increments `won` when `outcome` is `"won"`, otherwise increments `lost`.
- *
- * @param address    - Stellar account address (must be non-empty).
- * @param pointsDelta - Points to add (must be >= 0).
- * @param outcome    - Whether the player won or lost.
- * @returns `TransactionResult` indicating success or failure.
-/**
- * Fetches a paginated and sorted leaderboard.
- *
- * @param pool Database pool connection
- * @param params Pagination and sorting parameters
- * @returns Array of leaderboard entries
+ * Fetches a paginated and sorted leaderboard from the database.
  */
 export async function getLeaderboard(
   pool: Pool,
-  params: GetLeaderboardParams
+  params: GetLeaderboardParams,
 ): Promise<LeaderboardRow[]> {
   const { limit, offset, sort } = params;
 
@@ -87,28 +63,32 @@ export async function getLeaderboard(
   return result.rows;
 }
 
-
 export async function getLeaderboardTotal(pool: Pool): Promise<number> {
   const result = await pool.query<{ total: string }>(
     "SELECT COUNT(*)::text AS total FROM leaderboard;",
-    []
+    [],
   );
-
   return Number(result.rows[0]?.total ?? 0);
 }
 
+// ── In-memory helpers (used by tests and stats aggregation) ──────────────────
+
+function generateId(): string {
+  return `lb_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
 /**
- * Insert or update a leaderboard entry.
+ * Insert or update an in-memory leaderboard entry.
+ * Adds `pointsDelta` to the current points and increments won/lost.
  */
 export function upsertLeaderboardEntry(
   address: string,
   pointsDelta: number,
-  outcome: "won" | "lost"
+  outcome: "won" | "lost",
 ): TransactionResult {
   if (!address || address.trim().length === 0) {
     return { success: false, error: "address is required" };
   }
-
   if (typeof pointsDelta !== "number" || pointsDelta < 0) {
     return { success: false, error: "pointsDelta must be a non-negative number" };
   }
@@ -126,24 +106,21 @@ export function upsertLeaderboardEntry(
   }
 
   store.set(address, entry);
-
   return { success: true, hash: generateId() };
 }
 
-/** Retrieve the current leaderboard entry for a player (or undefined). */
-export function getLeaderboardEntry(
-  address: string
-): LeaderboardEntry | undefined {
+/** Retrieve the current in-memory leaderboard entry for a player (or undefined). */
+export function getLeaderboardEntry(address: string): LeaderboardEntry | undefined {
   const entry = store.get(address);
   return entry ? { ...entry } : undefined;
 }
 
-/** Return every leaderboard entry (shallow copies). */
+/** Return every in-memory leaderboard entry (shallow copies). */
 export function getAllLeaderboardEntries(): LeaderboardEntry[] {
   return Array.from(store.values()).map((e) => ({ ...e }));
 }
 
-/** Clear all entries — for test isolation only. */
+/** Clear all in-memory entries — for test isolation only. */
 export function clearLeaderboard(): void {
   store.clear();
 }

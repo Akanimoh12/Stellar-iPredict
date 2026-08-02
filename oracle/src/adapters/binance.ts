@@ -1,4 +1,5 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
+import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
 import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
 import { ProviderRateLimiter, sharedProviderRateLimiter } from "./rateLimiter.js";
 
@@ -19,6 +20,7 @@ interface BinanceAdapterOptions extends FetchWithRetryOptions {
  */
 export class BinanceAdapter implements DataAdapter {
   readonly id = "binance";
+  private readonly responseCache: AdapterResponseCache<AdapterOutcome>;
 
   private readonly fetchOptions: FetchWithRetryOptions;
   private readonly rateLimiter: ProviderRateLimiter;
@@ -27,6 +29,8 @@ export class BinanceAdapter implements DataAdapter {
     const { rateLimiter, ...fetchOptions } = options;
     this.fetchOptions = fetchOptions;
     this.rateLimiter = rateLimiter ?? sharedProviderRateLimiter;
+  constructor(private readonly options: FetchWithRetryOptions = {}) {
+    this.responseCache = new AdapterResponseCache(options.cacheTtlMs);
   }
 
   supports(market: Market): boolean {
@@ -44,13 +48,19 @@ export class BinanceAdapter implements DataAdapter {
     const response = await fetchWithRetry(url, { method: "GET" }, this.fetchOptions);
     const body = (await response.json()) as BinanceTickerResponse;
 
-    const price = Number(body.price);
-    if (!Number.isFinite(price)) {
-      throw new Error(`BinanceAdapter received a non-numeric price for ${symbol}: ${String(body.price)}`);
-    }
+    return this.responseCache.getOrSet(marketCacheKey(market), async () => {
+      const { symbol, comparator, threshold } = market.params;
+      const url = `${BINANCE_TICKER_URL}?symbol=${encodeURIComponent(symbol)}`;
+      const response = await fetchWithRetry(url, { method: "GET" }, this.options);
+      const body = (await response.json()) as BinanceTickerResponse;
 
-    const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
+      const price = Number(body.price);
+      if (!Number.isFinite(price)) {
+        throw new Error(`BinanceAdapter received a non-numeric price for ${symbol}: ${String(body.price)}`);
+      }
 
-    return { outcome, confidence: 1, raw: body };
+      const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
+      return { outcome, confidence: 1, raw: body };
+    });
   }
 }

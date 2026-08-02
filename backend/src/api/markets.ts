@@ -5,7 +5,7 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
-import { getMarketById, getMarkets, type Queryable } from "../db/markets.js";
+import { getMarketById, getMarkets, type Queryable, type MarketCategory } from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import {
@@ -82,7 +82,7 @@ const VALID_CATEGORIES = [
 const categorySchema = z
   .string()
   .optional()
-  .transform((val: string | undefined) => {
+  .transform((val: string | undefined): MarketCategory | undefined => {
     if (!val) return undefined;
     // Trim whitespace
     const trimmed = val.trim();
@@ -90,11 +90,11 @@ const categorySchema = z
     // Convert to TitleCase (first letter uppercase, rest lowercase)
     const normalized =
       trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-    return normalized;
+    return normalized as MarketCategory;
   })
-  .refine((val: string | undefined) => {
+  .refine((val: MarketCategory | undefined) => {
     if (!val) return true;
-    return VALID_CATEGORIES.includes(val as (typeof VALID_CATEGORIES)[number]);
+    return VALID_CATEGORIES.includes(val);
   }, {
     message: "Invalid category. Must be one of: Crypto, Sports, Politics, Entertainment, Science",
   });

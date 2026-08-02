@@ -52,6 +52,6 @@ export function registerLeaderboardRoutes(
       ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
       : await loader();
 
-    return reply.status(200).send({ players, total });
+    return reply.status(200).send({ players: players ?? [], total: total ?? 0 });
   });
 }

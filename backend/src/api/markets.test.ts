@@ -256,4 +256,44 @@ describe("GET /api/markets - category parameter", () => {
     expect(response.statusCode).toBe(200);
     expect(queryMock).toHaveBeenCalled();
   });
+
+  it("returns well-formed empty state response when no markets exist", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [], total: 0, page: 1, limit: 20 });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json).toEqual({
+      markets: [],
+      total: 0,
+      page: 1,
+      limit: 20
+    });
+  });
+
+  it("returns well-formed empty state response when rows is null", async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json).toEqual({
+      markets: [],
+      total: 0,
+      page: 1,
+      limit: 20
+    });
+  });
 });

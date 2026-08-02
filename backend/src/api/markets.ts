@@ -210,8 +210,8 @@ export function createMarketsRoutes(
         : await getMarkets({ filter, category, sort, page, limit }, db);
 
       return reply.status(200).send({
-        markets: result.rows,
-        total: result.total,
+        markets: result.rows ?? [],
+        total: result.total ?? 0,
         page: result.page,
         limit: result.limit,
       });

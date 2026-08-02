@@ -72,4 +72,60 @@ describe("GET /api/leaderboard", () => {
       message: "Invalid leaderboard query parameters",
     });
   });
+
+  it("returns well-formed empty state response when no players exist", async () => {
+    const emptyPool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("COUNT")) {
+          return { rows: [{ total: "0" }] };
+        }
+
+        return { rows: [] };
+      }),
+    } as unknown as Pool & { query: ReturnType<typeof vi.fn> };
+
+    const server = buildServer({ pool: emptyPool });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/leaderboard",
+    });
+
+    await server.close();
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json).toEqual({
+      players: [],
+      total: 0,
+    });
+  });
+
+  it("returns well-formed empty state response when results are null", async () => {
+    const nullPool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("COUNT")) {
+          return { rows: [] };
+        }
+
+        return { rows: [] };
+      }),
+    } as unknown as Pool & { query: ReturnType<typeof vi.fn> };
+
+    const server = buildServer({ pool: nullPool });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/leaderboard",
+    });
+
+    await server.close();
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json).toEqual({
+      players: [],
+      total: 0,
+    });
+  });
 });

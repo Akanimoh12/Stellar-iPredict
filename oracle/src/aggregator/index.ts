@@ -53,6 +53,7 @@ export {
 } from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
 export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+
 export {
   OffChainSubmitterService,
   type DataAdapter,
@@ -68,6 +69,9 @@ export {
   type OracleSubmissionRecord,
 } from "./bond-monitor.js";
 export {
+  getBondDashboardData,
+  type BondDashboardData,
+} from "./dashboard.js";
   reconcileBonds,
   runBondReconciliation,
   recordSettlement,
@@ -81,7 +85,10 @@ export {
 export {
   checkCouncilInactivity,
   checkCouncilInactivityFromDb,
+  checkCouncilWindowExceeded,
+  checkCouncilWindowExceededFromDb,
   type CouncilInactivityAlert,
+  type CouncilWindowExceededAlert,
   type CouncilInactivityMonitorOptions,
   type EscalatedMarketRecord,
 } from "./council-inactivity-monitor.js";

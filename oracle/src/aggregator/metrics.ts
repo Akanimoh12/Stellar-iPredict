@@ -32,6 +32,10 @@ export interface ResolutionLagEntry {
 export interface AggregatorMetricsSnapshot {
   /** Total markets that have been resolved through the aggregator. */
   totalResolved: number;
+  /** Total number of oracle submissions. */
+  totalSubmissions: number;
+  /** Total number of oracle disputes (escalated markets). */
+  totalDisputes: number;
   /** Average resolution lag in hours across all resolved markets. */
   averageLagHours: number;
   /** Maximum resolution lag in hours (worst case). */
@@ -57,6 +61,8 @@ export interface NamedMetric {
 
 export class AggregatorMetrics {
   private readonly entries: ResolutionLagEntry[] = [];
+  private _totalSubmissions = 0;
+  private _totalDisputes = 0;
 
   /**
    * Record a resolution event and return a `NamedMetric` for
@@ -78,6 +84,14 @@ export class AggregatorMetrics {
     return entry;
   }
 
+  /** Record a new submission event. */
+  recordSubmission(): void {
+    this._totalSubmissions += 1;
+  }
+
+  /** Record a new dispute (escalated market) event. */
+  recordDispute(): void {
+    this._totalDisputes += 1;
   /**
    * Return the latest `oracle_resolution_lag_h` metric for a given market,
    * or `null` if no resolution has been recorded for it yet.
@@ -139,6 +153,8 @@ export class AggregatorMetrics {
     if (this.entries.length === 0) {
       return {
         totalResolved: 0,
+        totalSubmissions: this._totalSubmissions,
+        totalDisputes: this._totalDisputes,
         averageLagHours: 0,
         maxLagHours: 0,
         minLagHours: 0,
@@ -158,6 +174,8 @@ export class AggregatorMetrics {
 
     return {
       totalResolved: this.entries.length,
+      totalSubmissions: this._totalSubmissions,
+      totalDisputes: this._totalDisputes,
       averageLagHours: sum / this.entries.length,
       maxLagHours: max,
       minLagHours: min,
@@ -173,5 +191,7 @@ export class AggregatorMetrics {
   /** Reset all recorded metrics. */
   reset(): void {
     this.entries.length = 0;
+    this._totalSubmissions = 0;
+    this._totalDisputes = 0;
   }
 }

@@ -1,6 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
-import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
+import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market, type CryptoMarketParams } from "./index.js";
 
 const CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest";
 
@@ -39,7 +39,8 @@ export class CoinMarketCapAdapter implements DataAdapter {
     }
 
     return this.responseCache.getOrSet(marketCacheKey(market), async () => {
-      const { symbol, comparator, threshold } = market.params;
+      const { symbol, comparator, threshold } = market.params as Record<string, unknown> & CryptoMarketParams;
+      
       const convert = this.options.convert ?? "USD";
       const url = `${CMC_QUOTES_URL}?symbol=${encodeURIComponent(symbol)}&convert=${encodeURIComponent(convert)}`;
       const response = await fetchWithRetry(

@@ -4,6 +4,7 @@ import {
   DisputeEscalationWatcher,
   type DisputeEscalationRecord,
 } from "../src/aggregator/dispute-escalation-watcher.js";
+import { AggregatorMetrics } from "../src/aggregator/metrics.js";
 
 function record(overrides: Partial<DisputeEscalationRecord> = {}): DisputeEscalationRecord {
   return {
@@ -68,6 +69,16 @@ describe("detectDisputeEscalations", () => {
     ];
     const { watermark } = detectDisputeEscalations(disputes, new Date("2026-07-01T00:00:00Z"));
     expect(watermark).toEqual(new Date("2026-07-03T00:00:00Z"));
+  });
+
+  it("calls metrics.recordDispute for each new escalation", () => {
+    const metrics = new AggregatorMetrics();
+    const disputes = [
+      record({ marketId: "5", escalatedAt: new Date("2026-07-05T00:00:00Z") }),
+      record({ marketId: "6", escalatedAt: new Date("2026-07-06T00:00:00Z") }),
+    ];
+    detectDisputeEscalations(disputes, new Date(0), { metrics });
+    expect(metrics.snapshot().totalDisputes).toBe(2);
   });
 });
 

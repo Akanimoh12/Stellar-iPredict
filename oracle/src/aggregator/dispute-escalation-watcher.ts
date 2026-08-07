@@ -1,4 +1,5 @@
 import type { QueryablePool } from "./tally.js";
+import type { AggregatorMetrics } from "./metrics.js";
 
 export interface DisputeEscalationRecord {
   marketId: string;
@@ -23,6 +24,7 @@ export interface DisputeEscalationAlert {
 
 export interface DisputeEscalationWatcherOptions {
   onAlert?: (alert: DisputeEscalationAlert) => void;
+  metrics?: AggregatorMetrics;
 }
 
 export interface DetectDisputeEscalationsResult {
@@ -65,6 +67,7 @@ export function detectDisputeEscalations(
     };
     alerts.push(alert);
     options.onAlert?.(alert);
+    options.metrics?.recordDispute();
     if (dispute.escalatedAt.getTime() > watermark.getTime()) watermark = dispute.escalatedAt;
   }
 

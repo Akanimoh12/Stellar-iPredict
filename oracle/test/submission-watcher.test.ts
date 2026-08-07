@@ -4,6 +4,7 @@ import {
   SubmissionWatcher,
   type SubmissionRecord,
 } from "../src/aggregator/submission-watcher.js";
+import { AggregatorMetrics } from "../src/aggregator/metrics.js";
 
 function record(overrides: Partial<SubmissionRecord> = {}): SubmissionRecord {
   return {
@@ -55,6 +56,13 @@ describe("detectNewSubmissions", () => {
     const submissions = [record({ id: 3, marketId: "3" }), record({ id: 2, marketId: "2" })];
     const { watermark } = detectNewSubmissions(submissions, 1);
     expect(watermark).toBe(3);
+  });
+
+  it("calls metrics.recordSubmission for each new submission", () => {
+    const metrics = new AggregatorMetrics();
+    const submissions = [record({ id: 5, marketId: "5" }), record({ id: 6, marketId: "6" })];
+    detectNewSubmissions(submissions, 0, { metrics });
+    expect(metrics.snapshot().totalSubmissions).toBe(2);
   });
 });
 

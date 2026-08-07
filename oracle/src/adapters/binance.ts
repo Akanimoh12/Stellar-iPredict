@@ -1,6 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
-import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
+import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market, type CryptoMarketParams } from "./index.js";
 import { ProviderRateLimiter, sharedProviderRateLimiter } from "./rateLimiter.js";
 
 const BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price";
@@ -29,8 +29,7 @@ export class BinanceAdapter implements DataAdapter {
     const { rateLimiter, ...fetchOptions } = options;
     this.fetchOptions = fetchOptions;
     this.rateLimiter = rateLimiter ?? sharedProviderRateLimiter;
-  constructor(private readonly options: FetchWithRetryOptions = {}) {
-    this.responseCache = new AdapterResponseCache(options.cacheTtlMs);
+    this.responseCache = new AdapterResponseCache(fetchOptions.cacheTtlMs);
   }
 
   supports(market: Market): boolean {
@@ -41,17 +40,14 @@ export class BinanceAdapter implements DataAdapter {
     if (!isCryptoMarketParams(market.params)) {
       throw new Error(`BinanceAdapter cannot resolve market ${market.id}: missing/invalid crypto params`);
     }
-    const { symbol, comparator, threshold } = market.params;
 
-    const url = `${BINANCE_TICKER_URL}?symbol=${encodeURIComponent(symbol)}`;
-    await this.rateLimiter.acquire(this.id);
-    const response = await fetchWithRetry(url, { method: "GET" }, this.fetchOptions);
-    const body = (await response.json()) as BinanceTickerResponse;
+    const { symbol, comparator, threshold } = market.params as CryptoMarketParams;
 
     return this.responseCache.getOrSet(marketCacheKey(market), async () => {
-      const { symbol, comparator, threshold } = market.params;
       const url = `${BINANCE_TICKER_URL}?symbol=${encodeURIComponent(symbol)}`;
-      const response = await fetchWithRetry(url, { method: "GET" }, this.options);
+      
+      await this.rateLimiter.acquire(this.id);
+      const response = await fetchWithRetry(url, { method: "GET" }, this.fetchOptions);
       const body = (await response.json()) as BinanceTickerResponse;
 
       const price = Number(body.price);

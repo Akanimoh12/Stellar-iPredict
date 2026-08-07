@@ -1,4 +1,5 @@
 import type { QueryablePool } from "./tally.js";
+import type { AggregatorMetrics } from "./metrics.js";
 
 export interface SubmissionRecord {
   id: number;
@@ -21,6 +22,7 @@ export interface NewSubmissionAlert {
 
 export interface SubmissionWatcherOptions {
   onAlert?: (alert: NewSubmissionAlert) => void;
+  metrics?: AggregatorMetrics;
 }
 
 export interface DetectNewSubmissionsResult {
@@ -60,6 +62,7 @@ export function detectNewSubmissions(
     };
     alerts.push(alert);
     options.onAlert?.(alert);
+    options.metrics?.recordSubmission();
     if (sub.id > watermark) watermark = sub.id;
   }
 

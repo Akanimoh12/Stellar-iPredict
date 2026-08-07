@@ -72,6 +72,7 @@ export {
   getBondDashboardData,
   type BondDashboardData,
 } from "./dashboard.js";
+export {
   reconcileBonds,
   runBondReconciliation,
   recordSettlement,
@@ -125,12 +126,6 @@ export {
   createStrictValidationConfig,
   createBalancedValidationConfig,
   type SubmissionValidationResult,
-  type SubmissionValidationConfig,
-} from "./submission-validator.js";
-  createStrictValidationConfig,
-  createBalancedValidationConfig,
-  type SubmissionValidationResult,
-  type SubmissionValidationConfig,
 } from "./submission-validator.js";
 
 export interface AggregatorMarket { id: string; cancelled: boolean; }

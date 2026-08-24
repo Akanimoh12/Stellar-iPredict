@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { TheOddsApiAdapter } from "../src/adapters/theoddsapi.js";
+import { resolveMarket } from "../src/adapters/resolve.js";
 import type { Market } from "../src/adapters/index.js";
+import POSTPONED_FIXTURE from "./fixtures/theoddsapi-postponed.json";
 
 const ODDS_FIXTURE = [
   {
@@ -142,5 +144,13 @@ describe("TheOddsApiAdapter", () => {
       expect.stringContaining("regions=uk"),
       expect.anything(),
     );
+  });
+
+  it("maps a postponed provider fixture to market cancellation", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(POSTPONED_FIXTURE));
+    const adapter = new TheOddsApiAdapter({ apiKey: "test-key", fetchFn });
+    const result = await resolveMarket(createMarket(), [adapter]);
+    expect(result.status).toBe("cancelled");
+    expect(result.sources[0].cancellationReason).toBe("postponed");
   });
 });

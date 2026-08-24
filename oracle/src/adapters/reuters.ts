@@ -1,5 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { type AdapterOutcome, type DataAdapter, isPoliticsMarketParams, type Market } from "./index.js";
+import { probeHttp } from "./health.js";
 
 const REUTERS_API_URL = "https://api.reuters.com/api/v1/search";
 
@@ -43,6 +44,12 @@ export class ReutersAdapter implements DataAdapter {
 
   supports(market: Market): boolean {
     return market.category === "politics" && isPoliticsMarketParams(market.params);
+  }
+
+  checkHealth() {
+    return probeHttp(`${REUTERS_API_URL}?q=health&size=1`, {
+      method: "GET", headers: { Authorization: `Bearer ${this.options.apiKey}`, Accept: "application/json" },
+    }, this.options);
   }
 
   async fetchOutcome(market: Market): Promise<AdapterOutcome> {

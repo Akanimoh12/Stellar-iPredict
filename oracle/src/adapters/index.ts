@@ -39,6 +39,18 @@ export interface AdapterOutcome {
   confidence: number;
   /** Raw provider payload, kept for audit/dispute review. */
   raw: unknown;
+  /** Provider reports that the event cannot settle normally. */
+  cancellation?: {
+    reason: "postponed" | "cancelled";
+    message?: string;
+  };
+}
+
+export interface AdapterHealth {
+  available: boolean;
+  checkedAt: string;
+  latencyMs: number;
+  error?: string;
 }
 
 export interface DataAdapter {
@@ -46,6 +58,8 @@ export interface DataAdapter {
   /** Whether this adapter can resolve the given market (category + required params present). */
   supports(market: Market): boolean;
   fetchOutcome(market: Market): Promise<AdapterOutcome>;
+  /** A quota-light provider availability probe, when supported. */
+  checkHealth?(): Promise<AdapterHealth>;
 }
 
 /** Type guard shared by crypto adapters (Binance, CoinMarketCap, ...) to validate `market.params`. */
@@ -98,3 +112,10 @@ export class AdapterRegistry {
     return this.adapters;
   }
 }
+
+export { checkAdapterHealth, checkAdaptersHealth } from "./health.js";
+export type { AdapterHealthCheckOptions, AdapterHealthReport } from "./health.js";
+export { InMemoryReviewQueue } from "./reviewQueue.js";
+export type { ManualReviewItem, ManualReviewQueue, ReviewReason } from "./reviewQueue.js";
+export { FixtureReplayAdapter, RecordingAdapter } from "./fixtures.js";
+export type { AdapterFixture, FixtureSink } from "./fixtures.js";

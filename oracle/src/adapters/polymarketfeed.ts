@@ -1,5 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { type AdapterOutcome, type DataAdapter, isPoliticsMarketParams, type Market } from "./index.js";
+import { probeHttp } from "./health.js";
 
 const POLYMARKET_API_URL = "https://api.polymarket.com/query";
 
@@ -34,6 +35,12 @@ export class PolymarketFeedAdapter implements DataAdapter {
 
   supports(market: Market): boolean {
     return market.category === "politics" && isPoliticsMarketParams(market.params);
+  }
+
+  checkHealth() {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.options.apiKey) headers.Authorization = `Bearer ${this.options.apiKey}`;
+    return probeHttp(POLYMARKET_API_URL, { method: "POST", headers, body: JSON.stringify({ query: "{ __typename }" }) }, this.options);
   }
 
   async fetchOutcome(market: Market): Promise<AdapterOutcome> {

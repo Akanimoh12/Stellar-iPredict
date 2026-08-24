@@ -1,6 +1,7 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
 import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
+import { probeHttp } from "./health.js";
 
 const CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest";
 
@@ -33,13 +34,20 @@ export class CoinMarketCapAdapter implements DataAdapter {
     return market.category === "crypto" && isCryptoMarketParams(market.params);
   }
 
+  checkHealth() {
+    return probeHttp("https://pro-api.coinmarketcap.com/v1/key/info", {
+      method: "GET", headers: { "X-CMC_PRO_API_KEY": this.options.apiKey, Accept: "application/json" },
+    }, this.options);
+  }
+
   async fetchOutcome(market: Market): Promise<AdapterOutcome> {
     if (!isCryptoMarketParams(market.params)) {
       throw new Error(`CoinMarketCapAdapter cannot resolve market ${market.id}: missing/invalid crypto params`);
     }
+    const params = market.params;
 
     return this.responseCache.getOrSet(marketCacheKey(market), async () => {
-      const { symbol, comparator, threshold } = market.params;
+      const { symbol, comparator, threshold } = params;
       const convert = this.options.convert ?? "USD";
       const url = `${CMC_QUOTES_URL}?symbol=${encodeURIComponent(symbol)}&convert=${encodeURIComponent(convert)}`;
       const response = await fetchWithRetry(

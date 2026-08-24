@@ -1,5 +1,6 @@
 import { rpc } from "@stellar/stellar-sdk";
 import type { RpcClient, RpcEvent } from "../poll-loop.js";
+import { metrics } from "../metrics.js";
 
 export class LedgerGapError extends Error {
   constructor(public readonly startLedger: number, message: string) {
@@ -59,6 +60,7 @@ export class SorobanRpcClient implements RpcClient {
         latestLedger,
       };
     } catch (error: any) {
+      metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" });
       const message = error instanceof Error ? error.message : String(error);
 
       const isStartLedgerTooOld =

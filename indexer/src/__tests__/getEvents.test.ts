@@ -1,11 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { rpc } from "@stellar/stellar-sdk";
 import { SorobanRpcClient, LedgerGapError } from "../rpc/getEvents.js";
+import { metrics, resetMetrics } from "../metrics.js";
 
 describe("SorobanRpcClient.getEvents", () => {
   let client: SorobanRpcClient;
 
   beforeEach(() => {
+    resetMetrics();
     client = new SorobanRpcClient("https://mock-rpc-url.stellar.org");
     vi.restoreAllMocks();
   });
@@ -92,6 +94,7 @@ describe("SorobanRpcClient.getEvents", () => {
         contractIds: ["CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
       })
     ).rejects.not.toThrow(LedgerGapError);
+    expect(metrics.rpcErrors.get({ service: "indexer", operation: "getEvents" })).toBe(2);
   });
 
   it("follows the cursor to fetch all pages of events", async () => {

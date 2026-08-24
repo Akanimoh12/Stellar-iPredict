@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeEventToDb } from "../event-router.js";
-import { metrics, resetMetrics, Counter, Gauge } from "../metrics.js";
+import { metrics, resetMetrics, Counter, Gauge, RpcErrorCounter, serializeRpcErrors } from "../metrics.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 
 function makeDb(): DbClient {
@@ -139,5 +139,41 @@ describe("indexer_lag metric", () => {
     metrics.indexerLag.set(42);
     resetMetrics();
     expect(metrics.indexerLag.get()).toBe(0);
+  });
+});
+
+describe("rpc_errors_total metric", () => {
+  beforeEach(() => resetMetrics());
+
+  it("counts failures independently by service and operation", () => {
+    const counter = new RpcErrorCounter();
+    counter.inc({ service: "indexer", operation: "getEvents" });
+    counter.inc({ service: "indexer", operation: "getEvents" });
+    counter.inc({ service: "oracle", operation: "sendTransaction" });
+
+    expect(counter.get({ service: "indexer", operation: "getEvents" })).toBe(2);
+    expect(counter.get({ service: "oracle", operation: "sendTransaction" })).toBe(1);
+  });
+
+  it("rejects empty labels and ignores non-positive increments", () => {
+    const counter = new RpcErrorCounter();
+    expect(() => counter.inc({ service: "", operation: "getEvents" })).toThrow(TypeError);
+    counter.inc({ service: "indexer", operation: "getEvents" }, 0);
+    expect(counter.snapshot()).toEqual([]);
+  });
+
+  it("serializes valid Prometheus counter samples", () => {
+    metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" }, 2);
+    expect(serializeRpcErrors()).toBe(
+      '# HELP rpc_errors_total Total number of failed RPC calls.\n' +
+      '# TYPE rpc_errors_total counter\n' +
+      'rpc_errors_total{service="indexer",operation="getEvents"} 2\n',
+    );
+  });
+
+  it("is cleared by resetMetrics", () => {
+    metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" });
+    resetMetrics();
+    expect(metrics.rpcErrors.snapshot()).toEqual([]);
   });
 });

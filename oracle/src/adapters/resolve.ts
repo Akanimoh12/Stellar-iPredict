@@ -1,12 +1,14 @@
 import type { DataAdapter, Market } from "./index.js";
+import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
 
-export type ResolutionStatus = "resolved" | "conflict" | "unresolvable";
+export type ResolutionStatus = "resolved" | "conflict" | "unresolvable" | "review" | "cancelled";
 
 export interface SourceResult {
   adapterId: string;
   outcome: boolean;
   confidence: number;
   error?: string;
+  cancellationReason?: "postponed" | "cancelled";
 }
 
 export interface ResolutionResult {
@@ -23,18 +25,23 @@ export interface ResolveOptions {
   maxSources?: number;
   /** Fraction of dissenting votes (0–1) that triggers a conflict flag. Defaults to 0.3. */
   conflictThreshold?: number;
+  /** Resolutions below this confidence are held for review. Defaults to 0.7. */
+  minConfidence?: number;
+  reviewQueue?: ManualReviewQueue;
 }
 
 export interface CategoryResolutionConfig {
   minAgreement?: number;
   maxSources?: number;
   conflictThreshold?: number;
+  minConfidence?: number;
 }
 
-const DEFAULT_OPTIONS: Required<ResolveOptions> = {
+const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue">> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
+  minConfidence: 0.7,
 };
 
 function fetchSource(
@@ -47,6 +54,7 @@ function fetchSource(
       adapterId: adapter.id,
       outcome: outcome.outcome,
       confidence: outcome.confidence,
+      cancellationReason: outcome.cancellation?.reason,
     }))
     .catch((error) => ({
       adapterId: adapter.id,
@@ -69,12 +77,14 @@ export async function resolveMarket(
   adapters: readonly DataAdapter[],
   options?: ResolveOptions,
 ): Promise<ResolutionResult> {
-  const opts: Required<ResolveOptions> = {
+  const opts: Required<Omit<ResolveOptions, "reviewQueue">> & Pick<ResolveOptions, "reviewQueue"> = {
     minAgreement:
       options?.minAgreement ?? DEFAULT_OPTIONS.minAgreement,
     maxSources: options?.maxSources ?? DEFAULT_OPTIONS.maxSources,
     conflictThreshold:
       options?.conflictThreshold ?? DEFAULT_OPTIONS.conflictThreshold,
+    minConfidence: options?.minConfidence ?? DEFAULT_OPTIONS.minConfidence,
+    reviewQueue: options?.reviewQueue,
   };
 
   const supported = adapters.filter((adapter) => adapter.supports(market));
@@ -88,6 +98,11 @@ export async function resolveMarket(
   }
 
   const successful = sources.filter((s) => s.error === undefined);
+
+  const cancellation = successful.find((source) => source.cancellationReason);
+  if (cancellation) {
+    return { status: "cancelled", confidence: cancellation.confidence, sources };
+  }
 
   if (successful.length === 0) {
     return { status: "unresolvable", confidence: 0, sources };
@@ -104,17 +119,25 @@ export async function resolveMarket(
   const disagreementRatio = total > 0 ? minority / total : 0;
 
   if (disagreementRatio > opts.conflictThreshold) {
-    return { status: "conflict", confidence: 0, sources };
+    const result: ResolutionResult = { status: opts.reviewQueue ? "review" : "conflict", confidence: 0, sources };
+    await opts.reviewQueue?.enqueue(reviewItem(market, "conflicting_outcomes", result));
+    return result;
   }
 
   const outcome = yesCount > noCount;
   const avgConfidence =
     successful.reduce((sum, s) => sum + s.confidence, 0) / successful.length;
 
-  return {
+  const result: ResolutionResult = {
     status: "resolved",
     outcome,
     confidence: avgConfidence,
     sources,
   };
+  if (avgConfidence < opts.minConfidence) {
+    result.status = "review";
+    result.outcome = undefined;
+    await opts.reviewQueue?.enqueue(reviewItem(market, "low_confidence", result));
+  }
+  return result;
 }

@@ -72,6 +72,7 @@ export {
   getBondDashboardData,
   type BondDashboardData,
 } from "./dashboard.js";
+export {
   reconcileBonds,
   runBondReconciliation,
   recordSettlement,
@@ -122,11 +123,6 @@ export {
   validateSubmissionData,
   assertCanFinalize,
   createDefaultValidationConfig,
-  createStrictValidationConfig,
-  createBalancedValidationConfig,
-  type SubmissionValidationResult,
-  type SubmissionValidationConfig,
-} from "./submission-validator.js";
   createStrictValidationConfig,
   createBalancedValidationConfig,
   type SubmissionValidationResult,

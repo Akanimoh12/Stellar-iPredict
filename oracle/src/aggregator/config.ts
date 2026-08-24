@@ -30,8 +30,6 @@ const schema = z.object({
 
   SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
   SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
-  LOG_LEVEL: z.string().default("info"),
-
   /** Optimistic oracle — submitter bond in XLM. */
   SUBMITTER_BOND_XLM: positiveNumber.default(100),
 

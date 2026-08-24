@@ -1,5 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { type AdapterOutcome, type DataAdapter, type Market } from "./index.js";
+import { probeHttp } from "./health.js";
 
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 
@@ -30,6 +31,9 @@ interface OddsApiEvent {
   home_team: string;
   away_team: string;
   bookmakers: OddsApiBookmaker[];
+  status?: string;
+  cancelled?: boolean;
+  postponed?: boolean;
 }
 
 export interface TheOddsApiAdapterOptions extends FetchWithRetryOptions {
@@ -63,6 +67,10 @@ export class TheOddsApiAdapter implements DataAdapter {
     return market.category === "sports" && isSportsMarketParams(market.params);
   }
 
+  checkHealth() {
+    return probeHttp(`${ODDS_API_BASE}/sports?apiKey=${encodeURIComponent(this.options.apiKey)}`, { method: "GET" }, this.options);
+  }
+
   async fetchOutcome(market: Market): Promise<AdapterOutcome> {
     if (!isSportsMarketParams(market.params)) {
       throw new Error(
@@ -88,6 +96,14 @@ export class TheOddsApiAdapter implements DataAdapter {
       throw new Error(
         `TheOddsApiAdapter: no matching game found for ${homeTeam} vs ${awayTeam} in ${sportKey}`,
       );
+    }
+
+    const status = event.status?.toLowerCase();
+    if (event.cancelled || status === "cancelled" || status === "canceled") {
+      return { outcome: false, confidence: 1, raw: events, cancellation: { reason: "cancelled" } };
+    }
+    if (event.postponed || status === "postponed") {
+      return { outcome: false, confidence: 1, raw: events, cancellation: { reason: "postponed" } };
     }
 
     const bookmaker = event.bookmakers[0];

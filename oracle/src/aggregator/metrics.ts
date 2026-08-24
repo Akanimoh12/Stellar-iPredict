@@ -92,6 +92,8 @@ export class AggregatorMetrics {
   /** Record a new dispute (escalated market) event. */
   recordDispute(): void {
     this._totalDisputes += 1;
+  }
+
   /**
    * Return the latest `oracle_resolution_lag_h` metric for a given market,
    * or `null` if no resolution has been recorded for it yet.

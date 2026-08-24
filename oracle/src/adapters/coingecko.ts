@@ -1,5 +1,6 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
 import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
+import { probeHttp } from "./health.js";
 
 const COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price";
 
@@ -32,6 +33,12 @@ export class CoinGeckoAdapter implements DataAdapter {
 
   supports(market: Market): boolean {
     return market.category === "crypto" && isCryptoMarketParams(market.params);
+  }
+
+  checkHealth() {
+    const headers: Record<string, string> = {};
+    if (this.options.apiKey) headers["x-cg-demo-api-key"] = this.options.apiKey;
+    return probeHttp("https://api.coingecko.com/api/v3/ping", { method: "GET", headers }, this.options);
   }
 
   async fetchOutcome(market: Market): Promise<AdapterOutcome> {

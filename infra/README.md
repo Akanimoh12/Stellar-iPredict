@@ -98,7 +98,7 @@ releases, or `<branch>-<short-sha>` for branch builds. The `local` default is
 only for local builds; never publish or deploy it, and never use `latest`.
 
 ```bash
-IMAGE_REGISTRY=ghcr.io/akanimoh12 \
+IMAGE_REGISTRY=ghcr.io/your-org \
 API_IMAGE_TAG=v1.4.0 \
 INDEXER_IMAGE_TAG=implementation-drips-a1b2c3d \
 ORACLE_IMAGE_TAG=v1.4.0 \

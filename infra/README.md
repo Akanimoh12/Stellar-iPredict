@@ -49,6 +49,19 @@ default) so a load balancer can address them individually and you can roll one
 replica at a time. Postgres and Redis publish no host port at all: they are
 reachable only from inside the compose network.
 
+### Single indexer instance
+
+Compose declares one indexer replica, and the indexer additionally uses the
+PostgreSQL session-level advisory lock implemented in
+[`indexer/src/lock.ts`](../indexer/src/lock.ts). Startup must call
+`acquireIndexerLock(pool)` before polling and retain the returned handle for the
+process lifetime. If another instance owns the lock, acquisition fails fast
+with `IndexerAlreadyRunningError`; the extra instance must exit instead of
+processing events. During graceful shutdown, call `lock.release()` before
+closing the pool. PostgreSQL releases the lock automatically if the process or
+its dedicated connection dies, so a replacement can start without manual
+cleanup.
+
 > **Known issue — the `indexer` image does not build today.** This is
 > pre-existing on `implementation-drips` and unrelated to the compose file:
 > `indexer/` does not typecheck, so its Dockerfile's `npm run build` fails.

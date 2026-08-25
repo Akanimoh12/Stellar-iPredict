@@ -31,13 +31,14 @@ x-oracle-image: &oracle-image
   build:
     context: ../oracle
     dockerfile: src/aggregator/Dockerfile
-  image: ipredict-oracle:${IPREDICT_VERSION:-latest}
+  image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-oracle:${ORACLE_IMAGE_TAG:-local}"
 
 x-logging: &logging
-  driver: json-file
+  driver: fluentd
   options:
-    max-size: "10m"
-    max-file: "5"
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    tag: "ipredict.{{.Name}}"
 
 # Connection strings are assembled here so the credentials live in exactly one
 # place in this file.
@@ -50,8 +51,10 @@ x-redis-url: &redis-url
 services:
   # ── Data ───────────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
+    image: postgres:16.4-alpine
+    restart: always
+    cpus: "1.00"
+    mem_limit: 1g
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in infra/.env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
@@ -79,8 +82,10 @@ services:
     logging: *logging
 
   redis:
-    image: redis:7-alpine
-    restart: unless-stopped
+    image: redis:7.4-alpine
+    restart: always
+    cpus: "0.50"
+    mem_limit: 256m
     # The config file is the baseline; --requirepass comes last so the secret
     # stays in the environment instead of a tracked file.
     command:
@@ -132,8 +137,10 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
-    image: ipredict-api:${IPREDICT_VERSION:-latest}
-    restart: unless-stopped
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
+    restart: always
+    cpus: "1.00"
+    mem_limit: 512m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -185,8 +192,10 @@ services:
     build:
       context: ../indexer
       dockerfile: src/Dockerfile
-    image: ipredict-indexer:${IPREDICT_VERSION:-latest}
-    restart: unless-stopped
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
+    restart: always
+    cpus: "0.75"
+    mem_limit: 384m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -222,7 +231,9 @@ services:
   # down with it — exactly when you need it most.
   oracle-aggregator:
     <<: *oracle-image
-    restart: unless-stopped
+    restart: always
+    cpus: "0.50"
+    mem_limit: 384m
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -265,7 +276,9 @@ services:
 
   oracle-monitor:
     <<: *oracle-image
-    restart: unless-stopped
+    restart: always
+    cpus: "0.25"
+    mem_limit: 256m
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:
@@ -289,6 +302,24 @@ services:
     stop_grace_period: 20s
     logging: *logging
 
+  log-collector:
+    image: fluent/fluent-bit:3.1.9
+    restart: always
+    cpus: "0.25"
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:24224:24224"
+      - "127.0.0.1:24224:24224/udp"
+    volumes:
+      - ./logging/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - aggregated-logs:/var/log/ipredict
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   pgdata:
   redisdata:
+  aggregated-logs:

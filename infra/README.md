@@ -354,6 +354,23 @@ alongside your backend service to visualize business metrics in real-time.
 1. Backend service running locally on port 3001 (default for `npm run dev`)
 2. Docker and Docker Compose installed
 
+#### Environment Variables (Optional)
+
+You can customize the monitoring setup using environment variables:
+
+```bash
+# Option 1: Copy and customize the example file
+cd infra
+cp .env.monitoring.example .env
+# Edit .env with your preferred values
+
+# Option 2: Set environment variable directly
+export GRAFANA_ADMIN_PASSWORD=your-secure-password
+
+# Then start the monitoring stack
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
 #### Quick Start
 
 1. Start the monitoring stack:
@@ -369,7 +386,7 @@ npm run dev
 ```
 
 3. Access the services:
-   - **Grafana**: http://localhost:3000 (admin/admin)
+   - **Grafana**: http://localhost:3000 (admin/admin by default, or use GRAFANA_ADMIN_PASSWORD env var)
    - **Prometheus**: http://localhost:9090
    - **Backend metrics**: http://localhost:3001/api/metrics
 
@@ -400,7 +417,7 @@ curl http://localhost:3001/api/metrics
 
 3. **Grafana Dashboard**:
    - Go to http://localhost:3000
-   - Login with admin/admin
+   - Login with admin/admin (default, or use your GRAFANA_ADMIN_PASSWORD)
    - Navigate to "iPredict Business Metrics" dashboard
    - All panels should load without PromQL errors (values may be 0 initially)
 

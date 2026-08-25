@@ -24,4 +24,4 @@ export const deadLetterTableSql = `CREATE TABLE IF NOT EXISTS dead_letter_events
   error_message TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_dead_letter_events_ledger ON dead_letter_events(ledger_seq DESC);`;
+CREATE AND INDEX IF NOT EXISTS idx_dead_letter_events_ledger ON dead_letter_events(ledger_seq DESC);`;

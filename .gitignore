@@ -26,6 +26,7 @@ oracle/dist/
 
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
+.env.production
 .env.local
 .env.*.local
 *.pem

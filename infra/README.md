@@ -35,6 +35,7 @@ backend stack. It follows the design in
 | `indexer` | Soroban event indexer (`indexer/`) | 1, always |
 | `oracle-aggregator` | Council tally and on-chain finalization (`oracle/`) | 1 |
 | `oracle-monitor` | Read-only oracle watchdog and alerting (`oracle/`) | 1 |
+| `log-collector` | Aggregates container logs with Fluent Bit | 1 |
 | `migrate` | One-shot migration runner, opt-in profile | on demand |
 
 ```bash
@@ -48,6 +49,49 @@ The API replicas take one host port each from `API_PORT_RANGE` (4000–4002 by
 default) so a load balancer can address them individually and you can roll one
 replica at a time. Postgres and Redis publish no host port at all: they are
 reachable only from inside the compose network.
+
+### Runtime and logging policy
+
+Long-running services use `restart: always` and explicit CPU and memory
+ceilings. The defaults are starting points; monitor throttling, out-of-memory
+restarts, database working-set size, and indexer lag before changing them.
+
+| Service | CPUs | Memory |
+|---|---:|---:|
+| API | 1.00 | 512 MiB |
+| Indexer | 0.75 | 384 MiB |
+| Postgres | 1.00 | 1 GiB |
+| Redis | 0.50 | 256 MiB |
+| Oracle aggregator | 0.50 | 384 MiB |
+| Oracle monitor | 0.25 | 256 MiB |
+| Fluent Bit | 0.25 | 128 MiB |
+
+Docker sends service logs asynchronously over the local Fluentd protocol to
+Fluent Bit at `127.0.0.1:24224`. The collector writes the combined stream to
+the `aggregated-logs` volume and uses Docker's size-limited `local` driver
+itself to avoid a logging loop. Follow the stream with:
+
+```bash
+docker compose -f docker-compose.production.yml exec log-collector \
+  tail -f /var/log/ipredict/containers.log
+```
+
+The collector configuration lives in
+[`logging/fluent-bit.conf`](logging/fluent-bit.conf).
+
+### Container image tags
+
+Application images use immutable tags: semantic versions such as `v1.4.0` for
+releases, or `<branch>-<short-sha>` for branch builds. The `local` default is
+only for local builds; never publish or deploy it, and never use `latest`.
+
+```bash
+IMAGE_REGISTRY=ghcr.io/akanimoh12 \
+API_IMAGE_TAG=v1.4.0 \
+INDEXER_IMAGE_TAG=implementation-drips-a1b2c3d \
+ORACLE_IMAGE_TAG=v1.4.0 \
+docker compose -f docker-compose.production.yml up -d --no-build
+```
 
 > **Known issue — the `indexer` image does not build today.** This is
 > pre-existing on `implementation-drips` and unrelated to the compose file:

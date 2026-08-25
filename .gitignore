@@ -30,6 +30,7 @@ infra/backups/
 
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
+.env.production
 .env.local
 .env.*.local
 *.pem

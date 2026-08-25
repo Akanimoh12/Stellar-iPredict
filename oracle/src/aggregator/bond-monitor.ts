@@ -58,9 +58,14 @@ export async function checkBondMinimumFromDb(
   options: BondMonitorOptions,
 ): Promise<BondAlert[]> {
   const result = await pool.query<PostgresSubmissionRow>(
+    // status::text, not status: `oracle_submission_status` (migration 0008)
+    // has no 'pending' member, and comparing the enum against a literal it
+    // does not contain is a hard Postgres error, not an empty result. The
+    // cast keeps the pure checkBondMinimum contract — which does treat
+    // 'pending' as open — valid against today's schema and any later one.
     `SELECT market_id::text AS market_id, submitter, bond_amount, status
        FROM oracle_submissions
-      WHERE status IN ('submitted', 'pending')`,
+      WHERE status::text IN ('submitted', 'pending')`,
   );
 
   const records: OracleSubmissionRecord[] = result.rows.map((row) => ({

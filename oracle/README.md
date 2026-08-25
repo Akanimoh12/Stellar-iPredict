@@ -53,6 +53,27 @@ npm install
 npm run dev
 ```
 
+### Running the monitor
+
+The monitor is the read-only half of the oracle. It re-runs the checks in
+`aggregator/` against Postgres every `MONITOR_INTERVAL_MS` and emits an alert
+for anything an operator needs to see — stuck markets, new submissions,
+escalated disputes, under-minimum bonds, an inactive council. It never signs or
+submits a transaction, so it needs no resolver key.
+
+```bash
+npm run dev:monitor          # tsx watch, against your local .env
+npm run build && npm run start:monitor
+```
+
+Alerts are logged as JSON and, when `ALERT_WEBHOOK_URL` is set, POSTed to it.
+Delivery failures are logged rather than thrown: an alerting outage must not
+stop the monitoring loop.
+
+In production it runs as its own `oracle-monitor` service from the same image
+as the aggregator — see
+[`infra/README.md`](../infra/README.md#why-the-oracle-is-two-services).
+
 ## Documentation
 
 - **[Council Runbook](./docs/COUNCIL_RUNBOOK.md)** — operational guide for council members and aggregator operators

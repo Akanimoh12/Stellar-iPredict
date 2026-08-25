@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { serviceUnavailable } from "./lib/errors.js";
 
 /**
  * Request-duration histogram — issue #87
@@ -74,6 +75,17 @@ export interface ErrorCountSnapshot {
   readonly count: number;
 }
 
+export interface BusinessMetricsSnapshot {
+  readonly marketsCreatedTotal: number;
+  readonly betsPlacedTotal: number;
+  readonly volumeXlmTotal: string;
+  readonly marketsResolvedTotal: number;
+}
+
+interface MetricsQueryable {
+  query<T>(sql: string, params?: readonly unknown[]): Promise<{ rows: T[] }>;
+}
+
 /**
  * Internal mutable state for a single route.
  * Not exposed externally — callers always get a frozen snapshot.
@@ -101,6 +113,13 @@ let activeBuckets: readonly number[] = DEFAULT_BUCKETS;
 
 /** Key: normalised route label (`"METHOD /path"`). Value: 5xx response count. */
 const errorRegistry = new Map<string, number>();
+
+interface BusinessMetricsRow {
+  markets_created_total: string | number;
+  bets_placed_total: string | number;
+  volume_xlm_total: string | number;
+  markets_resolved_total: string | number;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -258,6 +277,72 @@ export function resetErrorCounts(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Business counter API
+// ---------------------------------------------------------------------------
+
+export async function getBusinessMetrics(
+  db: MetricsQueryable
+): Promise<BusinessMetricsSnapshot> {
+  const result = await db.query<BusinessMetricsRow>(`
+    WITH event_totals AS (
+      SELECT
+        COUNT(*) FILTER (WHERE event_type IN ('bet_placed', 'bet'))::bigint AS bet_events_total,
+        COALESCE(
+          SUM(
+            CASE
+              WHEN event_type IN ('bet_placed', 'bet') THEN COALESCE(
+                NULLIF(payload->>'gross_amount', '')::numeric,
+                NULLIF(payload->>'gross', '')::numeric,
+                NULLIF(payload->>'net_amount', '')::numeric,
+                NULLIF(payload->>'amount', '')::numeric,
+                NULLIF(payload->>'net', '')::numeric,
+                0
+              )
+              ELSE 0
+            END
+          ),
+          0
+        )::text AS bet_volume_total
+      FROM events
+    ),
+    table_totals AS (
+      SELECT
+        COUNT(*)::bigint AS market_rows_total,
+        COUNT(*) FILTER (WHERE resolved = TRUE)::bigint AS resolved_market_rows_total
+      FROM markets
+    ),
+    bet_rows AS (
+      SELECT
+        COUNT(*)::bigint AS bet_rows_total,
+        COALESCE(SUM(gross_amount), 0)::text AS gross_volume_total
+      FROM bets
+    )
+    SELECT
+      table_totals.market_rows_total AS markets_created_total,
+      CASE
+        WHEN event_totals.bet_events_total > 0
+          THEN event_totals.bet_events_total
+        ELSE bet_rows.bet_rows_total
+      END AS bets_placed_total,
+      CASE
+        WHEN event_totals.bet_events_total > 0
+          THEN event_totals.bet_volume_total
+        ELSE bet_rows.gross_volume_total
+      END AS volume_xlm_total,
+      table_totals.resolved_market_rows_total AS markets_resolved_total
+    FROM event_totals, table_totals, bet_rows
+  `);
+
+  const row = result.rows[0];
+  return Object.freeze({
+    marketsCreatedTotal: Number(row?.markets_created_total ?? 0),
+    betsPlacedTotal: Number(row?.bets_placed_total ?? 0),
+    volumeXlmTotal: String(row?.volume_xlm_total ?? "0"),
+    marketsResolvedTotal: Number(row?.markets_resolved_total ?? 0),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -278,6 +363,83 @@ export function cumulativeCounts(counts: readonly number[]): number[] {
     out.push(running);
   }
   return out;
+}
+
+function escapeLabel(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/"/g, '\\"');
+}
+
+export function serializeHistogram(): string {
+  const header = [
+    "# HELP api_request_duration_ms API request duration in milliseconds.",
+    "# TYPE api_request_duration_ms histogram",
+  ];
+
+  const lines = getHistogram().flatMap((snapshot) => {
+    const cumulative = cumulativeCounts(snapshot.counts);
+    const route = escapeLabel(snapshot.route);
+    const buckets = snapshot.buckets.map((bucket, index) => {
+      const le = bucket === Infinity ? "+Inf" : String(bucket);
+      return `api_request_duration_ms_bucket{route="${route}",le="${le}"} ${cumulative[index]}`;
+    });
+
+    return [
+      ...buckets,
+      `api_request_duration_ms_sum{route="${route}"} ${snapshot.sum}`,
+      `api_request_duration_ms_count{route="${route}"} ${snapshot.count}`,
+    ];
+  });
+
+  return [...header, ...lines, ""].join("\n");
+}
+
+export function serializeErrorCounts(): string {
+  const header = [
+    "# HELP api_errors_total Total number of 5xx API responses.",
+    "# TYPE api_errors_total counter",
+  ];
+
+  const lines = getErrorCounts().map(
+    ({ route, count }) =>
+      `api_errors_total{route="${escapeLabel(route)}"} ${count}`
+  );
+
+  return [...header, ...lines, ""].join("\n");
+}
+
+export function serializeBusinessMetrics(
+  snapshot: BusinessMetricsSnapshot
+): string {
+  return [
+    "# HELP markets_created_total Total number of indexed markets created.",
+    "# TYPE markets_created_total counter",
+    `markets_created_total ${snapshot.marketsCreatedTotal}`,
+    "# HELP bets_placed_total Total number of indexed bets placed.",
+    "# TYPE bets_placed_total counter",
+    `bets_placed_total ${snapshot.betsPlacedTotal}`,
+    "# HELP volume_xlm_total Total indexed platform betting volume in XLM.",
+    "# TYPE volume_xlm_total counter",
+    `volume_xlm_total ${snapshot.volumeXlmTotal}`,
+    "# HELP markets_resolved_total Total number of indexed markets resolved.",
+    "# TYPE markets_resolved_total counter",
+    `markets_resolved_total ${snapshot.marketsResolvedTotal}`,
+    "",
+  ].join("\n");
+}
+
+export async function serializePrometheusMetrics(
+  db: MetricsQueryable
+): Promise<string> {
+  const businessMetrics = await getBusinessMetrics(db);
+  return [
+    serializeHistogram().trimEnd(),
+    serializeErrorCounts().trimEnd(),
+    serializeBusinessMetrics(businessMetrics).trimEnd(),
+    "",
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +469,21 @@ export function registerMetricsHook(app: FastifyInstance): void {
     if (reply.statusCode >= 500 && reply.statusCode < 600) {
       recordError(request.method, routePath);
     }
+  });
+}
+
+export function registerMetricsRoute(
+  app: FastifyInstance,
+  db?: MetricsQueryable
+): void {
+  app.get("/api/metrics", async (_request, reply) => {
+    if (!db) {
+      throw serviceUnavailable("Metrics database not available");
+    }
+
+    const body = await serializePrometheusMetrics(db);
+    reply.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    return reply.status(200).send(body);
   });
 }
 

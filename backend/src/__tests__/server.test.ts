@@ -1,8 +1,9 @@
 
-import { describe, expect, it, vi, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { registerGracefulShutdown } from "../server.js";
 import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
+import { resetErrorCounts, resetHistogram } from "../metrics.js";
 
 describe("registerGracefulShutdown", () => {
   it("closes the server once so Fastify stops accepting and drains in-flight requests", async () => {
@@ -32,6 +33,11 @@ const DENIED = "https://evil.example";
 
 let server: FastifyInstance | undefined;
 
+beforeEach(() => {
+  resetHistogram();
+  resetErrorCounts();
+});
+
 function makeServer(corsOrigins: string[] = [ALLOWED]): FastifyInstance {
   server = buildServer({ corsOrigins });
   return server;
@@ -40,6 +46,8 @@ function makeServer(corsOrigins: string[] = [ALLOWED]): FastifyInstance {
 afterEach(async () => {
   await server?.close();
   server = undefined;
+  resetHistogram();
+  resetErrorCounts();
 });
 
 describe("parseCorsOrigins", () => {
@@ -178,5 +186,48 @@ describe("GET /healthz", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ status: "ok" });
 
+  });
+});
+
+describe("GET /api/metrics", () => {
+  it("returns a Prometheus scrape with business counters and request histograms", async () => {
+    const pool = {
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            markets_created_total: "7",
+            bets_placed_total: "15",
+            volume_xlm_total: "321.0000000",
+            markets_resolved_total: "4",
+          },
+        ],
+      }),
+    };
+
+    const app = buildServer({ corsOrigins: [ALLOWED], pool: pool as any });
+
+    await app.inject({ method: "GET", url: "/healthz" });
+    const res = await app.inject({ method: "GET", url: "/api/metrics" });
+
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers["content-type"])).toContain("text/plain");
+    expect(res.body).toContain("markets_created_total 7");
+    expect(res.body).toContain("bets_placed_total 15");
+    expect(res.body).toContain("volume_xlm_total 321.0000000");
+    expect(res.body).toContain("markets_resolved_total 4");
+    expect(res.body).toContain('api_request_duration_ms_count{route="GET /healthz"} 1');
+  });
+
+  it("fails loudly when the metrics endpoint has no database pool", async () => {
+    const app = makeServer();
+    const res = await app.inject({ method: "GET", url: "/api/metrics" });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({
+      error: {
+        code: "SERVICE_UNAVAILABLE",
+        message: "Metrics database not available",
+      },
+    });
   });
 });

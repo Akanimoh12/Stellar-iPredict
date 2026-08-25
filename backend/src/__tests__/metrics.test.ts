@@ -21,6 +21,10 @@ import {
   getErrorCount,
   getErrorCounts,
   resetErrorCounts,
+  getBusinessMetrics,
+  serializeBusinessMetrics,
+  serializeHistogram,
+  serializeErrorCounts,
 } from "../metrics.js";
 import { buildServer } from "@/server";
 
@@ -302,6 +306,87 @@ describe("resetErrorCounts", () => {
     resetErrorCounts();
     expect(getErrorCounts()).toEqual([]);
     expect(getErrorCount("GET", "/api/markets")).toBeUndefined();
+  });
+});
+
+describe("business metrics", () => {
+  it("derives business counters from indexed state with event-log preference for bets and volume", async () => {
+    const db = {
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            markets_created_total: "12",
+            bets_placed_total: "34",
+            volume_xlm_total: "456.7000000",
+            markets_resolved_total: "5",
+          },
+        ],
+      }),
+    };
+
+    await expect(getBusinessMetrics(db as any)).resolves.toEqual({
+      marketsCreatedTotal: 12,
+      betsPlacedTotal: 34,
+      volumeXlmTotal: "456.7000000",
+      marketsResolvedTotal: 5,
+    });
+  });
+
+  it("serializes business counters in Prometheus text format", () => {
+    expect(
+      serializeBusinessMetrics({
+        marketsCreatedTotal: 2,
+        betsPlacedTotal: 9,
+        volumeXlmTotal: "123.4500000",
+        marketsResolvedTotal: 1,
+      })
+    ).toBe(
+      [
+        "# HELP markets_created_total Total number of indexed markets created.",
+        "# TYPE markets_created_total counter",
+        "markets_created_total 2",
+        "# HELP bets_placed_total Total number of indexed bets placed.",
+        "# TYPE bets_placed_total counter",
+        "bets_placed_total 9",
+        "# HELP volume_xlm_total Total indexed platform betting volume in XLM.",
+        "# TYPE volume_xlm_total counter",
+        "volume_xlm_total 123.4500000",
+        "# HELP markets_resolved_total Total number of indexed markets resolved.",
+        "# TYPE markets_resolved_total counter",
+        "markets_resolved_total 1",
+        "",
+      ].join("\n")
+    );
+  });
+});
+
+describe("Prometheus serialization", () => {
+  it("serializes the request-duration histogram in Prometheus format", () => {
+    observe("GET", "/healthz", 42);
+
+    expect(serializeHistogram()).toContain(
+      'api_request_duration_ms_bucket{route="GET /healthz",le="50"} 1'
+    );
+    expect(serializeHistogram()).toContain(
+      'api_request_duration_ms_count{route="GET /healthz"} 1'
+    );
+    expect(serializeHistogram()).toContain(
+      'api_request_duration_ms_sum{route="GET /healthz"} 42'
+    );
+  });
+
+  it("serializes 5xx error counters in Prometheus format", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+
+    expect(serializeErrorCounts()).toBe(
+      [
+        "# HELP api_errors_total Total number of 5xx API responses.",
+        "# TYPE api_errors_total counter",
+        'api_errors_total{route="GET /api/markets"} 2',
+        "",
+      ].join("\n")
+    );
   });
 });
 

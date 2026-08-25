@@ -16,6 +16,8 @@ export const forbidden = (message = "Forbidden") => new HttpError(403, "FORBIDDE
 export const notFound = (message = "Not found") => new HttpError(404, "NOT_FOUND", message);
 export const methodNotAllowed = (message = "Method not allowed") => new HttpError(405, "METHOD_NOT_ALLOWED", message);
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
+export const serviceUnavailable = (message = "Service unavailable") =>
+  new HttpError(503, "SERVICE_UNAVAILABLE", message);
 
 export interface ErrorResponse { error: { code: string; message: string } }
 

@@ -135,6 +135,42 @@ export function serializeRpcErrors(): string {
   return [...header, ...samples, ""].join("\n");
 }
 
+/**
+ * Serialize all indexer metrics in Prometheus text exposition format.
+ *
+ * Exports:
+ * - indexer_lag_ledgers: gauge of how far behind the indexer is
+ * - events_processed_total: counter of successfully processed events
+ * - rpc_errors_total: counter of failed RPC calls (by service + operation)
+ */
+export function serializeMetrics(): string {
+  const lines: string[] = [];
+
+  // Indexer lag gauge
+  lines.push("# HELP indexer_lag_ledgers The difference between the latest ledger and the indexer checkpoint");
+  lines.push("# TYPE indexer_lag_ledgers gauge");
+  lines.push(`indexer_lag_ledgers ${metrics.indexerLag.get()}`);
+
+  // Events processed counter
+  lines.push("# HELP events_processed_total Total number of contract events successfully processed");
+  lines.push("# TYPE events_processed_total counter");
+  lines.push(`events_processed_total ${metrics.eventsProcessed.get()}`);
+
+  // RPC errors counter
+  const rpcSnapshots = metrics.rpcErrors.snapshot();
+  if (rpcSnapshots.length > 0) {
+    lines.push("# HELP rpc_errors_total Total number of failed RPC calls");
+    lines.push("# TYPE rpc_errors_total counter");
+    for (const { service, operation, count } of rpcSnapshots) {
+      lines.push(
+        `rpc_errors_total{service="${escapeLabel(service)}",operation="${escapeLabel(operation)}"} ${count}`
+      );
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
+
 /** Reset all metrics to zero. Intended for tests. */
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();

@@ -400,6 +400,29 @@ scrape_configs:
       - targets: ["localhost:9090"]
     metrics_path: "/metrics"
     scrape_interval: 15s
+
+### Production compose notes
+
+The production compose file (`docker-compose.production.yml`) includes container
+`healthcheck` entries and uses `depends_on` with `service_healthy` so that
+dependent services (API, indexer) wait for Postgres/Redis to be ready. Health
+checks are intentionally conservative: services will retry several times before
+being considered unhealthy to avoid false starts on noisy hosts.
+
+Bring the stack up with:
+
+```bash
+cd infra
+docker compose -f docker-compose.production.yml up -d --build
+```
+
+If you need to bring an individual component up for debugging (skipping the
+indexer build problems), run the subset explicitly:
+
+```bash
+docker compose -f docker-compose.production.yml up -d postgres redis api
+```
+
 ```
 
 Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:

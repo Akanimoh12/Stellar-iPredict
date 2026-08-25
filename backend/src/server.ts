@@ -22,7 +22,7 @@ import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
-import { registerMetricsHook } from "./metrics.js";
+import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -67,6 +67,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
 
   registerRequestLogging(server);
   registerMetricsHook(server);
+  registerMetricsEndpoint(server);
   registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.

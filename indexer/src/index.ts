@@ -5,6 +5,7 @@ import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
 import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
+import { MetricsServer } from "./metrics-server.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -34,14 +35,21 @@ export class Indexer {
   private stopping = false;
   private processing = false;
   private lastLedger = 0;
+  private metricsServer: MetricsServer | null = null;
 
-  constructor(private readonly runtime: IndexerRuntime) {}
+  constructor(private readonly runtime: IndexerRuntime, metricsServer?: MetricsServer) {
+    this.metricsServer = metricsServer || null;
+  }
 
   requestShutdown(): void {
     this.stopping = true;
   }
 
   async start(): Promise<void> {
+    if (this.metricsServer) {
+      await this.metricsServer.start();
+    }
+
     this.lastLedger = await this.runtime.getCheckpoint();
     if (this.lastLedger <= 0) {
       this.lastLedger = START_LEDGER;
@@ -86,6 +94,9 @@ export class Indexer {
   async flushAndClose(): Promise<void> {
     while (this.processing) await this.runtime.sleep(10);
     await this.runtime.saveCheckpoint(this.lastLedger);
+    if (this.metricsServer) {
+      await this.metricsServer.stop();
+    }
     await this.runtime.redis?.end();
     await this.runtime.db.end();
   }
@@ -100,6 +111,10 @@ export function installShutdownHandlers(indexer: Indexer): void {
   };
   process.once("SIGINT", handler);
   process.once("SIGTERM", handler);
+}
+
+export function installGracefulShutdown(indexer: Indexer): void {
+  installShutdownHandlers(indexer);
 }
 
 
@@ -129,4 +144,21 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
   } else if (domain === "oracle" && action === "finalized") {
     await handleOracleFinalizedEvent(event, db, redis);
   }
+}
+
+/**
+ * Main entry point for the indexer service.
+ * Starts the metrics server and runs the indexer polling loop.
+ */
+export async function main(): Promise<void> {
+  // Initialize metrics server
+  const metricsServer = new MetricsServer();
+
+  // TODO: Create indexer runtime and start indexing
+  // This will be implemented once the full runtime setup is in place
+
+  const indexer = new Indexer({} as IndexerRuntime, metricsServer);
+  installGracefulShutdown(indexer);
+
+  await indexer.start();
 }

@@ -424,13 +424,37 @@ millisecond buckets.
 ### Grafana dashboards
 
 Import [`grafana/business.json`](grafana/business.json) and
-[`grafana/oracle.json`](grafana/oracle.json) in Grafana, selecting the local
+[`grafana/oracle.json`](grafana/oracle.json) and
+[`grafana/system.json`](grafana/system.json) in Grafana, selecting the local
 Prometheus datasource when prompted. The business dashboard covers market
 creation, bets, XLM volume, and resolved markets. The oracle dashboard covers
-submissions, disputes, resolution lag, and oracle RPC failures.
+submissions, disputes, resolution lag, and oracle RPC failures. The system
+health dashboard covers scrape target availability, API latency and errors,
+indexer lag and throughput, RPC failures, and Postgres/Redis exporter health.
+
+The system dashboard expects the standard `postgres_exporter` and
+`redis_exporter` metric names: `pg_up`, `redis_up`, `redis_memory_used_bytes`,
+and `redis_commands_processed_total`. Run those exporters beside Postgres and
+Redis, then add scrape jobs similar to these (use the exporter hostnames and
+ports from your deployment):
+
+```yaml
+  - job_name: "ipredict-postgres"
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: "ipredict-redis"
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+```
+
+The existing `ipredict-backend` and `ipredict-indexer` jobs above provide the
+application metrics used by the remaining panels. A panel remains empty until
+its service or exporter is scraped and emits the corresponding metric.
 
 For a local smoke test, start Prometheus and Grafana, configure Prometheus to
-scrape the services' metrics endpoints, import both dashboards, and use
+scrape the services' metrics endpoints and exporters, import the dashboards,
+and use
 Grafana's query inspector to confirm every panel returns without a PromQL
 error. An empty panel is expected until its service emits the corresponding
 metric.

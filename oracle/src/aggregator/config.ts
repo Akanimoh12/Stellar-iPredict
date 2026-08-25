@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
@@ -23,10 +24,10 @@ const schema = z.object({
   STUCK_MARKET_HOURS: positiveNumber.default(6),
 
   /** Initial resolver key for signing finalization transactions. */
-  RESOLVER_KEY: z.string().min(1).optional(),
+  RESOLVER_KEY: optionalEnv(z.string().min(1)),
 
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
-  FINALIZE_WEBHOOK_URL: z.string().url().optional(),
+  FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
 
   SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
   SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),

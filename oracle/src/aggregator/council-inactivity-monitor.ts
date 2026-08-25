@@ -84,6 +84,17 @@ export async function checkCouncilWindowExceeded(
   return alerts;
 }
 
+// The join is on the raw ids: council_votes.market_id is BIGINT and
+// oracle_submissions.market_id is INTEGER, which Postgres compares directly.
+// Casting the right side to text instead raised "operator does not exist:
+// bigint = text" on every call.
+//
+// Both queries below compare `s.status` as text. `oracle_submission_status`
+// (migration 0008) has no 'escalated' member — that state currently lives in
+// oracle_disputes.status — and comparing the enum against a literal it does
+// not contain raises a Postgres error instead of returning no rows. The cast
+// makes these checks a no-op until the schema grows the state, rather than
+// failing the whole monitor cycle.
 interface PostgresEscalatedRow extends Record<string, unknown> {
   market_id: string;
   escalated_at: string;
@@ -102,8 +113,8 @@ export async function checkCouncilInactivityFromDb(
             s.status,
             COUNT(v.member) AS vote_count
        FROM oracle_submissions s
-  LEFT JOIN council_votes v ON v.market_id = s.market_id::text
-      WHERE s.status = 'escalated'
+  LEFT JOIN council_votes v ON v.market_id = s.market_id
+      WHERE s.status::text = 'escalated'
    GROUP BY s.market_id, s.submitted_at, s.status`,
   );
 
@@ -128,8 +139,8 @@ export async function checkCouncilWindowExceededFromDb(
             s.status,
             COUNT(v.member) AS vote_count
        FROM oracle_submissions s
-  LEFT JOIN council_votes v ON v.market_id = s.market_id::text
-      WHERE s.status = 'escalated'
+  LEFT JOIN council_votes v ON v.market_id = s.market_id
+      WHERE s.status::text = 'escalated'
    GROUP BY s.market_id, s.submitted_at, s.status`,
   );
 

@@ -24,6 +24,10 @@ backend/dist/
 indexer/dist/
 oracle/dist/
 
+# ── Database backups ───────────────────────────────────────────────────────────
+# Default output of infra/scripts/backup.sh — dumps are data, not source.
+infra/backups/
+
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
 .env.local

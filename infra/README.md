@@ -39,18 +39,63 @@ The monitoring assets use the canonical metric names in
 
 ### Prometheus metrics and alerts
 
-The indexer records each failed Soroban RPC request as:
+#### Backend API Metrics
 
-```text
-rpc_errors_total{service="indexer",operation="getEvents"} 1
-```
+The backend exposes Prometheus metrics at `GET /metrics` in text exposition
+format (the standard Prometheus scrape protocol).
+
+**Metrics exposed:**
+
+- `api_request_duration_ms_bucket{route, le}` — request latency histogram
+  (cumulative counts per bucket, labeled by route and bucket boundary in ms)
+- `api_request_duration_ms_sum{route}` — sum of all request durations
+- `api_request_duration_ms_count{route}` — total number of requests
+- `api_errors_total{route}` — total number of 5xx responses per route
+
+**Example:** After running the backend for a while, visit
+`http://localhost:3000/metrics` (or your configured backend port) to see
+all metrics.
+
+#### Indexer Metrics
+
+The indexer exposes Prometheus metrics at `GET /metrics` on port 9090 (or
+`$METRICS_PORT` if set) in text exposition format.
+
+**Metrics exposed:**
+
+- `indexer_lag_ledgers` — gauge, difference between latest ledger and indexer
+  checkpoint (0 means fully caught up)
+- `events_processed_total` — counter, total contract events successfully indexed
+- `rpc_errors_total{service, operation}` — counter, failed RPC calls by service
+  and operation (e.g. `operation="getEvents"`)
 
 The `service` and `operation` labels are intentionally low-cardinality. Other
 services can use the same metric and identify their stable RPC operation with
 those labels. Do not attach URLs, errors, transaction hashes, or market IDs.
 
-Load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files` in
-`prometheus.yml`:
+**Example:** After running the indexer, visit `http://localhost:9090/metrics`
+to see all metrics.
+
+### Prometheus Configuration
+
+Configure Prometheus to scrape both services by adding to `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: "ipredict-backend"
+    static_configs:
+      - targets: ["localhost:3000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+
+  - job_name: "ipredict-indexer"
+    static_configs:
+      - targets: ["localhost:9090"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+```
+
+Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:
 
 ```yaml
 rule_files:

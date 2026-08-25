@@ -443,6 +443,69 @@ export async function serializePrometheusMetrics(
 }
 
 // ---------------------------------------------------------------------------
+// Prometheus text exposition format serialization
+// ---------------------------------------------------------------------------
+
+/** Escape label values for Prometheus text exposition format. */
+function escapeLabelValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/"/g, '\\"');
+}
+
+/**
+ * Serialize request duration histogram in Prometheus text exposition format.
+ *
+ * Produces a histogram with cumulative bucket counts, matching the format
+ * expected by Prometheus scrapers. Each route gets three metric lines:
+ * - `api_request_duration_ms_bucket{route, le}` — cumulative count ≤ le
+ * - `api_request_duration_ms_sum{route}` — total duration sum
+ * - `api_request_duration_ms_count{route}` — total observation count
+ *
+ * Bucket boundaries are in milliseconds.
+ */
+export function serializeMetrics(): string {
+  const histograms = getHistogram();
+  const errors = getErrorCounts();
+
+  const lines: string[] = [
+    "# HELP api_request_duration_ms_seconds Request latency histogram in milliseconds",
+    "# TYPE api_request_duration_ms_seconds histogram",
+  ];
+
+  // Emit histogram metrics for each route
+  for (const snapshot of histograms) {
+    const route = escapeLabelValue(snapshot.route);
+    const cumulative = cumulativeCounts(snapshot.counts);
+
+    // Emit bucket observations
+    for (let i = 0; i < snapshot.buckets.length; i++) {
+      const le = snapshot.buckets[i];
+      const leStr = le === Infinity ? "+Inf" : String(le);
+      lines.push(
+        `api_request_duration_ms_bucket{route="${route}",le="${leStr}"} ${cumulative[i]}`
+      );
+    }
+
+    // Emit sum and count
+    lines.push(`api_request_duration_ms_sum{route="${route}"} ${snapshot.sum}`);
+    lines.push(
+      `api_request_duration_ms_count{route="${route}"} ${snapshot.count}`
+    );
+  }
+
+  // Error counter metrics
+  if (errors.length > 0) {
+    lines.push("# HELP api_errors_total Total number of 5xx server errors");
+    lines.push("# TYPE api_errors_total counter");
+    for (const error of errors) {
+      const route = escapeLabelValue(error.route);
+      lines.push(`api_errors_total{route="${route}"} ${error.count}`);
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
 // Fastify integration
 // ---------------------------------------------------------------------------
 
@@ -472,19 +535,30 @@ export function registerMetricsHook(app: FastifyInstance): void {
   });
 }
 
-export function registerMetricsRoute(
-  app: FastifyInstance,
-  db?: MetricsQueryable
-): void {
-  app.get("/api/metrics", async (_request, reply) => {
-    if (!db) {
-      throw serviceUnavailable("Metrics database not available");
+/**
+ * Register the /metrics endpoint that serves Prometheus metrics.
+ *
+ * Call this once inside {@link buildServer} to expose metrics at GET /metrics.
+ */
+export function registerMetricsEndpoint(app: FastifyInstance): void {
+  app.get(
+    "/metrics",
+    {
+      schema: {
+        summary: "Prometheus metrics endpoint",
+        tags: ["system"],
+        response: {
+          200: {
+            type: "string",
+            description: "Prometheus text exposition format metrics",
+          },
+        },
+      },
+    },
+    async (_req, reply) => {
+      reply.type("text/plain; version=0.0.4; charset=utf-8").send(serializeMetrics());
     }
-
-    const body = await serializePrometheusMetrics(db);
-    reply.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-    return reply.status(200).send(body);
-  });
+  );
 }
 
 function snapshotEntry(

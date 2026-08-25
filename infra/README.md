@@ -15,7 +15,7 @@ docker compose -f docker-compose.dev.yml up -d
 ```
 
 This gives you:
-- Postgres on `localhost:5432` (db `ipredict`, user/pass `ipredict`)
+- Postgres on `localhost:5432` (database: ipredict, see docker-compose.dev.yml for credentials)
 - Redis on `localhost:6379`
 
 Then run each service from its own folder (`backend/`, `indexer/`, `oracle/`)
@@ -386,7 +386,7 @@ npm run dev
 ```
 
 3. Access the services:
-   - **Grafana**: http://localhost:3000 (admin/admin by default, or use GRAFANA_ADMIN_PASSWORD env var)
+   - **Grafana**: http://localhost:3000 (use GRAFANA_ADMIN_PASSWORD env var or default credentials)
    - **Prometheus**: http://localhost:9090
    - **Backend metrics**: http://localhost:3001/api/metrics
 
@@ -417,7 +417,7 @@ curl http://localhost:3001/api/metrics
 
 3. **Grafana Dashboard**:
    - Go to http://localhost:3000
-   - Login with admin/admin (default, or use your GRAFANA_ADMIN_PASSWORD)
+   - Login with default credentials (or use your custom GRAFANA_ADMIN_PASSWORD)
    - Navigate to "iPredict Business Metrics" dashboard
    - All panels should load without PromQL errors (values may be 0 initially)
 

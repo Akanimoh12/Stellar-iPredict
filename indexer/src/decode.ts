@@ -12,10 +12,24 @@ export interface DecodedTopics {
   args: unknown[];
 }
 
+let deadLetterHandler: (error: Error, topics: xdr.ScVal[], value: xdr.ScVal) => void = (
+  error,
+  topics,
+  value
+) => {
+  console.error("Dead-letter: failed to decode event", { error: error.message, topics, value });
+};
+
+export function setDeadLetterHandler(
+  handler: (error: Error, topics: xdr.ScVal[], value: xdr.ScVal) => void
+) {
+  deadLetterHandler = handler;
+}
+
 export function decodeTopics(topics: xdr.ScVal[]): DecodedTopics {
   const decoded = topics.map((t) => scValToNative(t));
   return {
-    type: String(decoded[0] ?? ""),
+    type: String(decoded[0] ?/ ""),
     subtype: decoded.length > 1 ? String(decoded[1]) : undefined,
     args: decoded.slice(2),
   };
@@ -26,7 +40,12 @@ export function decodeValue(value: xdr.ScVal): unknown {
 }
 
 export function decodeEvent(topics: xdr.ScVal[], value: xdr.ScVal): DecodedEvent {
-  const { type, subtype } = decodeTopics(topics);
-  const data = decodeValue(value);
-  return { type, subtype: subtype || undefined, data };
+  try {
+    const { type, subtype } = decodeTopics(topics);
+    const data = decodeValue(value);
+    return { type, subtype: subtype || undefined, data };
+  } catch (error) {
+    deadLetterHandler(error as Error, topics, value);
+    throw error;
+  }
 }

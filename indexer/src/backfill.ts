@@ -30,6 +30,38 @@ export async function fetchWithRetry<T>(
   }
 }
 
+// Ensure the dead-letter table exists
+async function ensureDeadLetterTable(): Promise<void> {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPZ NOT NULL DEFAULT NOWO()\n    )`
+  );
+}
+
+// Insert a decoding failure into the dead-letter table
+async function insertDeadLetterEvent(
+  event: rpc.Api.Event,
+  eventIndex: number,
+  err: any
+): Promise<void> {
+  try {
+    const topic_b64 = event.topic.map((t: any) => t.toXDR("base64"));
+    const value_b64 = event.value.toXDR("base64");
+    await pool.query(
+      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4::pgostges,$UN$(migration)),
+      [
+        event.ledger,
+        event.txHash,
+        eventIndex,
+        JSON.stringify(topic_b64),
+        value_b64,
+        (err as Error).message,
+      ]
+    );
+  } catch (error) {
+    console.error(`[backfill] Failed to insert dead-letter event: ${(error as Error).message}`);
+  }
+}
+
 // Parse and write a single event to the database
 export async function writeEventToDb(
   ledgerSeq: number,
@@ -65,24 +97,20 @@ export async function writeEventToDb(
     const endTime = data.end_time ?? data[3] ?? 0;
     const creator = data.creator ?? data[4] ?? "";
     await pool.query(
-      `INSERT INTO markets (id, question, category, end_time, creator)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO markets (id, question, category, end_time, creator)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (id) DO NOTHING`,
       [marketId, question, category, endTime, creator]
     );
   } else if (eventName === "market_resolved" || (eventName === "mkt" && topics[1] === "resolved")) {
     const marketId = topics[1] ?? data.market_id ?? data[0];
     const outcome = data.outcome ?? data[1] ?? false;
     await pool.query(
-      `UPDATE markets SET resolved=true, outcome=$2, updated_at=NOW()
-       WHERE id=$1`,
+      `UPDATE markets SET resolved=true, outcome=$2, updated_at=NOW()\n       WHERE id=$1`,
       [marketId, outcome]
     );
   } else if (eventName === "market_cancelled") {
     const marketId = topics[1] ?? data.market_id;
     await pool.query(
-      `UPDATE markets SET cancelled=true, updated_at=NOW()
-       WHERE id=$1`,
+      `UPDATE markets SET cancelled=true, updated_at=NOW()\n       WHERE id=$1`,
       [marketId]
     );
   } else if (eventName === "bet_placed" || eventName === "bet") {
@@ -93,11 +121,7 @@ export async function writeEventToDb(
     const isYes = data.is_yes ?? data[3] ?? true;
 
     await pool.query(
-      `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (market_id, bettor) DO UPDATE
-       SET net_amount = bets.net_amount + EXCLUDED.net_amount,
-           gross_amount = bets.gross_amount + EXCLUDED.gross_amount`,
+      `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (market_id, bettor) DO UPDATE\n       SET net_amount = bets.net_amount + EXCLUDED.net_amount,\n           gross_amount = bets.gross_amount + EXCLUDED.gross_amount`,
       [marketId, bettor, netAmount, grossAmount, isYes]
     );
   }
@@ -108,12 +132,14 @@ export async function runBackfill(): Promise<number> {
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
   console.log(`[backfill] Fetching current network head ledger...`);
-  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
+  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () {
     return await server.getLatestLedger();
   });
   const headLedger = latestLedgerResponse.sequence;
 
   console.log(`[backfill] Network head ledger is ${headLedger}. Starting backfill from ${config.START_LEDGER}...`);
+
+  await ensureDeadLetterTable();
 
   let currentLedger = config.START_LEDGER;
   let cursor: string | undefined = undefined;
@@ -132,12 +158,10 @@ export async function runBackfill(): Promise<number> {
         };
 
     console.log(
-      `[backfill] Fetching events page: ${
-        cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`
-      } (limit=${config.EVENTS_PER_PAGE})`
+      `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
     );
 
-    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
+    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>Async (): Promise<rpc.Api.GetEventsResponse> {
       return await server.getEvents(request);
     });
     const events = response.events || [];
@@ -155,8 +179,16 @@ export async function runBackfill(): Promise<number> {
 
     console.log(`[backfill] Processing ${events.length} events...`);
     for (const [eventIndex, event] of events.entries()) {
-      const topics = event.topic.map((t: any) => scValToNative(t));
-      const data = scValToNative(event.value);
+      let topics: any[];
+      let data: any;
+      try {
+        topics = event.topic.map((t: any) => scValToNative(t));
+        data = scValToNative(event.value);
+      } catch (err) {
+        console.error(`[backfill] Failed to decode event: `, err);
+        await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
+        continue;
+      }
       await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
     }
 

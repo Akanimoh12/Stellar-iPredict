@@ -19,6 +19,7 @@
 #   migrate           opt-in one-shot migration runner (--profile migrate)
 #   api               REST API, replicated
 #   indexer           Soroban event indexer, exactly one replica
+#   proxy             Caddy reverse proxy / TLS termination in front of api
 #   oracle-aggregator council tally + on-chain finalization
 #   oracle-monitor    read-only oracle watchdog and alerting
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,11 +157,13 @@ services:
       # here rather than optional.
       ORACLE_API_KEY: ${ORACLE_API_KEY:?set ORACLE_API_KEY in infra/.env}
       ORACLE_THRESHOLD: ${ORACLE_THRESHOLD:-3}
-    # A host port per replica, drawn from the range. Put a load balancer in
-    # front of these in a real deployment; the range is what makes rolling one
-    # replica at a time possible on a single host.
+    # A host port per replica, drawn from the range. The range is what makes
+    # rolling one replica at a time possible on a single host. Bound to the
+    # loopback interface on purpose: the Caddy proxy (service `proxy`) is the
+    # only public entry point, so nothing can bypass TLS. Override
+    # API_PORT_BIND only if you really need the API reachable directly.
     ports:
-      - "${API_PORT_RANGE:-4000-4002}:4000"
+      - "${API_PORT_BIND:-127.0.0.1}:${API_PORT_RANGE:-4000-4002}:4000"
     deploy:
       replicas: ${API_REPLICAS:-3}
       resources:
@@ -219,6 +222,59 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    stop_grace_period: 20s
+    logging: *logging
+
+  # ── Reverse proxy / TLS ────────────────────────────────────────────────────
+  # Caddy terminates TLS in front of the replicated API. Clients reach the
+  # stack only over HTTPS (ports 80/443); the API's own host ports stay bound
+  # to 127.0.0.1 so nothing bypasses the proxy. Docker's DNS resolves `api`
+  # round-robin across all replicas, so Caddy needs no upstream list of its
+  # own. Config lives in infra/proxy/ (Caddyfile + Dockerfile).
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-proxy:${PROXY_IMAGE_TAG:-local}"
+    restart: always
+    environment:
+      # Public hostname served with automatic HTTPS. Defaults to localhost,
+      # which Caddy serves with an internally-trusted certificate.
+      PROXY_DOMAIN: ${PROXY_DOMAIN:-localhost}
+      # Let's Encrypt account email for expiry notices. The placeholder keeps
+      # the Caddyfile parseable when the operator leaves ACME_EMAIL unset;
+      # Let's Encrypt issues certificates regardless of the contact address.
+      ACME_EMAIL: ${ACME_EMAIL:-admin@localhost}
+      # Upstream inside the compose network; Docker DNS load-balances `api`
+      # across its replicas, so this stays a single hostname.
+      API_UPSTREAM: ${API_UPSTREAM:-api:4000}
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+      - "${PROXY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      # Caddy's data dir: ACME account + issued certificates. Persistent so
+      # certificates are not re-issued on every restart (and so Let's Encrypt
+      # rate limits are not hit).
+      - caddy-data:/data
+      # Runtime config storage (cert metadata etc.).
+      - caddy-config:/config
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: ${PROXY_MEMORY_LIMIT:-128m}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # wget ships in the caddy image. Hits the container-internal :8080
+      # liveness endpoint, which is domain- and TLS-independent.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     stop_grace_period: 20s
     logging: *logging
 
@@ -319,3 +375,5 @@ volumes:
   pgdata:
   redisdata:
   aggregated-logs:
+  caddy-data:
+  caddy-config:

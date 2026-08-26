@@ -57,6 +57,7 @@ backend stack. It follows the design in
 | `redis` | Cache + rate-limiter store, persisted per [`redis.conf`](redis.conf) | 1 |
 | `api` | REST API (`backend/`) | `API_REPLICAS`, default 3 |
 | `indexer` | Soroban event indexer (`indexer/`) | 1, always |
+| `proxy` | Caddy reverse proxy / TLS termination in front of `api` | 1 |
 | `oracle-aggregator` | Council tally and on-chain finalization (`oracle/`) | 1 |
 | `oracle-monitor` | Read-only oracle watchdog and alerting (`oracle/`) | 1 |
 | `log-collector` | Aggregates container logs with Fluent Bit | 1 |
@@ -79,10 +80,14 @@ docker compose -f docker-compose.production.yml up -d --build
 docker compose -f docker-compose.production.yml ps
 ```
 
-The API replicas take one host port each from `API_PORT_RANGE` (4000–4002 by
-default) so a load balancer can address them individually and you can roll one
-replica at a time. Postgres and Redis publish no host port at all: they are
-reachable only from inside the compose network.
+The **only public entry point is the `proxy`** service: Caddy terminates TLS
+on ports 80/443 and forwards to the API — see
+[Reverse proxy and TLS](#reverse-proxy-and-tls). The API replicas each bind
+one loopback-only host port from `API_PORT_RANGE` (4000–4002 by default) so
+you can address one replica at a time for debugging and rolling updates
+without exposing anything unencrypted to the world. Postgres and Redis
+publish no host port at all: they are reachable only from inside the compose
+network.
 
 ### Single indexer instance
 
@@ -106,6 +111,7 @@ restarts, database working-set size, and indexer lag before changing them.
 |---|---:|---:|
 | API | 1.00 | 512 MiB |
 | Indexer | 0.75 | 384 MiB |
+| Proxy (Caddy) | 0.25 | 128 MiB |
 | Postgres | 1.00 | 1 GiB |
 | Redis | 0.50 | 256 MiB |
 | Oracle aggregator | 0.50 | 384 MiB |
@@ -214,6 +220,53 @@ The script reads everything from `infra/.env` (override with `--env-file` or
 `COMPOSE_FILE`), never touches host state outside `infra/`, and is safe to run
 repeatedly and from CI. Passing `--skip-migrate` disables step 2 for
 operations that already applied migrations out of band — use with care.
+
+### Reverse proxy and TLS
+
+The `proxy` service runs [Caddy](https://caddyserver.com/) in front of the
+API and terminates TLS. Config lives entirely in
+[`proxy/`](proxy/): the [`Caddyfile`](proxy/Caddyfile) and a one-line
+[`Dockerfile`](proxy/Dockerfile) that pins the official `caddy:2.11.2-alpine`
+image. Clients reach the stack only over HTTPS; the API's own host ports stay
+bound to `127.0.0.1`, so nothing can bypass the proxy.
+
+**How it proxies.** Caddy forwards everything to `api:4000` on the compose
+network. Docker's built-in DNS resolves `api` round-robin across all API
+replicas, so no explicit upstream list or extra load balancer is needed —
+Caddy just load-balances whatever Docker hands it. Responses are gzip-encoded.
+
+**Local testing (default).** With `PROXY_DOMAIN=localhost` (the default in
+`.env.example`) Caddy serves HTTPS using an internally-trusted certificate:
+
+```bash
+cd infra && ./scripts/deploy.sh
+curl -k https://localhost/healthz     # -> ok (through TLS + proxy)
+curl -k https://localhost/api/v1/...  # -> your API response
+```
+
+`curl -k` is only needed because the localhost certificate is not in your
+system trust store. The proxy's own container healthcheck hits a plain-HTTP
+liveness endpoint on an internal port, so the service reports healthy
+regardless of the TLS certificate state.
+
+**Production.** Set a real domain and a Let's Encrypt account email in
+`infra/.env` and redeploy:
+
+```bash
+PROXY_DOMAIN=api.ipredict.app
+ACME_EMAIL=ops@example.com
+```
+
+Caddy then provisions and renews a Let's Encrypt certificate automatically
+(automatic HTTPS). Requirements: ports 80 and 443 reachable from the
+internet, and a DNS `A`/`AAAA` record pointing at the host. Certificates and
+the ACME account live in the persistent `caddy-data` volume, so restarts do
+not re-issue them.
+
+**Custom internal hostnames.** For a non-public hostname that is not
+`localhost` (e.g. `api.internal`), add `tls internal` to the site block in
+[`proxy/Caddyfile`](proxy/Caddyfile) so Caddy uses its internal CA instead of
+attempting Let's Encrypt.
 
 ## Configuration and secrets
 
@@ -462,8 +515,8 @@ cd infra
 docker compose -f docker-compose.production.yml up -d --build
 ```
 
-If you need to bring an individual component up for debugging (skipping the
-indexer build problems), run the subset explicitly:
+If you need to bring an individual component up for debugging, run the subset
+explicitly:
 
 ```bash
 docker compose -f docker-compose.production.yml up -d postgres redis api

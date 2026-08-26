@@ -66,3 +66,5 @@ npm run dev
 
 The design reference for everything is
 [`docs/ORACLE_AND_BACKEND.md`](docs/ORACLE_AND_BACKEND.md).
+For end-to-end oracle operations (council + optimistic), see
+[`docs/ORACLE_RUNBOOK.md`](docs/ORACLE_RUNBOOK.md).

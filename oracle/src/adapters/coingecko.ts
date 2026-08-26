@@ -54,6 +54,7 @@ export class CoinGeckoAdapter implements DataAdapter {
     // the market deadline (UTC). Otherwise use the simple current price API.
     const at = typeof (market.params as any).at === "number" ? Number((market.params as any).at) : undefined;
     let value: number | undefined;
+    let body: unknown;
 
     if (typeof at === "number" && Number.isFinite(at) && at > 0) {
       // use market_chart/range: /coins/{id}/market_chart/range?vs_currency=usd&from={from}&to={to}
@@ -110,9 +111,9 @@ export class CoinGeckoAdapter implements DataAdapter {
       this.options,
     );
     
-      const body = (await response.json()) as CoinGeckoPriceResponse;
+      body = (await response.json()) as CoinGeckoPriceResponse;
 
-      const coinData = body[symbol];
+      const coinData = (body as CoinGeckoPriceResponse)[symbol];
       if (!coinData) {
         throw new Error(`CoinGeckoAdapter received no data for symbol ${symbol}`);
       }

@@ -33,13 +33,13 @@ export async function fetchWithRetry<T>(
 // Ensure the dead-letter table exists
 async function ensureDeadLetterTable(): Promise<void> {
   await pool.query(
-    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPZ NOT NULL DEFAULT NOWO()\n    )`
+    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n    )`
   );
 }
 
 // Insert a decoding failure into the dead-letter table
 async function insertDeadLetterEvent(
-  event: rpc.Api.Event,
+  event: rpc.Api.EventResponse,
   eventIndex: number,
   err: any
 ): Promise<void> {
@@ -47,7 +47,7 @@ async function insertDeadLetterEvent(
     const topic_b64 = event.topic.map((t: any) => t.toXDR("base64"));
     const value_b64 = event.value.toXDR("base64");
     await pool.query(
-      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4::pgostges,$UN$(migration)),
+      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4,$5,$6)`,
       [
         event.ledger,
         event.txHash,
@@ -132,7 +132,7 @@ export async function runBackfill(): Promise<number> {
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
   console.log(`[backfill] Fetching current network head ledger...`);
-  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () {
+  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
     return await server.getLatestLedger();
   });
   const headLedger = latestLedgerResponse.sequence;
@@ -161,7 +161,7 @@ export async function runBackfill(): Promise<number> {
       `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
     );
 
-    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>Async (): Promise<rpc.Api.GetEventsResponse> {
+    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
       return await server.getEvents(request);
     });
     const events = response.events || [];

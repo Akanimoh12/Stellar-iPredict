@@ -65,6 +65,16 @@ backend stack. It follows the design in
 ```bash
 cd infra
 cp .env.example .env          # then fill in every CHANGE_ME value
+./scripts/deploy.sh           # migrate, then bring up the whole stack
+```
+
+[`scripts/deploy.sh`](scripts/deploy.sh) runs DB migrations **before** any
+application service starts, then brings up the stack — see
+[Deploy flow](#deploy-flow). For a plain compose bring-up without the explicit
+migration step (e.g. first boot, where the postgres container already applies
+`db/migrations`), the equivalent is:
+
+```bash
 docker compose -f docker-compose.production.yml up -d --build
 docker compose -f docker-compose.production.yml ps
 ```
@@ -129,22 +139,6 @@ ORACLE_IMAGE_TAG=v1.4.0 \
 docker compose -f docker-compose.production.yml up -d --no-build
 ```
 
-> **Known issue — the `indexer` image does not build today.** This is
-> pre-existing on `implementation-drips` and unrelated to the compose file:
-> `indexer/` does not typecheck, so its Dockerfile's `npm run build` fails.
-> Six errors, three causes — `zod` is imported by
-> `indexer/src/config/index.ts` but is not in `indexer/package.json`;
-> `indexer/src/backfill.ts` imports a `pool` export that `./db.js` does not
-> have; and `handlers/claim.ts` and `handlers/reward_points.ts` pass a
-> `CacheClient` where `RedisClient` is expected, whose `del` return types
-> disagree. Reproduce with `cd indexer && npm run typecheck`. Every other
-> service builds and comes up. Bring the rest up with:
->
-> ```bash
-> docker compose -f docker-compose.production.yml up -d --build \
->   postgres redis api oracle-aggregator oracle-monitor
-> ```
-
 ### Why the oracle is two services
 
 `oracle-aggregator` writes — it signs and submits `resolve_market`
@@ -192,6 +186,34 @@ docker compose -f docker-compose.production.yml --profile migrate run --rm migra
 Both paths run [`scripts/init-db.sh`](scripts/init-db.sh) and both are
 idempotent — already-applied migrations are skipped, and each migration
 commits together with its bookkeeping row.
+
+### Deploy flow
+
+[`scripts/deploy.sh`](scripts/deploy.sh) is the deploy entry point: it runs the
+migration step and then starts the application services, in the right order,
+so api/indexer never boot against a half-migrated schema.
+
+```bash
+cd infra
+./scripts/deploy.sh                        # migrate + full stack
+./scripts/deploy.sh --services api,indexer # migrate, then only those services
+./scripts/deploy.sh --skip-migrate         # deploy without migrating
+./scripts/deploy.sh --no-build             # reuse existing images
+```
+
+What it does, in order:
+
+1. **Data plane.** Starts `postgres`, `redis` and `log-collector` and waits
+   for postgres to report healthy (`--wait`).
+2. **Migrations.** Runs the `migrate` profile (`init-db.sh`) against the
+   running database — the same idempotent path documented above.
+3. **Application services.** Brings up the rest of the stack (api, indexer,
+   oracle-*), or only the services named with `--services` / positional args.
+
+The script reads everything from `infra/.env` (override with `--env-file` or
+`COMPOSE_FILE`), never touches host state outside `infra/`, and is safe to run
+repeatedly and from CI. Passing `--skip-migrate` disables step 2 for
+operations that already applied migrations out of band — use with care.
 
 ## Configuration and secrets
 

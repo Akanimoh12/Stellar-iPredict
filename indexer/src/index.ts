@@ -1,4 +1,3 @@
-
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
@@ -117,48 +116,89 @@ export function installGracefulShutdown(indexer: Indexer): void {
   installShutdownHandlers(indexer);
 }
 
+/**
+ * Live polling loop: fetches new contract events from the configured Soroban
+ * RPC endpoint and writes them to Postgres, checkpointing each processed
+ * ledger as it goes.
+ *
+ * Imports are resolved lazily so that merely importing this module (as the
+ * tests do) never validates environment variables or opens connections.
+ *
+ * Under test (NODE_ENV === "test") the loop performs a single pass and
+ * returns, so unit tests can exercise it without an infinite timer.
+ */
+export async function startLivePolling(fromLedger: number): Promise<void> {
+  const [{ config }, { writeEventToDb }, stellar] = await Promise.all([
+    import("./config/index.js"),
+    import("./backfill.js"),
+    import("@stellar/stellar-sdk"),
+  ]);
+  const { rpc, scValToNative } = stellar;
 
-import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
-import { handleMarketCreatedEvent } from "./handlers/market_created.js";
-import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
-import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
-import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
-import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
-import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
+  console.log(`[ipredict-indexer] Starting live polling loop from ledger ${fromLedger}...`);
+  let currentLedger = fromLedger;
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
-export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, redis: RedisClient): Promise<void> {
-  const [domain, action] = event.topics;
+  while (true) {
+    try {
+      const latest = await server.getLatestLedger();
+      if (latest.sequence > currentLedger) {
+        console.log(`[live-poll] Fetching events from ${currentLedger + 1} to ${latest.sequence}`);
+        const response = await server.getEvents({
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          startLedger: currentLedger + 1,
+          limit: config.EVENTS_PER_PAGE,
+        });
 
-  if (domain === "mkt" && action === "created") {
-    await handleMarketCreatedEvent(event, db, redis);
-  } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
-    await handleMarketResolvedEvent(event, db, redis);
-  } else if (domain === "mkt" && action === "cancelled") {
-    await handleMarketCancelledEvent(event, db, redis);
-  } else if (domain === "referral" && action === "reward") {
-    await handleReferralRewardEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "challenged") {
-    await handleOracleChallengedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "escalated") {
-    await handleOracleEscalatedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "finalized") {
-    await handleOracleFinalizedEvent(event, db, redis);
+        for (const event of response.events || []) {
+          const topics = event.topic.map((t) => scValToNative(t));
+          const data = scValToNative(event.value);
+          await writeEventToDb(event.ledger, event.txHash, topics, data);
+        }
+        currentLedger = response.latestLedger;
+      }
+    } catch (err) {
+      console.error("[live-poll] Error in polling loop:", err);
+    }
+    if (process.env.NODE_ENV === "test") {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, config.POLL_INTERVAL_MS));
   }
 }
 
 /**
  * Main entry point for the indexer service.
- * Starts the metrics server and runs the indexer polling loop.
+ *
+ * Starts the metrics/health server (not under test, so unit tests can call
+ * main() without binding a port), then either replays history and continues
+ * live (--backfill) or starts live polling from the configured start ledger.
  */
 export async function main(): Promise<void> {
-  // Initialize metrics server
-  const metricsServer = new MetricsServer();
+  if (process.env.NODE_ENV !== "test") {
+    const metricsServer = new MetricsServer();
+    await metricsServer.start();
+  }
 
-  // TODO: Create indexer runtime and start indexing
-  // This will be implemented once the full runtime setup is in place
+  const { config } = await import("./config/index.js");
+  const { runBackfill } = await import("./backfill.js");
 
-  const indexer = new Indexer({} as IndexerRuntime, metricsServer);
-  installGracefulShutdown(indexer);
+  const isBackfill = process.argv.includes("--backfill");
 
-  await indexer.start();
+  if (isBackfill) {
+    console.log("[ipredict-indexer] Backfill mode enabled via CLI flag.");
+    const lastLedger = await runBackfill();
+    await startLivePolling(lastLedger);
+  } else {
+    console.log("[ipredict-indexer] Live polling mode enabled (no backfill).");
+    await startLivePolling(config.START_LEDGER);
+  }
+}
+
+// Only invoke main when run directly, not when imported in tests.
+if (process.env.NODE_ENV !== "test") {
+  main().catch((err) => {
+    console.error("[ipredict-indexer] fatal:", err);
+    process.exit(1);
+  });
 }

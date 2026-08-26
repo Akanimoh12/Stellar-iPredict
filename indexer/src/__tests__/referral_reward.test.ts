@@ -65,6 +65,6 @@ describe("referral_reward handler", () => {
       expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, 3]
     );
-    expect(redis.del).toHaveBeenCalledWith("leaderboard:top20");
+    expect(redis.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");
   });
 });

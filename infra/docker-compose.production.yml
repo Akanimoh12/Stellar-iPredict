@@ -1,68 +1,3 @@
-version: "3.8"
-
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: ipredict
-      POSTGRES_USER: ipredict
-      POSTGRES_PASSWORD: securepassword
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    command: redis-server --appendonly yes
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  indexer:
-    build:
-      context: ../indexer
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  api:
-    build:
-      context: ../backend
-    ports:
-      - 3000:3000
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      replicas: 3
-      restart_policy:
-        condition: on-failure
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  db-data:
-  redis-data:
 # ─────────────────────────────────────────────────────────────────────────────
 # iPredict — production stack.
 #
@@ -204,8 +139,6 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
     restart: always
-    cpus: "1.00"
-    mem_limit: 512m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -232,6 +165,7 @@ services:
       replicas: ${API_REPLICAS:-3}
       resources:
         limits:
+          cpus: "1.00"
           memory: ${API_MEMORY_LIMIT:-512m}
     depends_on:
       postgres:
@@ -259,8 +193,6 @@ services:
       dockerfile: src/Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
     restart: always
-    cpus: "0.75"
-    mem_limit: 384m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -280,6 +212,7 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.75"
           memory: ${INDEXER_MEMORY_LIMIT:-512m}
     depends_on:
       postgres:
@@ -297,8 +230,6 @@ services:
   oracle-aggregator:
     <<: *oracle-image
     restart: always
-    cpus: "0.50"
-    mem_limit: 384m
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -332,6 +263,7 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.50"
           memory: ${ORACLE_MEMORY_LIMIT:-384m}
     depends_on:
       postgres:
@@ -342,8 +274,6 @@ services:
   oracle-monitor:
     <<: *oracle-image
     restart: always
-    cpus: "0.25"
-    mem_limit: 256m
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:
@@ -360,6 +290,7 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.25"
           memory: ${ORACLE_MEMORY_LIMIT:-384m}
     depends_on:
       postgres:

@@ -24,7 +24,7 @@ async function ensureMigrationsTable(client: Client) {
 
 async function alreadyApplied(client: Client, filename: string): Promise<boolean> {
   const res = await client.query('SELECT 1 FROM schema_migrations WHERE filename = $1', [filename]);
-  return res.rowCount > 0;
+  return (res.rowCount ?? 0) > 0;
 }
 
 async function applyMigration(client: Client, filename: string, sql: string) {

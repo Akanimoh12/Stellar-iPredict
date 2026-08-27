@@ -1,4 +1,4 @@
-export { resolveMarket } from "./resolve.js";
+export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
 export {
   ADAPTER_API_KEY_ENV,

@@ -1,4 +1,4 @@
-import type { DataAdapter, Market } from "./index.js";
+import type { DataAdapter, Market, MarketCategory } from "./index.js";
 import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
 
 export type ResolutionStatus = "resolved" | "conflict" | "unresolvable" | "review" | "cancelled";
@@ -19,15 +19,17 @@ export interface ResolutionResult {
 }
 
 export interface ResolveOptions {
-  /** Minimum number of sources that must agree for a resolution. Defaults to 1. */
+  /** Minimum number of sources that must agree for a resolution. Defaults to 1 (2 for politics). */
   minAgreement?: number;
   /** Maximum number of sources to query before deciding. Defaults to all available. */
   maxSources?: number;
-  /** Fraction of dissenting votes (0–1) that triggers a conflict flag. Defaults to 0.3. */
+  /** Fraction of dissenting votes (0–1) that triggers a conflict flag. Defaults to 0.3 (0.15 for politics). */
   conflictThreshold?: number;
-  /** Resolutions below this confidence are held for review. Defaults to 0.7. */
+  /** Resolutions below this confidence are held for review. Defaults to 0.7 (0.85 for politics). */
   minConfidence?: number;
   reviewQueue?: ManualReviewQueue;
+  /** Optional category-specific resolution configuration overrides. */
+  categoryConfigs?: Partial<Record<MarketCategory, CategoryResolutionConfig>>;
 }
 
 export interface CategoryResolutionConfig {
@@ -37,11 +39,42 @@ export interface CategoryResolutionConfig {
   minConfidence?: number;
 }
 
-const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue">> = {
+export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "categoryConfigs">> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
   minConfidence: 0.7,
+};
+
+/**
+ * Category-specific default resolution configurations.
+ * Political markets use conservative confidence gating (higher agreement, higher confidence threshold, lower conflict tolerance).
+ */
+export const DEFAULT_CATEGORY_CONFIG: Record<MarketCategory, Required<CategoryResolutionConfig>> = {
+  crypto: {
+    minAgreement: 1,
+    maxSources: Infinity,
+    conflictThreshold: 0.3,
+    minConfidence: 0.7,
+  },
+  sports: {
+    minAgreement: 1,
+    maxSources: Infinity,
+    conflictThreshold: 0.3,
+    minConfidence: 0.7,
+  },
+  politics: {
+    minAgreement: 2,
+    maxSources: Infinity,
+    conflictThreshold: 0.15,
+    minConfidence: 0.85,
+  },
+  science: {
+    minAgreement: 1,
+    maxSources: Infinity,
+    conflictThreshold: 0.3,
+    minConfidence: 0.7,
+  },
 };
 
 function fetchSource(
@@ -77,13 +110,30 @@ export async function resolveMarket(
   adapters: readonly DataAdapter[],
   options?: ResolveOptions,
 ): Promise<ResolutionResult> {
-  const opts: Required<Omit<ResolveOptions, "reviewQueue">> & Pick<ResolveOptions, "reviewQueue"> = {
+  const defaultCatConfig = market.category ? DEFAULT_CATEGORY_CONFIG[market.category] : undefined;
+  const customCatConfig = market.category ? options?.categoryConfigs?.[market.category] : undefined;
+
+  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "categoryConfigs">> & Pick<ResolveOptions, "reviewQueue"> = {
     minAgreement:
-      options?.minAgreement ?? DEFAULT_OPTIONS.minAgreement,
-    maxSources: options?.maxSources ?? DEFAULT_OPTIONS.maxSources,
+      options?.minAgreement ??
+      customCatConfig?.minAgreement ??
+      defaultCatConfig?.minAgreement ??
+      DEFAULT_OPTIONS.minAgreement,
+    maxSources:
+      options?.maxSources ??
+      customCatConfig?.maxSources ??
+      defaultCatConfig?.maxSources ??
+      DEFAULT_OPTIONS.maxSources,
     conflictThreshold:
-      options?.conflictThreshold ?? DEFAULT_OPTIONS.conflictThreshold,
-    minConfidence: options?.minConfidence ?? DEFAULT_OPTIONS.minConfidence,
+      options?.conflictThreshold ??
+      customCatConfig?.conflictThreshold ??
+      defaultCatConfig?.conflictThreshold ??
+      DEFAULT_OPTIONS.conflictThreshold,
+    minConfidence:
+      options?.minConfidence ??
+      customCatConfig?.minConfidence ??
+      defaultCatConfig?.minConfidence ??
+      DEFAULT_OPTIONS.minConfidence,
     reviewQueue: options?.reviewQueue,
   };
 

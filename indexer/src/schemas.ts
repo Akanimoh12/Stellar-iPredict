@@ -176,6 +176,137 @@ export const marketResolvedPayloadSchema = schema((value: unknown) => {
 
 export type MarketResolvedPayload = Infer<typeof marketResolvedPayloadSchema>;
 
+function parseBetBoolean(value: unknown, field: string): boolean {
+  if (typeof value === "boolean") return value;
+
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "t", "yes", "y", "1"].includes(normalized)) return true;
+    if (["false", "f", "no", "n", "0"].includes(normalized)) return false;
+  }
+
+  throw new ZodValidationError(`${field} must be a boolean`);
+}
+
+/**
+ * Amounts emitted by Soroban are i128 stroops. Keep them as canonical decimal
+ * strings so converting an otherwise valid i128 through JavaScript's `number`
+ * type cannot lose precision before PostgreSQL writes it to NUMERIC.
+ */
+function parseBetAmount(value: unknown, field: string, positive = false): string {
+  let amount: bigint;
+
+  if (typeof value === "bigint") {
+    amount = value;
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    amount = BigInt(value);
+  } else if (typeof value === "string" && /^\d+$/.test(value)) {
+    amount = BigInt(value);
+  } else {
+    throw new ZodValidationError(`${field} must be an unsigned integer amount`);
+  }
+
+  if (amount < 0n || (positive && amount === 0n)) {
+    throw new ZodValidationError(`${field} must be a ${positive ? "positive" : "non-negative"} amount`);
+  }
+
+  return amount.toString();
+}
+
+export interface BetPlacedPayload {
+  market_id: number;
+  bettor: string;
+  is_yes: boolean;
+  /** Gross amount sent by the bettor, before the protocol fee. */
+  amount: string;
+  /** Net amount added to the market pool, after the protocol fee. */
+  net_amount: string;
+  /** Present in the canonical contract payload; older records may omit it. */
+  fee?: string;
+  /** Whether this event adds to an existing position rather than a new bettor. */
+  is_increase?: boolean;
+}
+
+const BET_PLACED_FIELDS = new Set([
+  "market_id",
+  "bettor",
+  "user",
+  "is_yes",
+  "amount",
+  "gross_amount",
+  "gross",
+  "net_amount",
+  "net",
+  "fee",
+  "is_increase",
+]);
+
+/**
+ * Validates the `bet_placed` contract payload. The current payload is
+ * `(market_id, user, is_yes, amount, net_amount, fee, is_increase)`; object
+ * forms are accepted as well for replaying previously indexed events.
+ */
+export const betPlacedPayloadSchema = schema((value: unknown): BetPlacedPayload => {
+  let candidate: Record<string, unknown>;
+
+  if (Array.isArray(value)) {
+    if (value.length !== 7) {
+      throw new ZodValidationError("bet_placed tuple payload must contain seven fields");
+    }
+    candidate = {
+      market_id: value[0],
+      bettor: value[1],
+      is_yes: value[2],
+      amount: value[3],
+      net_amount: value[4],
+      fee: value[5],
+      is_increase: value[6],
+    };
+  } else if (value !== null && typeof value === "object") {
+    candidate = value as Record<string, unknown>;
+    for (const key of Object.keys(candidate)) {
+      if (!BET_PLACED_FIELDS.has(key)) {
+        throw new ZodValidationError("bet_placed payload contains unknown fields");
+      }
+    }
+  } else {
+    throw new ZodValidationError("bet_placed payload must be an object or tuple");
+  }
+
+  const bettor = candidate.bettor ?? candidate.user;
+  const grossAmount = candidate.gross_amount ?? candidate.gross ?? candidate.amount;
+  const netAmount = candidate.net_amount ?? candidate.net ?? candidate.amount;
+  const amount = parseBetAmount(grossAmount, "amount", true);
+  const net_amount = parseBetAmount(netAmount, "net_amount", true);
+  const fee = candidate.fee === undefined || candidate.fee === null
+    ? undefined
+    : parseBetAmount(candidate.fee, "fee");
+
+  if (BigInt(net_amount) > BigInt(amount)) {
+    throw new ZodValidationError("net_amount must not exceed amount");
+  }
+  if (fee !== undefined && BigInt(net_amount) + BigInt(fee) > BigInt(amount)) {
+    throw new ZodValidationError("net_amount plus fee must not exceed amount");
+  }
+
+  return {
+    market_id: parseMarketId(candidate.market_id),
+    bettor: parseStellarAddress(bettor, "bettor"),
+    is_yes: parseBetBoolean(candidate.is_yes, "is_yes"),
+    amount,
+    net_amount,
+    fee,
+    is_increase: candidate.is_increase === undefined || candidate.is_increase === null
+      ? undefined
+      : parseBetBoolean(candidate.is_increase, "is_increase"),
+  };
+});
+
 export const referralRewardPayloadSchema = schema((value: unknown) => {
   let candidate: any = value;
   if (Array.isArray(value)) {
@@ -301,4 +432,3 @@ export const referralRegisteredPayloadSchema = schema((value: unknown) => {
 });
 
 export type ReferralRegisteredPayload = Infer<typeof referralRegisteredPayloadSchema>;
-

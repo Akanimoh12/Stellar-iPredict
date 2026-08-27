@@ -119,6 +119,7 @@ export function installGracefulShutdown(indexer: Indexer): void {
 
 
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
+import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";
 import { handleMarketCreatedEvent } from "./handlers/market_created.js";
 import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
 import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
@@ -131,6 +132,8 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
 
   if (domain === "mkt" && action === "created") {
     await handleMarketCreatedEvent(event, db, redis);
+  } else if (isBetPlacedTopic(event.topics)) {
+    await handleBetPlacedEvent(event, db, redis);
   } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
     await handleMarketResolvedEvent(event, db, redis);
   } else if (domain === "mkt" && action === "cancelled") {

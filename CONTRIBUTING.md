@@ -38,6 +38,8 @@ happens on the **`implementation-drips`** branch — not `main`.
 > There is **no CI/GitHub Actions** on this branch yet — checks are manual.
 > Please run typecheck/tests locally before requesting review.
 
+For the current host-based local workflow across infra, backend, indexer, frontend, and oracle, use [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
+
 ## Repo layout
 
 ```

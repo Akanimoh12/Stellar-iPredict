@@ -227,6 +227,7 @@ ipredict-stellar/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── DEPLOYMENT-GUIDE.md
+│   ├── LOCAL_DEV.md
 │   ├── USER-FEEDBACK.md
 │   └── ITERATION-LOG.md
 └── README.md
@@ -265,6 +266,8 @@ npm test     # 137 tests
 npm run build
 npm run dev  # http://localhost:3000
 ```
+
+For the current host-based local workflow across infra, indexer, backend, frontend, and oracle, see [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
 ### Deploy Contracts (Testnet for dev, Mainnet for production)
 
@@ -428,4 +431,3 @@ Built by **Akan** for the Stellar Build-a-10M-Startup challenge.
 ## Backend Database Foundation
 
 Added Oracle submissions table (migration 0006). Implemented typed market upsert helper in backend/src/db/markets.ts.
-

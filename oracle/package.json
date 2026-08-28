@@ -11,7 +11,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "start:monitor": "node dist/monitor/run.js",
+    "dev:monitor": "tsx watch src/monitor/run.ts",
     "submit": "tsx src/aggregator/submit-cli.ts",
+    "audit:export": "tsx src/aggregator/audit-cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

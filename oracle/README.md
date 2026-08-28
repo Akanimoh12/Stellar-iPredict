@@ -53,7 +53,51 @@ npm install
 npm run dev
 ```
 
+### Running the monitor
+
+The monitor is the read-only half of the oracle. It re-runs the checks in
+`aggregator/` against Postgres every `MONITOR_INTERVAL_MS` and emits an alert
+for anything an operator needs to see — stuck markets, new submissions,
+escalated disputes, under-minimum bonds, an inactive council. It never signs or
+submits a transaction, so it needs no resolver key.
+
+```bash
+npm run dev:monitor          # tsx watch, against your local .env
+npm run build && npm run start:monitor
+```
+
+Alerts are logged as JSON and, when `ALERT_WEBHOOK_URL` is set, POSTed to it.
+Delivery failures are logged rather than thrown: an alerting outage must not
+stop the monitoring loop.
+
+In production it runs as its own `oracle-monitor` service from the same image
+as the aggregator — see
+[`infra/README.md`](../infra/README.md#why-the-oracle-is-two-services).
+
+## Documentation
+
+- **[Council Runbook](./docs/COUNCIL_RUNBOOK.md)** — operational guide for council members and aggregator operators
+- **[Architecture Overview](../docs/ORACLE_AND_BACKEND.md)** — design document for oracle and backend systems
+
 ## Contributing
 
 Pick an open issue labelled `area:oracle`, claim it, branch off
 `implementation-drips`, PR back to `implementation-drips`.
+
+### Aggregator image runbook
+
+Build the production aggregator image from the `oracle/` directory. The
+Dockerfile lives under `src/aggregator/` so the build context can still
+include `package-lock.json`, `tsconfig.json`, and the full source tree.
+
+```bash
+cd oracle
+docker build -f src/aggregator/Dockerfile -t ipredict-oracle-aggregator:local .
+```
+
+Run the image with the same environment variables documented in
+`oracle/.env.example`.
+
+```bash
+docker run --rm --env-file .env ipredict-oracle-aggregator:local
+```

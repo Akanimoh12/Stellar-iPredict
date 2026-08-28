@@ -1,11 +1,16 @@
-import { startServer } from "./server.js";
-import { config } from "./config/index.js";
+/**
+ * iPredict Backend API — entrypoint.
+ *
+ * Run: `npm run dev`
+ */
 
-const PORT = config.PORT;
+import { startServer } from "./server.js";
+
+const PORT = Number(process.env.PORT ?? 4000);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
 async function main(): Promise<void> {
-  await startServer({ port: PORT, host: HOST, corsOrigins: config.CORS_ORIGINS });
+  await startServer({ port: PORT, host: HOST });
 }
 
 main().catch((err) => {

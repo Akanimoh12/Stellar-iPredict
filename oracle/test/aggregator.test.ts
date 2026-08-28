@@ -21,6 +21,104 @@ describe("council aggregator skeleton", () => {
     })).toThrow("COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE");
   });
 
+  it("rejects a threshold that is not a strict majority of the council", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "3",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    })).toThrow("COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)");
+  });
+
+  it("rejects an exact-half threshold on an even-sized council", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "6", COUNCIL_THRESHOLD: "3",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    })).toThrow("COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)");
+  });
+
+  it("accepts a strict-majority threshold on an even-sized council", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "6", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.COUNCIL_SIZE).toBe(6);
+    expect(config.COUNCIL_THRESHOLD).toBe(4);
+  });
+
+  it("loads optimistic oracle bond defaults", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.SUBMITTER_BOND_XLM).toBe(100);
+    expect(config.DISPUTER_BOND_XLM).toBe(200);
+  });
+
+  it("loads optimistic oracle window defaults", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.CHALLENGE_WINDOW_SECONDS).toBe(86_400);
+    expect(config.COUNCIL_WINDOW_SECONDS).toBe(259_200);
+  });
+
+  it("loads optimistic oracle fee default", () => {
+    const config = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(config.COUNCIL_FEE_BPS).toBe(1_000);
+  });
+
+  it("allows configurable poll interval with default", () => {
+    const configDefault = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(configDefault.POLL_INTERVAL_MS).toBe(5_000);
+
+    const configCustom = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "10000",
+    });
+    expect(configCustom.POLL_INTERVAL_MS).toBe(10_000);
+  });
+
+  it("rejects negative or zero poll interval", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "0",
+    })).toThrow();
+
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      POLL_INTERVAL_MS: "-1000",
+    })).toThrow();
+  });
+
+  it("rejects a disputer bond that does not exceed the submitter bond", () => {
+    expect(() => loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      SUBMITTER_BOND_XLM: "200",
+      DISPUTER_BOND_XLM: "100",
+    })).toThrow();
+  });
+
   it("processes expired unresolved markets and closes cleanly", async () => {
     const controller = new AbortController();
     const dependencies: AggregatorDependencies = {

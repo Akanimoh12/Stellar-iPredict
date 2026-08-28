@@ -48,6 +48,61 @@ export COUNCIL_THRESHOLD="4"
 6. Verify on-chain state.
    - Confirm `get_market(market_id)` returns `resolved == true` and the expected `outcome`.
 
+## Finalize notifications
+
+When a market is finalized, `finalizeMarketDecision` always logs the event and,
+if `FINALIZE_WEBHOOK_URL` is configured, POSTs a `market_finalized` payload to it.
+
+- The notification fires **after** `persistFinalDecision` succeeds. That write is
+  guarded by `UNIQUE(market_id)` and throws `MarketAlreadyFinalizedError` on a
+  duplicate, so no path can announce the same market twice.
+- Delivery is best-effort: a webhook failure is logged and swallowed and can
+  never roll back or re-trigger the persisted finalization.
+
+To exercise manually:
+
+1. Point a request bin at `FINALIZE_WEBHOOK_URL` (or tail the process logs for a
+   `Market <id> finalized` line when no webhook is configured).
+2. Finalize a market (steps above) and confirm exactly one `market_finalized`
+   payload / log line appears.
+3. Re-run finalization for the same market and confirm no second notification.
+
+## Handling Escalated Disputes Exceeding the Council Window
+
+If a dispute remains in the `escalated` state for more than 72 hours (`COUNCIL_WINDOW`), the council has failed to rule in time. The `checkCouncilWindowExceeded` monitor will detect this.
+
+To resolve a timed-out market manually:
+
+1. Identify the market ID using the alerts from `checkCouncilWindowExceeded` or query the DB:
+   ```sql
+   SELECT market_id, submitted_at FROM oracle_submissions
+   WHERE status = 'escalated' AND now() - submitted_at > interval '72 hours';
+   ```
+2. Determine the fallback outcome (e.g., cancel the market, or rule in favor of a specific outcome).
+3. Use the `resolve_market` command or script with the admin/resolver key to force-resolve it on-chain:
+   - Call `resolve_market(resolver, market_id, fallback_outcome)`.
+4. Run the finalizer to persist the decision:
+   - This settles the bonds based on the fallback outcome.
+
+## Exporting the council audit
+
+Council decisions and their vote tallies can be exported for audit from the
+`oracle_submissions` (finalized decisions) and `council_votes` (per-member votes)
+tables:
+
+```bash
+# JSON (default)
+npm --prefix oracle run audit:export -- --format json > audit.json
+
+# CSV
+npm --prefix oracle run audit:export -- --format csv > audit.csv
+```
+
+- Only markets with `status = 'finalized'` are exported.
+- Tallies are re-derived with the same de-duplication rules the finalizer uses
+  (`computeTally`), so exported `yes_votes`/`no_votes` match the recorded decision.
+- The CSV `votes` column encodes each member as `member=yes|member=no`.
+
 ## Notes
 
 - This runbook is an alternative if automated integration testing cannot reach the required Soroban/testnet endpoints.

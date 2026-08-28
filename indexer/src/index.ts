@@ -5,6 +5,7 @@ import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
 import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
+import { MetricsServer } from "./metrics-server.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -34,14 +35,21 @@ export class Indexer {
   private stopping = false;
   private processing = false;
   private lastLedger = 0;
+  private metricsServer: MetricsServer | null = null;
 
-  constructor(private readonly runtime: IndexerRuntime) {}
+  constructor(private readonly runtime: IndexerRuntime, metricsServer?: MetricsServer) {
+    this.metricsServer = metricsServer || null;
+  }
 
   requestShutdown(): void {
     this.stopping = true;
   }
 
   async start(): Promise<void> {
+    if (this.metricsServer) {
+      await this.metricsServer.start();
+    }
+
     this.lastLedger = await this.runtime.getCheckpoint();
     if (this.lastLedger <= 0) {
       this.lastLedger = START_LEDGER;
@@ -86,6 +94,9 @@ export class Indexer {
   async flushAndClose(): Promise<void> {
     while (this.processing) await this.runtime.sleep(10);
     await this.runtime.saveCheckpoint(this.lastLedger);
+    if (this.metricsServer) {
+      await this.metricsServer.stop();
+    }
     await this.runtime.redis?.end();
     await this.runtime.db.end();
   }
@@ -102,10 +113,17 @@ export function installShutdownHandlers(indexer: Indexer): void {
   process.once("SIGTERM", handler);
 }
 
+export function installGracefulShutdown(indexer: Indexer): void {
+  installShutdownHandlers(indexer);
+}
+
 
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
+import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";
 import { handleMarketCreatedEvent } from "./handlers/market_created.js";
 import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
+import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
+import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
 import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
 
@@ -114,100 +132,36 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
 
   if (domain === "mkt" && action === "created") {
     await handleMarketCreatedEvent(event, db, redis);
+  } else if (isBetPlacedTopic(event.topics)) {
+    await handleBetPlacedEvent(event, db, redis);
   } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
     await handleMarketResolvedEvent(event, db, redis);
   } else if (domain === "mkt" && action === "cancelled") {
     await handleMarketCancelledEvent(event, db, redis);
   } else if (domain === "referral" && action === "reward") {
     await handleReferralRewardEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "challenged") {
+    await handleOracleChallengedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "escalated") {
+    await handleOracleEscalatedEvent(event, db, redis);
+  } else if (domain === "oracle" && action === "finalized") {
+    await handleOracleFinalizedEvent(event, db, redis);
   }
 }
 
-import { Pool } from "pg";
-import { rebuildLeaderboardTable } from "./leaderboard-rebuild.js";
-import { createLogger, logIterationSummary, parseLogLevel } from "./log.js";
+/**
+ * Main entry point for the indexer service.
+ * Starts the metrics server and runs the indexer polling loop.
+ */
+export async function main(): Promise<void> {
+  // Initialize metrics server
+  const metricsServer = new MetricsServer();
 
-function parseSinceLedger(argv: string[]): number | undefined {
-  const exact = argv.find((arg) => arg.startsWith("--since-ledger="));
-  if (exact) {
-    const value = Number(exact.split("=", 2)[1]);
-    return Number.isFinite(value) && value >= 0 ? value : undefined;
-  }
+  // TODO: Create indexer runtime and start indexing
+  // This will be implemented once the full runtime setup is in place
 
-  const index = argv.indexOf("--since-ledger");
-  if (index >= 0 && argv[index + 1]) {
-    const value = Number(argv[index + 1]);
-    return Number.isFinite(value) && value >= 0 ? value : undefined;
-  }
+  const indexer = new Indexer({} as IndexerRuntime, metricsServer);
+  installGracefulShutdown(indexer);
 
-  return undefined;
+  await indexer.start();
 }
-
-async function main(): Promise<void> {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error("DATABASE_URL is required to rebuild the leaderboard");
-  }
-
-  const dryRun = process.argv.includes("--dry-run");
-  const sinceLedger = parseSinceLedger(process.argv.slice(2));
-  const logger = createLogger({
-    level: parseLogLevel(process.env.LOG_LEVEL),
-    bindings: { component: "indexer", job: "leaderboard-rebuild" },
-  });
-  const pool = new Pool({ connectionString });
-  const client = await pool.connect();
-  const startedAt = Date.now();
-
-  try {
-    await client.query("BEGIN");
-    logger.info("indexer run started", {
-      dryRun,
-      sinceLedger: sinceLedger ?? null,
-      logLevel: logger.level,
-    });
-    const snapshot = await rebuildLeaderboardTable(client, {
-      dryRun,
-      sinceLedger,
-    });
-
-    if (dryRun) {
-      await client.query("ROLLBACK");
-    } else {
-      await client.query("COMMIT");
-    }
-
-    logIterationSummary(logger, {
-      eventsProcessed: snapshot.eventCount,
-      lagLedgers:
-        sinceLedger !== undefined && snapshot.lastLedgerSeq !== null
-          ? Math.max(snapshot.lastLedgerSeq - sinceLedger, 0)
-          : 0,
-      durationMs: Date.now() - startedAt,
-      lastLedgerSeq: snapshot.lastLedgerSeq,
-      checkpointLedger: sinceLedger,
-    });
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    logger.error("indexer run failed", {
-      dryRun,
-      sinceLedger: sinceLedger ?? null,
-      error,
-    });
-    process.exitCode = 1;
-    return;
-  } finally {
-    client.release();
-    await pool.end();
-  }
-}
-
-main().catch((error: unknown) => {
-  const logger = createLogger({
-    level: parseLogLevel(process.env.LOG_LEVEL),
-    bindings: { component: "indexer", job: "leaderboard-rebuild" },
-  });
-  logger.error("indexer fatal", { error });
-  process.exitCode = 1;
-});
-

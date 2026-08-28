@@ -1,0 +1,51 @@
+groups:
+  - name: ipredict.monitoring
+    rules:
+      - alert: IndexerStalled
+        expr: indexer_lag_ledgers > 100
+        for: 10m
+        labels:
+          severity: critical
+          service: indexer
+        annotations:
+          summary: Indexer is more than 100 ledgers behind
+          description: "Indexer lag is {{ $value }} ledgers for 10 minutes."
+
+      - alert: HighRPCErrorRate
+        expr: sum by (service) (rate(rpc_errors_total[5m])) > (5 / 60)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High RPC error rate for {{ $labels.service }}
+          description: "RPC failures have exceeded 5 per minute for 5 minutes (current: {{ $value | humanize }}/s)."
+
+      - alert: MarketStuck
+        expr: (time() - market_end_time_seconds) > (48 * 60 * 60) and on (market_id) market_resolved == 0
+        for: 15m
+        labels:
+          severity: critical
+          service: oracle
+        annotations:
+          summary: Market {{ $labels.market_id }} is stuck
+          description: "Market {{ $labels.market_id }} remains unresolved more than 48 hours after expiry."
+
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.99, sum by (le) (rate(api_request_duration_ms_bucket[5m]))) > 2000
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: API p99 latency is above 2 seconds
+          description: "API p99 latency is {{ $value | humanize }} ms."
+
+      - alert: DatabaseSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(db_query_duration_ms_bucket[5m]))) > 500
+        for: 10m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: Database p99 query latency is above 500 ms
+          description: "Database p99 query latency is {{ $value | humanize }} ms."

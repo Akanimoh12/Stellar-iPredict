@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { MarketRow } from "./types.js";
+import type { MarketRow } from "./types.js";
 
 export type MarketFilter = "active" | "resolved" | "ended" | "cancelled" | "all";
 export type MarketSort = "newest" | "volume" | "ending_soon" | "bettors";
@@ -34,7 +34,6 @@ function getDefaultDb(): Queryable {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required");
   }
-
   pool ??= new Pool({ connectionString });
   return pool;
 }
@@ -55,23 +54,12 @@ const MARKET_COLUMNS = `
   created_at,
   updated_at
 `;
-function getDefaultPool(): Pool {
-  if (!pool) {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (!databaseUrl) {
-      throw new Error("DATABASE_URL is required");
-    }
-    pool = new Pool({ connectionString: databaseUrl });
-  }
-
-  return pool;
-}
 
 const ORDER_BY: Record<MarketSort, string> = {
   newest: "created_at DESC",
   volume: "(total_yes + total_no) DESC, created_at DESC",
   ending_soon: "end_time ASC",
-  bettors: "bet_count DESC, created_at DESC"
+  bettors: "bet_count DESC, created_at DESC",
 };
 
 function buildFilterClause(filter: MarketFilter): string {
@@ -96,15 +84,13 @@ export async function getMarkets(
     category,
     sort = "newest",
     page = 1,
-    limit = 20
+    limit = 20,
   }: GetMarketsInput,
-  db?: Queryable
+  db: Queryable = getDefaultDb(),
 ): Promise<GetMarketsResult> {
-  const queryable = db ?? getDefaultPool();
   if (!Number.isInteger(page) || page < 1) {
     throw new Error("page must be a positive integer");
   }
-
   if (!Number.isInteger(limit) || limit < 1) {
     throw new Error("limit must be a positive integer");
   }
@@ -122,7 +108,14 @@ export async function getMarkets(
     whereConditions.push(filterClause);
   }
 
-  const whereSql = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  if (sort === "ending_soon") {
+    whereConditions.push(
+      "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT",
+    );
+  }
+
+  const whereSql =
+    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
   const offset = (page - 1) * limit;
 
   const rowsQuery = `
@@ -139,21 +132,21 @@ export async function getMarkets(
   const countQuery = `SELECT COUNT(*)::INT AS total FROM markets ${whereSql}`;
 
   const [{ rows }, { rows: totalRows }] = await Promise.all([
-    queryable.query<MarketRow>(rowsQuery, rowsValues),
-    queryable.query<{ total: number }>(countQuery, baseValues)
+    db.query<MarketRow>(rowsQuery, rowsValues),
+    db.query<{ total: number }>(countQuery, baseValues),
   ]);
 
   return {
     rows,
     total: totalRows[0]?.total ?? 0,
     page,
-    limit
+    limit,
   };
 }
 
 export async function getMarketById(
   id: number,
-  db: Queryable = getDefaultDb()
+  db: Queryable = getDefaultDb(),
 ): Promise<MarketRow | null> {
   if (!Number.isInteger(id) || id < 1) {
     throw new Error("id must be a positive integer");

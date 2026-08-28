@@ -1,0 +1,12 @@
+[
+  {
+    "id": "postponed-game",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-08-25T18:00:00Z",
+    "home_team": "Tampa Bay Buccaneers",
+    "away_team": "Dallas Cowboys",
+    "status": "postponed",
+    "bookmakers": []
+  }
+]

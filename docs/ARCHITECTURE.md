@@ -1,5 +1,6 @@
 # iPredict — Architecture
 
+
 ## System Overview
 
 iPredict is a decentralized prediction market built on Stellar's Soroban smart contract platform with a Next.js 14 frontend.

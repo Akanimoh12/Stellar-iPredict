@@ -27,6 +27,12 @@ with `npm run dev`.
 API (replicated), the single indexer, Postgres, and Redis. See
 [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#infrastructure).
 
+## Monitoring
+
+Synthetic uptime monitoring for the API (`/healthz` and `/api/markets`) lives in
+[`monitoring/synthetic.md`](monitoring/synthetic.md) — includes a shell-script
+probe, a Prometheus Blackbox Exporter config, and alert rules.
+
 ## Contributing
 
 Pick an open issue labelled `area:infra`, branch off `implementation-drips`,

@@ -51,6 +51,11 @@ frontend/   Next.js app (existing)
 docs/       Architecture & design docs
 ```
 
+Key references:
+- [API Reference](docs/API.md) — backend HTTP endpoints, request/response schemas, and error formats.
+- [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — running, backfilling, and recovering the event indexer.
+- [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for the API.
+
 ## Local setup
 
 ```bash

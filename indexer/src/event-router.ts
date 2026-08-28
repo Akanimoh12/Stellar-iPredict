@@ -1,4 +1,5 @@
 import {handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
+import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";
 import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
 import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
 import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
@@ -23,6 +24,8 @@ export async function writeEventToDb(
 
   if (domain === "mkt" && action === "cancelled") {
     await handleMarketCancelledEvent(event, db, redis);
+  } else if (isBetPlacedTopic(event.topics)) {
+    await handleBetPlacedEvent(event, db, redis);
   } else if (domain === "referral" && action === "reward") {
     await handleReferralRewardEvent(event, db, redis);
   } else if (domain === "referral" && action === "registered") {

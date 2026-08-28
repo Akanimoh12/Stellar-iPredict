@@ -38,6 +38,8 @@ happens on the **`implementation-drips`** branch — not `main`.
 > There is **no CI/GitHub Actions** on this branch yet — checks are manual.
 > Please run typecheck/tests locally before requesting review.
 
+For the current host-based local workflow across infra, backend, indexer, frontend, and oracle, use [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
+
 ## Repo layout
 
 ```
@@ -50,6 +52,11 @@ contracts/  Soroban smart contracts (existing + new oracle code)
 frontend/   Next.js app (existing)
 docs/       Architecture & design docs
 ```
+
+Key references:
+- [API Reference](docs/API.md) — backend HTTP endpoints, request/response schemas, and error formats.
+- [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — running, backfilling, and recovering the event indexer.
+- [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for the API.
 
 ## Local setup
 

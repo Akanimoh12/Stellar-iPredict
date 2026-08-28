@@ -468,6 +468,68 @@ The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
 to be exported. API and database latency must be Prometheus histograms with
 millisecond buckets.
 
+### Alertmanager (webhook / Slack)
+
+[`alertmanager.yml`](alertmanager.yml) receives every alert Prometheus raises
+from `prometheus/alerts.yml` and delivers it to a generic **webhook** receiver
+and — for `severity=critical` alerts — to a **Slack** channel as well.
+
+The routing tree:
+
+| Matcher | Receiver | When |
+|---|---|---|
+| `severity = "critical"` | `on-call-slack` (and webhook) | Indexer / market stuck, DB slow |
+| `severity =~ "warning\|info"` (or unset) | `webhook` | RPC error rate up, API p99 up |
+
+Local compose wires Alertmanager in automatically:
+
+```bash
+cd infra
+cp .env.monitoring.example .env       # optional; defaults are secret-free
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+- **UI**: http://localhost:9093
+- **Prometheus -> Status -> Alertmanagers** shows the `alertmanager:9093` target
+- The `alerting.alertmanagers` block in
+  [`prometheus/prometheus.yml`](prometheus/prometheus.yml) is what points
+  Prometheus at it
+
+Receiver URLs are injected from the environment at startup
+(`--config.expand-env=true`), so **no secret is stored in the repo**:
+
+| Variable | Where it lands | Default when unset |
+|---|---|---|
+| `ALERT_WEBHOOK_URL` | `receivers.webhook.webhook_configs[0].url` | `http://host.docker.internal:8090/ipredict-alerts` (no-op local sink) |
+| `SLACK_WEBHOOK_URL` | `global.slack_api_url` + `slack_configs.api_url` | empty → Slack receiver is a no-op |
+
+The default webhook URL is deliberately a no-op sink so the stack starts
+secret-free for a local smoke test. Point `ALERT_WEBHOOK_URL` at Slack's
+incoming-webhook URL (see
+[Slack's docs](https://api.slack.com/messaging/webhooks)), PagerDuty's Events
+API, or any Alertmanager webhook v2 endpoint to get real deliveries. Once a
+real URL is set, fire a test alert to confirm end-to-end delivery:
+
+```bash
+curl -X POST http://localhost:9093/api/v1/alerts -d '[
+  {
+    "labels": { "alertname": "TestAlert", "severity": "critical", "service": "indexer" },
+    "annotations": { "summary": "Test alert", "description": "Smoke-testing Alertmanager" }
+  }
+]'
+```
+
+Validate the Alertmanager config before deploying:
+
+```bash
+# with the monitoring stack running:
+docker compose -f docker-compose.monitoring.yml exec alertmanager \
+  amtool check-config /etc/alertmanager/alertmanager.yml
+```
+
+`amtool` also prints the effective routing tree with
+`amtool config routes show` when the Slack webhook URL is set.
+
 ### Grafana dashboards
 
 Import [`grafana/business.json`](grafana/business.json) and
@@ -550,6 +612,7 @@ npm run dev
 3. Access the services:
    - **Grafana**: http://localhost:3000 (use GRAFANA_ADMIN_PASSWORD env var or default credentials)
    - **Prometheus**: http://localhost:9090
+   - **Alertmanager**: http://localhost:9093
    - **Backend metrics**: http://localhost:3001/api/metrics
 
 4. In Grafana, the business dashboard should be automatically available with:
@@ -564,6 +627,10 @@ npm run dev
 1. **Check Prometheus targets**: 
    - Go to http://localhost:9090/targets
    - Verify `ipredict-backend` target is UP
+   - Go to **Status -> Alertmanagers** and confirm the `alertmanager:9093` target is UP
+
+2. **Check Alertmanager**: visit http://localhost:9093 — the UI loads and
+   `amtool check-config` (inside the alertmanager container) reports no errors.
    
 2. **Test metrics endpoint**:
 ```bash

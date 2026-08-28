@@ -227,6 +227,7 @@ ipredict-stellar/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── DEPLOYMENT-GUIDE.md
+│   ├── LOCAL_DEV.md
 │   ├── USER-FEEDBACK.md
 │   └── ITERATION-LOG.md
 └── README.md
@@ -265,6 +266,8 @@ npm test     # 137 tests
 npm run build
 npm run dev  # http://localhost:3000
 ```
+
+For the current host-based local workflow across infra, indexer, backend, frontend, and oracle, see [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
 ### Deploy Contracts (Testnet for dev, Mainnet for production)
 
@@ -329,6 +332,14 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main
 See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 
 **Iteration Summary:** After initial testnet deployment, user feedback on loading states led to replacing spinner-only loading indicators with content-aware skeleton placeholders across leaderboard, profile, and market detail pages — improving perceived performance and reducing layout shift.
+
+---
+
+## Documentation
+
+- [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
+- [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
+- [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
 
 ---
 
@@ -420,4 +431,3 @@ Built by **Akan** for the Stellar Build-a-10M-Startup challenge.
 ## Backend Database Foundation
 
 Added Oracle submissions table (migration 0006). Implemented typed market upsert helper in backend/src/db/markets.ts.
-

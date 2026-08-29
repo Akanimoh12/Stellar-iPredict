@@ -1,3 +1,24 @@
+# Prometheus scrape configuration for the iPredict services (issue #222).
+#
+# Service topology (docs/ORACLE_AND_BACKEND.md):
+#
+#   service    endpoint        local port   notes
+#   ---------  --------------  -----------  ----------------------------------
+#   backend    GET /metrics    4000         Fastify API (backend/.env.example)
+#   indexer    GET /metrics    9091         $METRICS_PORT (code default 9090 is
+#                                           Prometheus's own published port, so
+#                                           run the indexer with METRICS_PORT=9091
+#                                           alongside the monitoring stack)
+#   oracle     (not yet)       9101         the oracle does not expose an HTTP
+#                                           /metrics endpoint yet — job is
+#                                           pre-provisioned, see note below
+#
+# In local development the app services run on the HOST (docker-compose.dev.yml
+# provides only Postgres + Redis), so targets go through host.docker.internal.
+# docker-compose.monitoring.yml maps that name to the host gateway on Linux via
+# extra_hosts. In a full compose deployment (docker-compose.production.yml) the
+# targets would be the Compose service names instead (api:4000, indexer:9090).
+
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -6,16 +27,40 @@ rule_files:
   - "alerts.yml"
 
 scrape_configs:
-  - job_name: 'ipredict-backend'
+  # Prometheus scrapes itself (standard convention).
+  - job_name: "prometheus"
     static_configs:
-      - targets: ['host.docker.internal:3001']
-    scrape_interval: 30s
-    metrics_path: '/api/metrics'
-    scrape_timeout: 10s
+      - targets: ["localhost:9090"]
 
-  - job_name: 'prometheus'
+  # Backend API — serialises api_request_duration_ms_* / api_errors_total at
+  # GET /metrics (backend/src/metrics.ts).
+  - job_name: "ipredict-backend"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scrape_timeout: 10s
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ["host.docker.internal:4000"]
+
+  # Indexer — serialises indexer_lag_ledgers / events_processed_total /
+  # rpc_errors_total at GET /metrics (indexer/src/metrics-server.ts).
+  - job_name: "ipredict-indexer"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["host.docker.internal:9091"]
+
+  # Oracle aggregator — KNOWN GAP: the oracle service has no HTTP server yet
+  # (AggregatorMetrics in oracle/src/aggregator/metrics.ts is in-process only;
+  # exposing it is a separate concern, not silently skipped here). The job is
+  # pre-provisioned against port 9101 so scraping starts the moment the
+  # endpoint lands — until then this target is expected to show DOWN.
+  - job_name: "ipredict-oracle"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
 
 alerting:
   alertmanagers:

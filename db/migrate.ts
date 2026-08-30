@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { Client } from 'pg';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const MIGRATIONS_DIR = path.resolve(__dirname, 'migrations');
 
 function getDatabaseUrl(): string {
@@ -24,7 +27,7 @@ async function ensureMigrationsTable(client: Client) {
 
 async function alreadyApplied(client: Client, filename: string): Promise<boolean> {
   const res = await client.query('SELECT 1 FROM schema_migrations WHERE filename = $1', [filename]);
-  return res.rowCount > 0;
+  return (res.rowCount ?? 0) > 0;
 }
 
 async function applyMigration(client: Client, filename: string, sql: string) {
@@ -49,7 +52,7 @@ async function run() {
     await ensureMigrationsTable(client);
 
     const files = fs.readdirSync(MIGRATIONS_DIR)
-      .filter(f => f.endsWith('.sql'))
+      .filter(f => f.endsWith('.sql') && !f.endsWith('.down.sql'))
       .sort();
 
     for (const file of files) {

@@ -14,6 +14,14 @@ export default defineConfig({
       },
       {
         test: {
+          name: "handlers",
+          include: ["test/*.test.ts"],
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
+        },
+      },
+      {
+        test: {
           name: "integration",
           include: ["src/__tests__/integration/*.test.ts"],
           testTimeout: 60_000,

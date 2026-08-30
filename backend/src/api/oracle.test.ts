@@ -4,6 +4,8 @@ import { registerOracleRoutes, oracleRoutes } from "./oracle.js";
 import { registerErrorHandler } from "../lib/errors.js";
 import type { OracleSubmissionRow } from "../db/types.js";
 
+const TEST_API_KEY = "test-oracle-secret-key-123";
+
 describe("POST /api/oracle/submit (legacy)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];
@@ -49,10 +51,32 @@ describe("POST /api/oracle/submit (legacy)", () => {
   };
 
   beforeEach(() => {
+    process.env.ORACLE_API_KEY = TEST_API_KEY;
     submissions = [];
     app = Fastify();
     registerErrorHandler(app);
     registerOracleRoutes(app, undefined, mockDb);
+  });
+
+  it("returns 401 when ORACLE_API_KEY is unset in the environment", async () => {
+    delete process.env.ORACLE_API_KEY;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: {
+        authorization: `Bearer ${TEST_API_KEY}`,
+      },
+      payload: {
+        marketId: 1,
+        outcome: "YES",
+        signature: "0x123",
+        provider: "provider_1",
+      },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("UNAUTHORIZED");
   });
 
   it("returns 401 when authorization header is missing", async () => {
@@ -97,7 +121,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: "invalid", // should be positive number
@@ -116,7 +140,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 42,
@@ -137,7 +161,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 42,
@@ -158,7 +182,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 42,
@@ -180,7 +204,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "API-Key test-oracle-api-key",
+        authorization: `API-Key ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 10,
@@ -200,7 +224,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 99,
@@ -215,7 +239,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
     // Second submission for same market should fail with 409
     // Mock the duplicate constraint error
     const originalQuery = mockDb.query;
-    mockDb.query = async (text: string) => {
+    mockDb.query = async <T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> => {
       const normalized = text.replace(/\s+/g, " ").trim();
       if (normalized.includes("INSERT INTO oracle_submissions")) {
         const error: any = new Error(
@@ -225,14 +249,14 @@ describe("POST /api/oracle/submit (legacy)", () => {
         error.constraint = "uq_oracle_submissions_market_id";
         throw error;
       }
-      return originalQuery.call(mockDb, text);
+      return originalQuery.call(mockDb, text, values) as Promise<{ rows: T[] }>;
     };
 
     const res2 = await app.inject({
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 99,
@@ -302,6 +326,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
   };
 
   beforeEach(async () => {
+    process.env.ORACLE_API_KEY = TEST_API_KEY;
     submissions = [];
     app = Fastify();
     registerErrorHandler(app);
@@ -321,7 +346,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       method: "POST",
       url: "/api/v1/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 1,
@@ -346,7 +371,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       method: "POST",
       url: "/api/v1/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 1,
@@ -368,7 +393,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       method: "POST",
       url: "/api/v1/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 2,
@@ -393,7 +418,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       method: "POST",
       url: "/api/v1/oracle/submit",
       headers: {
-        authorization: "Bearer test-oracle-api-key",
+        authorization: `Bearer ${TEST_API_KEY}`,
       },
       payload: {
         marketId: 5,

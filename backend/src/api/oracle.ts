@@ -12,7 +12,6 @@ import {
 import { config } from "../config/index.js";
 
 const DEFAULT_ORACLE_THRESHOLD = 3;
-const DEFAULT_DEV_API_KEY = "test-oracle-api-key";
 
 const oracleSubmitBodySchema = z.object({
   marketId: z.number().int().positive(),
@@ -110,10 +109,15 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       },
     },
     async (request, reply) => {
+      const expectedApiKey = process.env.ORACLE_API_KEY;
+
+      if (!expectedApiKey) {
+        throw unauthorized("Oracle API key is not configured");
+      }
+
       const authHeader =
         request.headers.authorization ||
         (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
 
       if (!authHeader) {
         throw unauthorized("Missing authorization header");
@@ -255,6 +259,49 @@ export function registerOracleRoutes(
               submissionsNeeded: { type: "number" },
             },
           },
+          400: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          401: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          409: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  marketId: { type: "number" },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -263,10 +310,15 @@ export function registerOracleRoutes(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
       );
 
+      const expectedApiKey = process.env.ORACLE_API_KEY;
+
+      if (!expectedApiKey) {
+        throw unauthorized("Oracle API key is not configured");
+      }
+
       const authHeader =
         request.headers.authorization ||
         (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
 
       if (!authHeader) {
         throw unauthorized("Missing authorization header");

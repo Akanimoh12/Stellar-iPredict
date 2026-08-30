@@ -39,6 +39,3 @@ export async function getClient(): Promise<PoolClient> {
 export async function shutdown(): Promise<void> {
   await pool.end();
 }
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);

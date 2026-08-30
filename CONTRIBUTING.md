@@ -73,17 +73,23 @@ Key references:
 ## Local setup
 
 ```bash
-# 1. Start Postgres + Redis
+# 1. Install backend, indexer, oracle, and shared dependencies
+npm install
+
+# 2. Start Postgres + Redis
 cd infra && docker compose -f docker-compose.dev.yml up -d
 
-# 2. Run a service (example: backend)
+# 3. Run a service (example: backend)
 cd ../backend
 cp .env.example .env
-npm install
 npm run dev
 ```
 
+From the repository root, `npm run typecheck` and `npm test` run checks across all Node workspaces. Service scripts can still be run from their own directories.
+
 The design reference for everything is
 [`docs/ORACLE_AND_BACKEND.md`](docs/ORACLE_AND_BACKEND.md).
+The implemented and target topology is summarized in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For end-to-end oracle operations (council + optimistic), see
 [`docs/ORACLE_RUNBOOK.md`](docs/ORACLE_RUNBOOK.md).

@@ -118,6 +118,8 @@
 
 ## Architecture
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current backend/oracle topology and the target production data flow.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Next.js 14 Frontend                        │

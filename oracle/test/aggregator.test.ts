@@ -132,4 +132,55 @@ describe("council aggregator skeleton", () => {
     expect(dependencies.processMarket).toHaveBeenCalledWith({ id: "42", cancelled: false });
     expect(dependencies.close).toHaveBeenCalledOnce();
   });
+
+  it("loads AGGREGATOR_BATCH_SIZE configuration with default and custom value", () => {
+    const configDefault = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+    });
+    expect(configDefault.AGGREGATOR_BATCH_SIZE).toBe(50);
+
+    const configCustom = loadAggregatorConfig({
+      COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
+      DATABASE_URL: "postgres://localhost/ipredict",
+      SOROBAN_RPC_URL: "https://rpc.example.com",
+      AGGREGATOR_BATCH_SIZE: "100",
+    });
+    expect(configCustom.AGGREGATOR_BATCH_SIZE).toBe(100);
+  });
+
+  it("queries markets in bounded batches when batchSize is configured", async () => {
+    const controller = new AbortController();
+    const batch1 = [{ id: "1", cancelled: false }, { id: "2", cancelled: false }];
+    const batch2 = [{ id: "3", cancelled: false }];
+    
+    const listSpy = vi.fn(async (_now: Date, _limit?: number, offset?: number) => {
+      if (offset === 0) return batch1;
+      if (offset === 2) return batch2;
+      return [];
+    });
+
+    const processedIds: string[] = [];
+    const dependencies: AggregatorDependencies = {
+      connect: vi.fn(async () => undefined),
+      listExpiredUnresolvedMarkets: listSpy,
+      getBacklogDepth: vi.fn(async () => 3),
+      processMarket: vi.fn(async (m) => {
+        processedIds.push(m.id);
+        if (processedIds.length === 3) controller.abort();
+      }),
+      close: vi.fn(async () => undefined),
+    };
+
+    await runAggregator(dependencies, {
+      signal: controller.signal,
+      pollIntervalMs: 1,
+      batchSize: 2,
+    });
+
+    expect(listSpy).toHaveBeenNthCalledWith(1, expect.any(Date), 2, 0);
+    expect(listSpy).toHaveBeenNthCalledWith(2, expect.any(Date), 2, 2);
+    expect(processedIds).toEqual(["1", "2", "3"]);
+  });
 });

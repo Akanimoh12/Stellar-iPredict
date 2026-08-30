@@ -69,6 +69,10 @@ Key references:
 - [API Reference](docs/API.md) — backend HTTP endpoints, request/response schemas, and error formats.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — running, backfilling, and recovering the event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for the API.
+- [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
+- [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram.
+- [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model for keys, bonds, and RPC trust.
+- [Glossary](docs/GLOSSARY.md) — definitions of domain and system terms used across the codebase.
 
 ## Local setup
 

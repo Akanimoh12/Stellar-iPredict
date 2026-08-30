@@ -340,6 +340,10 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 - [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
+- [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
+- [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram, for the backend and indexer.
+- [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model covering key custody, bond mechanics, and RPC trust.
+- [Glossary](docs/GLOSSARY.md) — definitions of market, bet, outcome, bond, council, and other domain terms.
 
 ---
 

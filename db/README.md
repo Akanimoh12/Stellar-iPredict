@@ -164,6 +164,53 @@ Tracks oracle submissions for dispute and resolution workflows.
 | `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
 | `council_votes` | `JSONB` | Council vote records used to resolve the market |
 
+`status` follows the optimistic-oracle lifecycle: `submitted` is the initial
+claim, `challenged` means a larger bond disputed it, `finalized` means the
+claim was accepted, and `rejected` means it was ruled incorrect. The indexer
+writes submissions and challenge/finalization transitions; `updated_at` is
+maintained by the shared database trigger.
+
+### `oracle_disputes`
+
+Stores the bond and escalation details for challenged submissions.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `SERIAL` | Primary key |
+| `market_id` | `INTEGER` | Market under dispute; unique |
+| `submitter` | `VARCHAR(255)` | Original oracle submitter |
+| `challenger` | `VARCHAR(255)` | Wallet that challenged the submission |
+| `outcome` | `VARCHAR(255)` | Disputed outcome |
+| `submitter_bond` | `NUMERIC` | Positive original bond |
+| `challenger_bond` | `NUMERIC` | Positive bond strictly greater than `submitter_bond` |
+| `total_bond` | `NUMERIC` | Combined escrowed bond |
+| `status` | `oracle_dispute_status` | `challenged` or `escalated` |
+| `challenged_at` | `TIMESTAMPTZ` | When the challenge was recorded |
+| `escalated_at` | `TIMESTAMPTZ` | When council escalation was recorded |
+| `council_deadline` | `TIMESTAMPTZ` | Council decision deadline |
+| `created_at` | `TIMESTAMPTZ` | Row creation time |
+| `updated_at` | `TIMESTAMPTZ` | Last update time, set by trigger |
+
+### Oracle relationships and lifecycle
+
+```mermaid
+erDiagram
+    MARKETS ||--o| ORACLE_SUBMISSIONS : receives
+    MARKETS ||--o| ORACLE_DISPUTES : may_have
+    MARKETS ||--o{ COUNCIL_VOTES : receives
+    ORACLE_SUBMISSIONS ||--o| ORACLE_DISPUTES : escalates_to
+    MARKETS { BIGINT id PK }
+    ORACLE_SUBMISSIONS { SERIAL id PK; INTEGER market_id FK; oracle_submission_status status }
+    ORACLE_DISPUTES { SERIAL id PK; INTEGER market_id FK; oracle_dispute_status status }
+    COUNCIL_VOTES { BIGINT market_id FK; CHAR member PK }
+```
+
+The lifecycle is `submitted → challenged → finalized` or `rejected`; an
+unchallenged submission may finalize directly. The oracle/indexer records the
+on-chain events, while the council/resolver is responsible for the final
+decision. See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md) for
+the design rationale and contract API.
+
 Indexes:
 - `idx_oracle_submissions_market_id` unique on `market_id`
 - `idx_oracle_submissions_status` on `status`

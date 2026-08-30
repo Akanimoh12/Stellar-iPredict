@@ -3,17 +3,21 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import type { Pool } from "pg";
 import { Keypair } from "@stellar/stellar-sdk";
 import { z } from "zod";
-import { badRequest, unauthorized, conflict } from "../lib/errors.js";
+import { badRequest, unauthorized, conflict, forbidden, notFound } from "../lib/errors.js";
 import {
   recordOracleSubmission,
   getOracleSubmissionsCount,
   hasNonceBeenUsed,
   cleanupExpiredNonces,
+  isRegisteredProvider,
+  getIdempotencyRecord,
+  storeIdempotencyRecord,
+  cleanupExpiredIdempotencyKeys,
   type Queryable,
 } from "../db/oracle.js";
+import { getMarketById } from "../db/markets.js";
 import { config } from "../config/index.js";
 
-const DEFAULT_ORACLE_THRESHOLD = 3;
 const DEFAULT_DEV_API_KEY = "test-oracle-api-key";
 
 export function compareSecretValues(
@@ -215,6 +219,34 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
               },
             },
           },
+          403: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          404: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -266,10 +298,36 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         );
       }
 
+      // Issue #438: Reject unregistered oracle providers
+      const db = pool;
+      const isProviderRegistered = await isRegisteredProvider(provider, db);
+      if (!isProviderRegistered) {
+        throw forbidden(
+          `Provider "${provider}" is not a registered oracle provider`,
+        );
+      }
+
+      // Issue #439: Validate market preconditions before accepting submission
+      const market = await getMarketById(marketId, db);
+      if (!market) {
+        throw notFound(`Market ${marketId} does not exist`);
+      }
+      if (market.resolved) {
+        throw badRequest(`Market ${marketId} is already resolved`);
+      }
+      if (market.cancelled) {
+        throw badRequest(`Market ${marketId} is cancelled`);
+      }
+      const now = Date.now();
+      if (Number(market.end_time) * 1000 > now) {
+        throw badRequest(
+          `Market ${marketId} has not expired yet — submissions are only accepted after the market end time`,
+        );
+      }
+
       // Replay protection: validate timestamp window
       if (timestamp !== undefined) {
-        const now = Date.now();
-        const timestampMs = timestamp * 1000; // Convert seconds to milliseconds
+        const timestampMs = timestamp * 1000;
         const windowMs = config.ORACLE_TIMESTAMP_WINDOW_SEC * 1000;
 
         if (Math.abs(now - timestampMs) > windowMs) {
@@ -281,14 +339,34 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
 
       // Replay protection: check nonce uniqueness
       if (nonce !== undefined) {
-        const db = pool;
         const nonceUsed = await hasNonceBeenUsed(nonce, db);
         if (nonceUsed) {
           throw badRequest(`Nonce "${nonce}" has already been used`);
         }
       }
 
-      const db = pool;
+      // Issue #441: Idempotency key support
+      const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
+      if (idempotencyKey) {
+        const existing = await getIdempotencyRecord(idempotencyKey, db);
+        if (existing) {
+          const payloadHash = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(request.body))
+            .digest("hex");
+          if (existing.payload_hash !== payloadHash) {
+            throw conflict(
+              `Idempotency key "${idempotencyKey}" was used with a different payload`,
+            );
+          }
+          return reply
+            .status(existing.status_code as 200 | 400 | 401 | 403 | 404 | 409)
+            .send(existing.response_body);
+        }
+      }
+
+      let responseStatus: 200 | 400 | 401 | 403 | 404 | 409 = 200;
+      let responseBody: unknown;
 
       try {
         await recordOracleSubmission(
@@ -318,10 +396,28 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       }
 
       const count = await getOracleSubmissionsCount(marketId, db);
-      const threshold = Number(
-        process.env.ORACLE_THRESHOLD || DEFAULT_ORACLE_THRESHOLD,
+      const submissionsNeeded = Math.max(
+        0,
+        config.ORACLE_THRESHOLD - count,
       );
-      const submissionsNeeded = Math.max(0, threshold - count);
+
+      responseBody = { accepted: true, submissionsNeeded };
+      responseStatus = 200;
+
+      // Store idempotency record if key was provided
+      if (idempotencyKey) {
+        const payloadHash = crypto
+          .createHash("sha256")
+          .update(JSON.stringify(request.body))
+          .digest("hex");
+        await storeIdempotencyRecord(
+          idempotencyKey,
+          payloadHash,
+          responseBody,
+          responseStatus,
+          db,
+        );
+      }
 
       // Periodic nonce cleanup (every 10th request)
       if (nonce !== undefined && Math.random() < 0.1) {
@@ -331,10 +427,17 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         );
       }
 
-      return reply.status(200).send({
-        accepted: true,
-        submissionsNeeded,
-      });
+      // Periodic idempotency key cleanup (every 20th request)
+      if (idempotencyKey !== undefined && Math.random() < 0.05) {
+        cleanupExpiredIdempotencyKeys(
+          config.ORACLE_IDEMPOTENCY_RETENTION_SEC,
+          db,
+        ).catch((err) =>
+          request.log.error({ err }, "Failed to cleanup expired idempotency keys"),
+        );
+      }
+
+      return reply.status(responseStatus).send(responseBody);
     },
   );
 };
@@ -376,6 +479,76 @@ export function registerOracleRoutes(
             properties: {
               accepted: { type: "boolean" },
               submissionsNeeded: { type: "number" },
+            },
+          },
+          400: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          401: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          403: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          404: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          },
+          409: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
             },
           },
         },
@@ -433,9 +606,35 @@ export function registerOracleRoutes(
         );
       }
 
+      // Issue #438: Reject unregistered oracle providers
+      const db = dbOverride || pool;
+      const isProviderRegistered = await isRegisteredProvider(provider, db);
+      if (!isProviderRegistered) {
+        throw forbidden(
+          `Provider "${provider}" is not a registered oracle provider`,
+        );
+      }
+
+      // Issue #439: Validate market preconditions
+      const market = await getMarketById(marketId, db);
+      if (!market) {
+        throw notFound(`Market ${marketId} does not exist`);
+      }
+      if (market.resolved) {
+        throw badRequest(`Market ${marketId} is already resolved`);
+      }
+      if (market.cancelled) {
+        throw badRequest(`Market ${marketId} is cancelled`);
+      }
+      const now = Date.now();
+      if (Number(market.end_time) * 1000 > now) {
+        throw badRequest(
+          `Market ${marketId} has not expired yet — submissions are only accepted after the market end time`,
+        );
+      }
+
       // Replay protection: validate timestamp window
       if (timestamp !== undefined) {
-        const now = Date.now();
         const timestampMs = timestamp * 1000;
         const windowMs = config.ORACLE_TIMESTAMP_WINDOW_SEC * 1000;
 
@@ -448,14 +647,31 @@ export function registerOracleRoutes(
 
       // Replay protection: check nonce uniqueness
       if (nonce !== undefined) {
-        const db = dbOverride || pool;
         const nonceUsed = await hasNonceBeenUsed(nonce, db);
         if (nonceUsed) {
           throw badRequest(`Nonce "${nonce}" has already been used`);
         }
       }
 
-      const db = dbOverride || pool;
+      // Issue #441: Idempotency key support
+      const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
+      if (idempotencyKey) {
+        const existing = await getIdempotencyRecord(idempotencyKey, db);
+        if (existing) {
+          const payloadHash = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(request.body))
+            .digest("hex");
+          if (existing.payload_hash !== payloadHash) {
+            throw conflict(
+              `Idempotency key "${idempotencyKey}" was used with a different payload`,
+            );
+          }
+          return reply
+            .status(existing.status_code as 200 | 400 | 401 | 403 | 404 | 409)
+            .send(existing.response_body);
+        }
+      }
 
       try {
         await recordOracleSubmission(
@@ -483,10 +699,26 @@ export function registerOracleRoutes(
       }
 
       const count = await getOracleSubmissionsCount(marketId, db);
-      const threshold = Number(
-        process.env.ORACLE_THRESHOLD || DEFAULT_ORACLE_THRESHOLD,
+      const submissionsNeeded = Math.max(
+        0,
+        config.ORACLE_THRESHOLD - count,
       );
-      const submissionsNeeded = Math.max(0, threshold - count);
+
+      const responseBody = { accepted: true, submissionsNeeded };
+
+      if (idempotencyKey) {
+        const payloadHash = crypto
+          .createHash("sha256")
+          .update(JSON.stringify(request.body))
+          .digest("hex");
+        await storeIdempotencyRecord(
+          idempotencyKey,
+          payloadHash,
+          responseBody,
+          200,
+          db,
+        );
+      }
 
       if (nonce !== undefined && Math.random() < 0.1) {
         cleanupExpiredNonces(config.ORACLE_NONCE_RETENTION_SEC, db).catch(
@@ -495,10 +727,7 @@ export function registerOracleRoutes(
         );
       }
 
-      return reply.status(200).send({
-        accepted: true,
-        submissionsNeeded,
-      });
+      return reply.status(200).send(responseBody);
     },
   );
 }

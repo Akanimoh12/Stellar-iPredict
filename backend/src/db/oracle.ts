@@ -3,6 +3,91 @@ import type { OracleSubmissionRow } from "./types.js";
 
 export type { Queryable };
 
+// ── Provider registry ────────────────────────────────────────────────────────
+
+let providerCache: Set<string> | null = null;
+let providerCacheExpiry = 0;
+const PROVIDER_CACHE_TTL_MS = 60_000;
+
+export async function isRegisteredProvider(
+  address: string,
+  db?: Queryable,
+): Promise<boolean> {
+  if (providerCache && Date.now() < providerCacheExpiry) {
+    return providerCache.has(address);
+  }
+
+  const executor = db ?? pool;
+  if (!executor) throw new Error("Database pool is not initialized");
+
+  const result = await executor.query<{ address: string }>(
+    "SELECT address FROM oracle_providers WHERE active = TRUE",
+  );
+  providerCache = new Set(result.rows.map((r) => r.address));
+  providerCacheExpiry = Date.now() + PROVIDER_CACHE_TTL_MS;
+  return providerCache.has(address);
+}
+
+export function invalidateProviderCache(): void {
+  providerCache = null;
+  providerCacheExpiry = 0;
+}
+
+// ── Idempotency ─────────────────────────────────────────────────────────────
+
+export interface IdempotencyRecord {
+  payload_hash: string;
+  response_body: unknown;
+  status_code: number;
+}
+
+export async function getIdempotencyRecord(
+  key: string,
+  db?: Queryable,
+): Promise<IdempotencyRecord | null> {
+  const executor = db ?? pool;
+  if (!executor) throw new Error("Database pool is not initialized");
+
+  const result = await executor.query<IdempotencyRecord>(
+    "SELECT payload_hash, response_body, status_code FROM idempotency_keys WHERE idempotency_key = $1",
+    [key],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function storeIdempotencyRecord(
+  key: string,
+  payloadHash: string,
+  responseBody: unknown,
+  statusCode: number,
+  db?: Queryable,
+): Promise<void> {
+  const executor = db ?? pool;
+  if (!executor) throw new Error("Database pool is not initialized");
+
+  await executor.query(
+    `INSERT INTO idempotency_keys (idempotency_key, payload_hash, response_body, status_code)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (idempotency_key) DO NOTHING`,
+    [key, payloadHash, JSON.stringify(responseBody), statusCode],
+  );
+}
+
+export async function cleanupExpiredIdempotencyKeys(
+  retentionSeconds: number,
+  db?: Queryable,
+): Promise<number> {
+  const executor = db ?? pool;
+  if (!executor) throw new Error("Database pool is not initialized");
+
+  const cutoff = new Date(Date.now() - retentionSeconds * 1000);
+  const result = await executor.query(
+    "DELETE FROM idempotency_keys WHERE created_at < $1",
+    [cutoff],
+  );
+  return (result as any).rowCount ?? 0;
+}
+
 export type RecordOracleSubmissionInput = {
   marketId: number;
   provider: string;
@@ -77,6 +162,9 @@ export async function cleanupExpiredNonces(
   retentionSeconds: number,
   db: Queryable,
 ): Promise<number> {
+  const executor = db ?? pool;
+  if (!executor) throw new Error("Database pool is not initialized");
+
   const cutoffTime = new Date(Date.now() - retentionSeconds * 1000);
 
   const queryText = `
@@ -86,6 +174,6 @@ export async function cleanupExpiredNonces(
     RETURNING id
   `;
 
-  const result = await db.query(queryText, [cutoffTime]);
-  return result.rowCount ?? 0;
+  const result = await executor.query(queryText, [cutoffTime]);
+  return (result as any).rowCount ?? 0;
 }

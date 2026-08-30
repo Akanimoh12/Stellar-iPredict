@@ -48,6 +48,17 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 600))
     .pipe(z.number().int().positive()),
+  ORACLE_THRESHOLD: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 3))
+    .pipe(z.number().int().positive()),
+  ORACLE_IDEMPOTENCY_RETENTION_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 3600))
+    .pipe(z.number().int().positive()),
+  REGISTERED_ORACLE_PROVIDERS: z.string().optional(),
 });
 
 const result = envSchema.safeParse(process.env);

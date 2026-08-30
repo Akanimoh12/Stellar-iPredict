@@ -380,6 +380,119 @@ describe("POST /api/oracle/submit (legacy)", () => {
   });
 });
 
+describe("POST /api/oracle/submit — outcome validation (issue #650)", () => {
+  let app: FastifyInstance;
+  let submissions: OracleSubmissionRow[];
+  const provider = Keypair.random();
+
+  const mockDb = {
+    async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
+      const t = text.replace(/\s+/g, " ").trim();
+      if (t.includes("INSERT INTO oracle_submissions")) {
+        const [market_id, submitter, outcome, bond_amount] = (values ?? []) as [
+          number,
+          string,
+          string,
+          string,
+        ];
+        const row: OracleSubmissionRow = {
+          id: submissions.length + 1,
+          market_id,
+          submitter,
+          outcome,
+          bond_amount,
+          submitted_at: new Date(),
+          status: "submitted",
+        };
+        submissions.push(row);
+        return { rows: [row as unknown as T] };
+      }
+      if (t.includes("SELECT COUNT(*)::text AS count FROM oracle_submissions")) {
+        return { rows: [{ count: "0" } as unknown as T] };
+      }
+      return { rows: [] };
+    },
+  };
+
+  /** Sign over the *canonical* outcome (what the handler verifies against). */
+  function submissionSignedCanonical(
+    marketId: number,
+    rawOutcome: unknown,
+    canonical: "YES" | "NO",
+  ): Record<string, unknown> {
+    return {
+      marketId,
+      outcome: rawOutcome,
+      provider: provider.publicKey(),
+      signature: signOracleMessage(
+        { marketId, outcome: canonical, provider: provider.publicKey() },
+        provider,
+      ),
+    };
+  }
+
+  beforeEach(() => {
+    submissions = [];
+    app = Fastify();
+    registerErrorHandler(app);
+    registerOracleRoutes(app, undefined, mockDb);
+  });
+
+  it("rejects an outcome outside the permitted set with 400", async () => {
+    for (const bad of ["maybe", "YES!", "yesno", "2", "  "]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/oracle/submit",
+        headers: { authorization: "Bearer test-oracle-api-key" },
+        payload: {
+          marketId: 7,
+          outcome: bad,
+          provider: provider.publicKey(),
+          signature: "irrelevant-rejected-before-verification",
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("BAD_REQUEST");
+    }
+    expect(submissions.length).toBe(0);
+  });
+
+  it("persists boolean and string spellings of the same outcome identically", async () => {
+    const a = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(11, true, "YES"),
+    });
+    const b = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(12, "yes", "YES"),
+    });
+    const c = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(13, "YES ", "YES"),
+    });
+
+    expect([a.statusCode, b.statusCode, c.statusCode]).toEqual([200, 200, 200]);
+    expect(submissions.map((s) => s.outcome)).toEqual(["YES", "YES", "YES"]);
+  });
+
+  it("normalises false / no to the canonical NO", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(21, false, "NO"),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(submissions[0]?.outcome).toBe("NO");
+  });
+});
+
 describe("POST /api/v1/oracle/submit (versioned)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];

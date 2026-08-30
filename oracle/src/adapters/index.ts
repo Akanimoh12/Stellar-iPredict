@@ -1,5 +1,7 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export { FileProvenanceStore, InMemoryProvenanceStore } from "./provenance.js";
+export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
 export {
   ADAPTER_API_KEY_ENV,
   loadAdapterApiKeys,
@@ -7,7 +9,8 @@ export {
 } from "./config.js";
 export type { AdapterApiKeyName, AdapterApiKeys, AdapterEnvironment } from "./config.js";
 
-export type MarketCategory = "crypto" | "sports" | "politics" | "science";
+export type { AdapterMarketCategory as MarketCategory } from "@ipredict/shared";
+import type { AdapterMarketCategory } from "@ipredict/shared";
 
 /** Comparator applied between the fetched value and `params.threshold` for threshold-style markets. */
 export type ThresholdComparator = "gte" | "lte";
@@ -28,7 +31,7 @@ export interface PoliticsMarketParams {
 
 export interface Market {
   id: string;
-  category: MarketCategory;
+  category: AdapterMarketCategory;
   /** Category-specific query parameters an adapter maps to a provider query. */
   params: Record<string, unknown>;
 }

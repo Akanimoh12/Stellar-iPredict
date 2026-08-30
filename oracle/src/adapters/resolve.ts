@@ -1,5 +1,6 @@
 import type { DataAdapter, Market, MarketCategory } from "./index.js";
 import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
+import { createProvenanceRecord, sanitizeProvenanceValue, type ProvenanceStore } from "./provenance.js";
 
 export type ResolutionStatus = "resolved" | "conflict" | "unresolvable" | "review" | "cancelled";
 
@@ -9,6 +10,7 @@ export interface SourceResult {
   confidence: number;
   error?: string;
   cancellationReason?: "postponed" | "cancelled";
+  raw?: unknown;
 }
 
 export interface ResolutionResult {
@@ -28,6 +30,8 @@ export interface ResolveOptions {
   /** Resolutions below this confidence are held for review. Defaults to 0.7 (0.85 for politics). */
   minConfidence?: number;
   reviewQueue?: ManualReviewQueue;
+  /** Optional durable audit store. Every resolution decision is recorded when supplied. */
+  provenanceStore?: ProvenanceStore;
   /** Optional category-specific resolution configuration overrides. */
   categoryConfigs?: Partial<Record<MarketCategory, CategoryResolutionConfig>>;
 }
@@ -39,7 +43,7 @@ export interface CategoryResolutionConfig {
   minConfidence?: number;
 }
 
-export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "categoryConfigs">> = {
+export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
@@ -88,6 +92,7 @@ function fetchSource(
       outcome: outcome.outcome,
       confidence: outcome.confidence,
       cancellationReason: outcome.cancellation?.reason,
+      raw: sanitizeProvenanceValue(outcome.raw),
     }))
     .catch((error) => ({
       adapterId: adapter.id,
@@ -113,7 +118,8 @@ export async function resolveMarket(
   const defaultCatConfig = market.category ? DEFAULT_CATEGORY_CONFIG[market.category] : undefined;
   const customCatConfig = market.category ? options?.categoryConfigs?.[market.category] : undefined;
 
-  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "categoryConfigs">> & Pick<ResolveOptions, "reviewQueue"> = {
+  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> &
+    Pick<ResolveOptions, "reviewQueue" | "provenanceStore"> = {
     minAgreement:
       options?.minAgreement ??
       customCatConfig?.minAgreement ??
@@ -135,6 +141,12 @@ export async function resolveMarket(
       defaultCatConfig?.minConfidence ??
       DEFAULT_OPTIONS.minConfidence,
     reviewQueue: options?.reviewQueue,
+    provenanceStore: options?.provenanceStore,
+  };
+
+  const finish = async (result: ResolutionResult): Promise<ResolutionResult> => {
+    await opts.provenanceStore?.save(createProvenanceRecord(market.id, result));
+    return result;
   };
 
   const supported = adapters.filter((adapter) => adapter.supports(market));
@@ -151,15 +163,15 @@ export async function resolveMarket(
 
   const cancellation = successful.find((source) => source.cancellationReason);
   if (cancellation) {
-    return { status: "cancelled", confidence: cancellation.confidence, sources };
+    return finish({ status: "cancelled", confidence: cancellation.confidence, sources });
   }
 
   if (successful.length === 0) {
-    return { status: "unresolvable", confidence: 0, sources };
+    return finish({ status: "unresolvable", confidence: 0, sources });
   }
 
   if (successful.length < opts.minAgreement) {
-    return { status: "unresolvable", confidence: 0, sources };
+    return finish({ status: "unresolvable", confidence: 0, sources });
   }
 
   const yesCount = successful.filter((s) => s.outcome).length;
@@ -171,7 +183,7 @@ export async function resolveMarket(
   if (disagreementRatio > opts.conflictThreshold) {
     const result: ResolutionResult = { status: opts.reviewQueue ? "review" : "conflict", confidence: 0, sources };
     await opts.reviewQueue?.enqueue(reviewItem(market, "conflicting_outcomes", result));
-    return result;
+    return finish(result);
   }
 
   const outcome = yesCount > noCount;
@@ -189,5 +201,5 @@ export async function resolveMarket(
     result.outcome = undefined;
     await opts.reviewQueue?.enqueue(reviewItem(market, "low_confidence", result));
   }
-  return result;
+  return finish(result);
 }

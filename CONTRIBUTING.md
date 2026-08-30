@@ -66,6 +66,7 @@ docs/       Architecture & design docs
 ```
 
 Key references:
+- [Contributor Onboarding](docs/ONBOARDING.md) — guided path for new contributors through starting issues and setup.
 - [API Reference](docs/API.md) — backend HTTP endpoints, request/response schemas, and error formats.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — running, backfilling, and recovering the event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for the API.

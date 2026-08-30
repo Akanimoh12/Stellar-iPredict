@@ -12,6 +12,7 @@ import {
   marketKey,
   marketsListKey,
   betsKey,
+  oddsKey,
   CACHE_TTLS,
 } from "../cache/cacheKeys.js";
 
@@ -24,6 +25,7 @@ const MARKET_DETAIL_TTL = 30;
 const MARKETS_ACTIVE_TTL = 15;
 const MARKETS_DEFAULT_TTL = 30;
 const BETS_TTL = CACHE_TTLS.bets; // 30s
+const ODDS_TTL = CACHE_TTLS.odds; // 30s
 
 /**
  * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
@@ -148,6 +150,37 @@ const marketResponseSchema = {
   ],
 } as const;
 
+const oddsResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    market_id: { type: "number" },
+    total_yes: { type: "string" },
+    total_no: { type: "string" },
+    total_pool: { type: "string" },
+    yes_odds: { type: "number" },
+    no_odds: { type: "number" },
+    implied_probability: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        yes: { type: "number" },
+        no: { type: "number" },
+      },
+      required: ["yes", "no"],
+    },
+  },
+  required: [
+    "market_id",
+    "total_yes",
+    "total_no",
+    "total_pool",
+    "yes_odds",
+    "no_odds",
+    "implied_probability",
+  ],
+} as const;
+
 const errorResponseSchema = {
   type: "object",
   additionalProperties: false,
@@ -264,6 +297,78 @@ export function createMarketsRoutes(
       }
 
       return reply.status(200).send(body);
+    }
+  );
+
+  // ── GET /api/markets/:id/odds ─────────────────────────────────────────────
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id/odds",
+    {
+      schema: {
+        summary: "Get derived odds and implied probabilities for a market",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+        response: {
+          200: oddsResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const calculateOddsPayload = async () => {
+        const market = redis
+          ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, () => getMarketById(id, db))
+          : await getMarketById(id, db);
+
+        if (!market) {
+          throw notFound("Market not found");
+        }
+
+        const totalYes = Number(market.total_yes) || 0;
+        const totalNo = Number(market.total_no) || 0;
+        const totalPool = totalYes + totalNo;
+
+        let yesOdds: number;
+        let noOdds: number;
+
+        if (totalPool <= 0) {
+          yesOdds = 0.5;
+          noOdds = 0.5;
+        } else {
+          yesOdds = Number((totalYes / totalPool).toFixed(4));
+          noOdds = Number((totalNo / totalPool).toFixed(4));
+        }
+
+        return {
+          market_id: market.id,
+          total_yes: market.total_yes,
+          total_no: market.total_no,
+          total_pool: totalPool.toFixed(7),
+          yes_odds: yesOdds,
+          no_odds: noOdds,
+          implied_probability: {
+            yes: yesOdds,
+            no: noOdds,
+          },
+        };
+      };
+
+      return redis
+        ? getOrSet(redis, oddsKey(id), ODDS_TTL, calculateOddsPayload)
+        : calculateOddsPayload();
     }
   );
 

@@ -1,8 +1,20 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { registerOracleRoutes, oracleRoutes } from "./oracle.js";
+import {
+  registerOracleRoutes,
+  oracleRoutes,
+  compareSecretValues,
+} from "./oracle.js";
 import { registerErrorHandler } from "../lib/errors.js";
 import type { OracleSubmissionRow } from "../db/types.js";
+
+describe("compareSecretValues", () => {
+  it("uses fixed-width hash comparison for secret values", () => {
+    expect(compareSecretValues("test-oracle-api-key", "test-oracle-api-key")).toBe(true);
+    expect(compareSecretValues("test-oracle-api-key", "other-key")).toBe(false);
+    expect(compareSecretValues("short", "much-longer-secret-key")).toBe(false);
+  });
+});
 
 describe("POST /api/oracle/submit (legacy)", () => {
   let app: FastifyInstance;

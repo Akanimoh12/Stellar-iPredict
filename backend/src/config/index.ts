@@ -32,14 +32,22 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => parseCorsOrigins(v)),
-  REDIS_URL: z
-    .string()
-    .optional()
-    .default("redis://localhost:6379"),
+  REDIS_URL: z.string().optional().default("redis://localhost:6379"),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .optional()
     .default("development"),
+  // Oracle replay protection configuration
+  ORACLE_TIMESTAMP_WINDOW_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 300))
+    .pipe(z.number().int().positive()),
+  ORACLE_NONCE_RETENTION_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 600))
+    .pipe(z.number().int().positive()),
 });
 
 const result = envSchema.safeParse(process.env);
@@ -48,7 +56,9 @@ if (!result.success) {
   const issues = result.error.issues
     .map((i) => `  ${i.path.join(".")}: ${i.message}`)
     .join("\n");
-  process.stderr.write(`[ipredict-backend] invalid configuration:\n${issues}\n`);
+  process.stderr.write(
+    `[ipredict-backend] invalid configuration:\n${issues}\n`,
+  );
   process.exit(1);
 }
 

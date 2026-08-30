@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import type { Pool } from "pg";
+import { Keypair } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import { badRequest, unauthorized, conflict, forbidden, notFound } from "../lib/errors.js";
 import {
@@ -37,6 +38,93 @@ export function compareSecretValues(
     .digest();
 
   return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
+
+/**
+ * Values that make up the exact canonical message a provider signs.
+ *
+ * Field order, separators and stringification are part of the protocol: a
+ * signer must reproduce this byte-for-byte or verification fails intermittently.
+ * Bound/user data beyond these fields is never part of the message nor the
+ * logs — see the canonical format note below.
+ */
+export interface OracleVerificationInput {
+  marketId: number;
+  outcome: string;
+  provider: string;
+  /** Unix timestamp in seconds, as carried in the request body (0 when absent). */
+  timestamp?: number;
+  /** Opaque nonce from the request body (empty when absent). */
+  nonce?: string;
+}
+
+/**
+ * Build the canonical, deterministic message a provider signs.
+ *
+ * Format (each line on its own, LF-separated, no trailing newline):
+ *
+ * ```
+ * ipredict-oracle-submit
+ * market_id:<marketId>
+ * outcome:<outcome>
+ * provider:<provider>
+ * timestamp:<timestamp>
+ * nonce:<nonce>
+ * ```
+ *
+ * Missing `timestamp`/`nonce` serialise as `0` / empty string so the message
+ * is still deterministic — a signer uses the exact same values it put in the
+ * request body. Do not reorder fields or change stringification; that would
+ * break every existing signature.
+ */
+export function buildCanonicalOracleMessage(
+  input: OracleVerificationInput,
+): string {
+  const timestamp = input.timestamp ?? 0;
+  const nonce = input.nonce ?? "";
+  return [
+    "ipredict-oracle-submit",
+    `market_id:${input.marketId}`,
+    `outcome:${input.outcome}`,
+    `provider:${input.provider}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join("\n");
+}
+
+/**
+ * Verify an oracle submission signature against the claimed `provider`
+ * public key using the Stellar SDK.
+ *
+ * The signature is expected in the base64 form produced by
+ * `Keypair.sign(...)`. Any failure (invalid key, malformed signature,
+ * mismatched key) returns `false` rather than throwing.
+ */
+export function verifyOracleSubmissionSignature(
+  input: OracleVerificationInput,
+  signature: string,
+): boolean {
+  if (!signature) {
+    return false;
+  }
+  const message = buildCanonicalOracleMessage(input);
+  try {
+    return Keypair.fromPublicKey(input.provider).verify(
+      Buffer.from(message, "utf8"),
+      signature,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Sign the canonical message with a provider keypair (helper for tests/docs). */
+export function signOracleMessage(
+  input: OracleVerificationInput,
+  kp: Keypair,
+): string {
+  const message = buildCanonicalOracleMessage(input);
+  return kp.sign(Buffer.from(message, "utf8")).toString("base64");
 }
 
 const oracleSubmitBodySchema = z.object({
@@ -194,7 +282,21 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         });
       }
 
-      const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
+      const { marketId, outcome, provider, signature, nonce, timestamp } =
+        parsed.data;
+
+      // Signature verification: the payload must be signed by the claimed
+      // provider keypair before it is trusted or written. Never record a
+      // submission with an invalid or mismatched signature.
+      const signed = verifyOracleSubmissionSignature(
+        { marketId, outcome: String(outcome), provider, timestamp, nonce },
+        signature,
+      );
+      if (!signed) {
+        throw unauthorized(
+          "Invalid oracle submission signature; ensure it was produced by the claimed provider keypair",
+        );
+      }
 
       // Issue #438: Reject unregistered oracle providers
       const db = pool;
@@ -488,7 +590,21 @@ export function registerOracleRoutes(
         });
       }
 
-      const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
+      const { marketId, outcome, provider, signature, nonce, timestamp } =
+        parsed.data;
+
+      // Signature verification: the payload must be signed by the claimed
+      // provider keypair before it is trusted or written. Never record a
+      // submission with an invalid or mismatched signature.
+      const signed = verifyOracleSubmissionSignature(
+        { marketId, outcome: String(outcome), provider, timestamp, nonce },
+        signature,
+      );
+      if (!signed) {
+        throw unauthorized(
+          "Invalid oracle submission signature; ensure it was produced by the claimed provider keypair",
+        );
+      }
 
       // Issue #438: Reject unregistered oracle providers
       const db = dbOverride || pool;

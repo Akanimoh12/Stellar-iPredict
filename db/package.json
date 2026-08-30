@@ -11,6 +11,7 @@
     "migrate": "tsx migrate.ts",
     "migrate:down": "tsx migrate-down.ts",
     "seed": "tsx seed.ts",
+    "schema:dump": "tsx scripts/schema-dump.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

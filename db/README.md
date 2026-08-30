@@ -326,6 +326,35 @@ Apply with the migration runner (tracked as its own issue) or manually:
 psql "$DATABASE_URL" -f db/migrations/0001_create_markets.sql
 ```
 
+### Schema drift check
+
+`test/schema-drift.test.ts` applies every up-migration in order against a fresh
+scratch schema, dumps the result with `pg_dump --schema-only`, normalises it for
+ordering, and compares it to the checked-in snapshot
+[`test/schema_drift.snapshot.sql`](./test/schema_drift.snapshot.sql). A mismatch
+fails the suite with a table/column-level diff, so a migration with invalid SQL
+or an unintended schema change is caught instead of shipping silently.
+
+The suite is gated on a reachable Postgres like the backend integration tests:
+when no database is running it is skipped, keeping `npm test` passable on a
+machine without `infra/docker-compose.dev.yml` started.
+
+**Regenerating the snapshot (intentionally):** after adding or editing a
+migration, regenerate the snapshot so the drift check tracks the new schema:
+
+```bash
+cd db
+npm run schema:dump
+```
+
+The command applies the current migration set, dumps the scratch schema, and
+overwrites `test/schema_drift.snapshot.sql`. Commit the regenerated snapshot in
+the same PR as the migration — the drift test fails until it is regenerated.
+
+Connection uses `TEST_DATABASE_URL` → `DATABASE_URL`, defaulting to
+`postgres://ipredict:ipredict@localhost:5432/ipredict_test` (same default as the
+backend integration tests).
+
 ## Local Seed Data
 
 Use the seed script to populate realistic local development records for

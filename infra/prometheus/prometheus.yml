@@ -9,9 +9,8 @@
 #                                           Prometheus's own published port, so
 #                                           run the indexer with METRICS_PORT=9091
 #                                           alongside the monitoring stack)
-#   oracle     (not yet)       9101         the oracle does not expose an HTTP
-#                                           /metrics endpoint yet — job is
-#                                           pre-provisioned, see note below
+#   oracle     GET /metrics    9101         oracle aggregator ($ORACLE_METRICS_PORT,
+#                                           oracle/src/metrics/server.ts)
 #
 # In local development the app services run on the HOST (docker-compose.dev.yml
 # provides only Postgres + Redis), so targets go through host.docker.internal.
@@ -50,11 +49,11 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:9091"]
 
-  # Oracle aggregator — KNOWN GAP: the oracle service has no HTTP server yet
-  # (AggregatorMetrics in oracle/src/aggregator/metrics.ts is in-process only;
-  # exposing it is a separate concern, not silently skipped here). The job is
-  # pre-provisioned against port 9101 so scraping starts the moment the
-  # endpoint lands — until then this target is expected to show DOWN.
+  # Oracle aggregator — serialises oracle_submissions_total /
+  # oracle_disputes_total / oracle_resolution_lag_h at GET /metrics
+  # (oracle/src/metrics/server.ts, issue #211). The endpoint is hosted by the
+  # aggregator, not the read-only monitor, and reads its totals from Postgres
+  # so they survive a restart. Override the port with ORACLE_METRICS_PORT.
   - job_name: "ipredict-oracle"
     metrics_path: "/metrics"
     scrape_interval: 15s

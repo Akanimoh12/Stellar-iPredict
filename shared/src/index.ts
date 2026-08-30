@@ -1,3 +1,9 @@
+/**
+ * Secrets source shared by every service — env-file today, Vault later.
+ * See `secrets.ts` and `docs/SECRETS.md`.
+ */
+export * from "./secrets.js";
+
 /** Canonical market categories stored on-chain and in PostgreSQL. */
 export const MARKET_CATEGORIES = [
   "Crypto",

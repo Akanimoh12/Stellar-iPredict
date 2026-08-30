@@ -1,4 +1,5 @@
 import { Redis, RedisOptions } from 'ioredis';
+import { recordCacheHit, recordCacheMiss } from './hitRate.js';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -48,10 +49,18 @@ export const cache = {
    */
   async get<T>(key: string): Promise<T | null> {
     const data = await getRedisClient().get(key);
-    if (!data) return null;
+    if (!data) {
+      recordCacheMiss(key);
+      return null;
+    }
     try {
-      return JSON.parse(data) as T;
+      const value = JSON.parse(data) as T;
+      recordCacheHit(key);
+      return value;
     } catch {
+      // Unparseable entry: the caller gets null and goes to its source, so
+      // this is a miss for `cache_hit_rate` purposes (issue #214).
+      recordCacheMiss(key);
       return null;
     }
   },

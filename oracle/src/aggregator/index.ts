@@ -2,6 +2,25 @@ import { rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
 import { createLogger, type Logger } from "../log.js";
+import {
+  loadOracleMetricsConfig,
+  startOracleMetrics,
+  type OracleMetricsRuntime,
+} from "../metrics/index.js";
+
+export {
+  OracleMetricsCollector,
+  OracleMetricsServer,
+  ORACLE_METRICS_DEFAULT_PORT,
+  collectOracleMetrics,
+  loadOracleMetricsConfig,
+  serializeOracleMetrics,
+  startOracleMetrics,
+  type OracleMetricsConfig,
+  type OracleMetricsRuntime,
+  type OracleMetricsSnapshot,
+  type ResolutionLagSample,
+} from "../metrics/index.js";
 
 export { detectConflict, type ConflictReport } from "./conflict-detection.js";
 export {
@@ -207,7 +226,30 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+
+  let metrics: OracleMetricsRuntime | undefined;
   try {
+    // Prometheus endpoint (issue #211). The aggregator hosts it rather than
+    // the monitor because `infra/prometheus/prometheus.yml` scrapes one oracle
+    // target, and because the aggregator is the service whose absence is worth
+    // alerting on. Started before the poll loop so a scrape during a slow first
+    // connect still answers.
+    //
+    // A failure here — almost always a port already in use — is logged and the
+    // aggregator carries on without the endpoint. Refusing to resolve markets
+    // because a metrics port is taken would trade a monitoring outage for a
+    // real one; the `ipredict-oracle` scrape target going DOWN is exactly the
+    // signal an operator needs, and it costs nothing.
+    try {
+      metrics = await startOracleMetrics({
+        config: loadOracleMetricsConfig(env),
+        databaseUrl: config.DATABASE_URL,
+        logger,
+      });
+    } catch (error) {
+      logger.error("oracle metrics endpoint failed to start", { error });
+    }
+
     await runAggregator(createProductionDependencies(config, logger), {
       signal: controller.signal,
       pollIntervalMs: config.POLL_INTERVAL_MS,
@@ -216,5 +258,6 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
+    await metrics?.stop();
   }
 }

@@ -33,6 +33,7 @@
  */
 
 import type { Redis } from "ioredis";
+import { recordCacheHit, recordCacheMiss } from "./hitRate.js";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -67,11 +68,16 @@ export async function getOrSet<T>(
   const cached = await redis.get(key);
   if (cached !== null) {
     try {
-      return JSON.parse(cached) as T;
+      const value = JSON.parse(cached) as T;
+      recordCacheHit(key);
+      return value;
     } catch {
-      // Corrupt cache entry — fall through to refresh.
+      // Corrupt cache entry — fall through to refresh. Counted as a miss
+      // below: the caller still pays for the loader, which is what
+      // `cache_hit_rate` measures (issue #214).
     }
   }
+  recordCacheMiss(key);
 
   // 2. Cache miss — single-flight the entire load+store operation so
   //    concurrent callers share both the loader call and the setex.

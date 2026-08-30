@@ -10,6 +10,12 @@ the API service, the indexer, and the oracle services.
 Start Postgres + Redis (enough to run the backend and indexer locally):
 
 ```bash
+make up          # from the repo root — waits until both are healthy
+```
+
+or by hand:
+
+```bash
 cd infra
 docker compose -f docker-compose.dev.yml up -d
 ```
@@ -270,10 +276,14 @@ would leave `POST /api/v1/oracle/submit` open rather than disabled.
   (`oracle/src/aggregator/key-rotation.ts`) — rotate the on-chain resolver
   first, then the file.
 - **Beyond one host.** `.env` on disk is the right size of tool for a
-  single-host compose deployment. Anything larger should mount Docker
-  secrets or pull from a manager (Vault, AWS Secrets Manager, SOPS) into the
-  same variable names; nothing in the services reads a file path, so the
-  substitution is a compose-level change only.
+  single-host compose deployment. Anything larger should mount Docker secrets
+  or pull from a manager (Vault, AWS Secrets Manager, SOPS). Every service now
+  resolves `<NAME>_FILE` into `<NAME>` at startup
+  ([`shared/src/secrets.ts`](../shared/src/secrets.ts)), so pointing at a
+  mounted path takes no code change:
+  `RESOLVER_KEY_FILE=/run/secrets/resolver_key`. See
+  [`docs/SECRETS.md`](../docs/SECRETS.md) for the backends, the precedence
+  rules, and the reserved Vault variables.
 - **Never log a secret.** `restore.sh` redacts the password out of the
   connection string before printing it, and the Redis health check reads
   `REDISCLI_AUTH` from the environment so the password never lands in the
@@ -382,6 +392,33 @@ format (the standard Prometheus scrape protocol).
 - `api_request_duration_ms_sum{route}` — sum of all request durations
 - `api_request_duration_ms_count{route}` — total number of requests
 - `api_errors_total{route}` — total number of 5xx responses per route
+- `cache_hit_rate` — gauge, Redis cache hits ÷ lookups since start. `NaN`
+  before the first lookup: a backend that has served no traffic has not
+  achieved a 0% hit rate, and emitting 0 would fire `LowCacheHitRate` on every
+  deploy
+- `cache_hits_total` / `cache_misses_total` — counters, so a dashboard can
+  compute a *windowed* hit rate instead of the lifetime one:
+
+  ```promql
+  sum(rate(cache_hits_total[5m]))
+    / clamp_min(sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])), 0.001)
+  ```
+
+- `cache_namespace_hits_total{namespace}` /
+  `cache_namespace_misses_total{namespace}` — counters, broken down by cache
+  key entity (`market`, `markets`, `leaderboard`, `stats`, `bets`, `other`).
+  The namespace list is closed on purpose: keys embed market ids, so an
+  open-ended label would be one series per market. The per-namespace series use
+  their own metric names rather than a label on `cache_hits_total`, because
+  mixing labelled and unlabelled samples under one metric name makes Prometheus
+  reject the whole scrape
+
+A lookup is any read that consults Redis before falling back to its loader —
+`getOrSet` in [`backend/src/cache/cacheAside.ts`](../backend/src/cache/cacheAside.ts)
+and `cache.get` in [`backend/src/cache/redis.ts`](../backend/src/cache/redis.ts).
+An absent key is a miss; so is a stored value that fails to parse, because the
+caller still paid for the loader. A Redis *error* is neither — counting an
+outage as a cold cache would point the investigation at the wrong thing.
 
 **Example:** After running the backend for a while, visit
 `http://localhost:4000/metrics` (the default port from `backend/.env.example`,
@@ -411,6 +448,61 @@ those labels. Do not attach URLs, errors, transaction hashes, or market IDs.
 **Example:** After running the indexer with `METRICS_PORT=9091`, visit
 `http://localhost:9091/metrics` to see all metrics.
 
+#### Oracle Metrics
+
+The **oracle aggregator** exposes Prometheus metrics at `GET /metrics` on port
+9101 (`$ORACLE_METRICS_PORT`), plus `GET /health` for a compose `healthcheck`.
+Like the indexer's, the server is plain `node:http`
+([`oracle/src/metrics/server.ts`](../oracle/src/metrics/server.ts)) and binds
+`0.0.0.0` by default (`ORACLE_METRICS_HOST`).
+
+**Metrics exposed:**
+
+- `oracle_submissions_total` — counter, rows in `oracle_submissions`
+- `oracle_disputes_total` — counter, rows in `oracle_disputes` (one per
+  disputed market, challenged or escalated)
+- `oracle_resolution_lag_h{market_id}` — gauge, hours from `markets.end_time`
+  to `oracle_submissions.finalized_at`
+- `oracle_up` — gauge, 1 when the collector reached Postgres. Distinct from
+  Prometheus's built-in `up`, which cannot tell a broken collector from an
+  unreachable host
+- `oracle_metrics_last_refresh_timestamp_seconds` — gauge, Unix time of the
+  last successful refresh
+- `oracle_metrics_collection_errors_total` — counter, refreshes that failed
+
+The first three are the names the Grafana oracle dashboard
+([`grafana/oracle.json`](grafana/oracle.json)) already queries, and the ones in
+the catalogue in
+[`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#monitoring).
+
+**Why the aggregator and not the monitor.** Prometheus scrapes one oracle
+target, and the aggregator is the process whose absence is worth alerting on.
+The monitor stays exactly as it is — read-only, no signing credential, no
+listener.
+
+**Why the totals come from Postgres.** `AggregatorMetrics`
+([`oracle/src/aggregator/metrics.ts`](../oracle/src/aggregator/metrics.ts)) is
+an in-process registry: it counts what one process saw since it started.
+Submissions also arrive through the API and the challenge bot, and a restart
+would reset every counter to zero while the rows are still there — a counter
+that resets on deploy makes every `rate()` over it spike. The collector reads
+the totals from Postgres instead, so they survive restarts and do not depend on
+which process handled a given submission.
+
+**Scrapes never query.** A background timer refreshes a cached snapshot every
+`ORACLE_METRICS_REFRESH_MS` (default 15s) and scrapes are served from it, so a
+scrape storm cannot become database load and a slow query cannot stall a
+scrape. A failed refresh keeps the previous snapshot rather than blanking it
+— see `OracleMetricsStale` in [`prometheus/alerts.yml`](prometheus/alerts.yml),
+which is the only thing that distinguishes a stale 200 from a healthy one.
+
+**Cardinality.** `oracle_resolution_lag_h` is labelled by `market_id`, so it
+grows with every market ever finalized. `ORACLE_METRICS_LAG_SERIES` (default
+100) caps it at the most recently finalized markets; the dashboard queries it
+through `avg()`/`max()`, which only needs the recent ones.
+
+**Example:** with the aggregator running, `curl http://localhost:9101/metrics`.
+
 ### Prometheus Configuration
 
 The scrape config lives at
@@ -422,7 +514,7 @@ service `/metrics` endpoint:
 | `prometheus` | `localhost:9090` | Prometheus self-scrape |
 | `ipredict-backend` | `host.docker.internal:4000` | Backend API, `GET /metrics` |
 | `ipredict-indexer` | `host.docker.internal:9091` | Indexer, `GET /metrics` (run it with `METRICS_PORT=9091`) |
-| `ipredict-oracle` | `host.docker.internal:9101` | Oracle aggregator — **no HTTP `/metrics` endpoint exists yet** (its `AggregatorMetrics` are in-process only), so this target shows `DOWN` until one lands; the job is pre-provisioned so scraping starts the moment it does |
+| `ipredict-oracle` | `host.docker.internal:9101` | Oracle aggregator, `GET /metrics` (override with `ORACLE_METRICS_PORT`) |
 
 App services run on the host during local development, so the containerized
 Prometheus reaches them via `host.docker.internal`.
@@ -440,7 +532,14 @@ promtool check rules infra/prometheus/alerts.yml
 ```
 
 The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
-`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
+`HighAPILatency`, `DatabaseSlow`, `LowCacheHitRate`, and `OracleMetricsStale`.
+
+`LowCacheHitRate` is written against the *counters*, not the `cache_hit_rate`
+gauge: the gauge averages over the whole process lifetime, so a cache that
+stopped working an hour ago barely moves it. The rule also requires more than
+100 lookups in the window, so a handful of requests at 3am cannot page anyone.
+
+The `MarketStuck` rule expects
 `market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
 to be exported. API and database latency must be Prometheus histograms with
 millisecond buckets.
@@ -517,8 +616,7 @@ alongside your backend service to visualize business metrics in real-time.
    - **Backend API** on port 4000 (default from `backend/.env.example`)
    - **Indexer** with `METRICS_PORT=9091` (the code default 9090 collides with
      the Prometheus container's published port) and `METRICS_HOST=0.0.0.0`
-   - The **oracle** has no `/metrics` endpoint yet, so its `ipredict-oracle`
-     target will show `DOWN` until one is added (pre-provisioned at 9101)
+   - **Oracle aggregator** on port 9101 (`ORACLE_METRICS_PORT`)
 
 #### Environment Variables (Optional)
 
@@ -575,7 +673,10 @@ METRICS_PORT=9091 npx tsx src/index.ts
    - Verify `prometheus` and `ipredict-backend` are UP
    - Verify `ipredict-indexer` is UP when the indexer is running with
      `METRICS_PORT=9091`
-   - `ipredict-oracle` is expected to be DOWN (no `/metrics` endpoint yet)
+   - Verify `ipredict-oracle` is UP when the aggregator is running
+
+   Or, from the repo root: `make metrics` curls all three and reports which
+   ones answer.
    
 2. **Test metrics endpoint**:
 ```bash

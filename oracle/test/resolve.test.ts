@@ -177,4 +177,23 @@ describe("resolveMarket", () => {
 
     expect(result.status).toBe("conflict");
   });
+
+  it("applies conservative confidence gating by default for politics category", async () => {
+    const politicsMarket: Market = {
+      id: "pol-1",
+      category: "politics",
+      params: { marketId: "election-2024", expectedOutcome: "YES" },
+    };
+    const primary = createStubAdapter("primary", true);
+
+    // Single source is unresolvable for politics because default minAgreement is 2
+    const singleResult = await resolveMarket(politicsMarket, [primary]);
+    expect(singleResult.status).toBe("unresolvable");
+
+    // Two agreeing sources resolve successfully
+    const secondary = createStubAdapter("secondary", true);
+    const dualResult = await resolveMarket(politicsMarket, [primary, secondary]);
+    expect(dualResult.status).toBe("resolved");
+    expect(dualResult.outcome).toBe(true);
+  });
 });

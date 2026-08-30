@@ -38,6 +38,18 @@ happens on the **`implementation-drips`** branch — not `main`.
 > There is **no CI/GitHub Actions** on this branch yet — checks are manual.
 > Please run typecheck/tests locally before requesting review.
 
+### Pre-PR verification script
+
+Run the one-liner verification script **before opening a PR**:
+
+```bash
+./scripts/verify-all.sh
+```
+
+This runs `npm run typecheck` and `npm test` for **all three Node services** — backend, indexer, and oracle — in a single pass. If any step fails, the script exits non-zero and clearly identifies which service failed.
+
+> **Tip:** The script runs every check regardless of intermediate failures, so you can see the full picture without fix-and-re-run cycles.
+
 For the current host-based local workflow across infra, backend, indexer, frontend, and oracle, use [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
 ## Repo layout

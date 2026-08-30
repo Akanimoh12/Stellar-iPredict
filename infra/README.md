@@ -384,13 +384,17 @@ format (the standard Prometheus scrape protocol).
 - `api_errors_total{route}` — total number of 5xx responses per route
 
 **Example:** After running the backend for a while, visit
-`http://localhost:3000/metrics` (or your configured backend port) to see
-all metrics.
+`http://localhost:4000/metrics` (the default port from `backend/.env.example`,
+override with `PORT`) to see all metrics.
 
 #### Indexer Metrics
 
 The indexer exposes Prometheus metrics at `GET /metrics` on port 9090 (or
-`$METRICS_PORT` if set) in text exposition format.
+`$METRICS_PORT` if set) in text exposition format. The server binds `0.0.0.0`
+(override with `METRICS_HOST`) so a containerized Prometheus can reach it.
+When running the indexer on the host alongside the monitoring stack, set
+`METRICS_PORT=9091` — the code default 9090 is the same host port the
+Prometheus container publishes (see `indexer/.env.example`).
 
 **Metrics exposed:**
 
@@ -404,26 +408,42 @@ The `service` and `operation` labels are intentionally low-cardinality. Other
 services can use the same metric and identify their stable RPC operation with
 those labels. Do not attach URLs, errors, transaction hashes, or market IDs.
 
-**Example:** After running the indexer, visit `http://localhost:9090/metrics`
-to see all metrics.
+**Example:** After running the indexer with `METRICS_PORT=9091`, visit
+`http://localhost:9091/metrics` to see all metrics.
 
 ### Prometheus Configuration
 
-Configure Prometheus to scrape both services by adding to `prometheus.yml`:
+The scrape config lives at
+[`prometheus/prometheus.yml`](prometheus/prometheus.yml) and covers every
+service `/metrics` endpoint:
 
-```yaml
-scrape_configs:
-  - job_name: "ipredict-backend"
-    static_configs:
-      - targets: ["localhost:3000"]
-    metrics_path: "/metrics"
-    scrape_interval: 15s
+| Job | Local target | Service |
+| --- | --- | --- |
+| `prometheus` | `localhost:9090` | Prometheus self-scrape |
+| `ipredict-backend` | `host.docker.internal:4000` | Backend API, `GET /metrics` |
+| `ipredict-indexer` | `host.docker.internal:9091` | Indexer, `GET /metrics` (run it with `METRICS_PORT=9091`) |
+| `ipredict-oracle` | `host.docker.internal:9101` | Oracle aggregator — **no HTTP `/metrics` endpoint exists yet** (its `AggregatorMetrics` are in-process only), so this target shows `DOWN` until one lands; the job is pre-provisioned so scraping starts the moment it does |
 
-  - job_name: "ipredict-indexer"
-    static_configs:
-      - targets: ["localhost:9090"]
-    metrics_path: "/metrics"
-    scrape_interval: 15s
+App services run on the host during local development, so the containerized
+Prometheus reaches them via `host.docker.internal`.
+`docker-compose.monitoring.yml` maps that name to the host gateway through
+`extra_hosts`, which is required on Linux. In a full compose deployment
+(`docker-compose.production.yml`), target the Compose service names instead
+(e.g. `api:4000`).
+
+The config loads [`prometheus/alerts.yml`](prometheus/alerts.yml) from
+`rule_files`. Validate the config and the rules before deploying:
+
+```bash
+promtool check config infra/prometheus/prometheus.yml
+promtool check rules infra/prometheus/alerts.yml
+```
+
+The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
+`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
+`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
+to be exported. API and database latency must be Prometheus histograms with
+millisecond buckets.
 
 ### Production compose notes
 
@@ -446,27 +466,6 @@ indexer build problems), run the subset explicitly:
 ```bash
 docker compose -f docker-compose.production.yml up -d postgres redis api
 ```
-
-```
-
-Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:
-
-```yaml
-rule_files:
-  - /etc/prometheus/alerts.yml
-```
-
-Validate the rules before deploying:
-
-```bash
-promtool check rules infra/prometheus/alerts.yml
-```
-
-The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
-`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
-`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
-to be exported. API and database latency must be Prometheus histograms with
-millisecond buckets.
 
 ### Grafana dashboards
 
@@ -513,8 +512,13 @@ alongside your backend service to visualize business metrics in real-time.
 
 #### Prerequisites
 
-1. Backend service running locally on port 3001 (default for `npm run dev`)
-2. Docker and Docker Compose installed
+1. Docker and Docker Compose installed
+2. At least one app service running on the host with its `/metrics` endpoint:
+   - **Backend API** on port 4000 (default from `backend/.env.example`)
+   - **Indexer** with `METRICS_PORT=9091` (the code default 9090 collides with
+     the Prometheus container's published port) and `METRICS_HOST=0.0.0.0`
+   - The **oracle** has no `/metrics` endpoint yet, so its `ipredict-oracle`
+     target will show `DOWN` until one is added (pre-provisioned at 9101)
 
 #### Environment Variables (Optional)
 
@@ -541,16 +545,21 @@ cd infra
 docker compose -f docker-compose.monitoring.yml up -d
 ```
 
-2. Start your backend service (in a separate terminal):
+2. Start the app services (in separate terminals), e.g.:
 ```bash
 cd backend
-npm run dev
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict npx tsx src/index.ts
+
+cd indexer
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict \
+METRICS_PORT=9091 npx tsx src/index.ts
 ```
 
 3. Access the services:
    - **Grafana**: http://localhost:3000 (use GRAFANA_ADMIN_PASSWORD env var or default credentials)
    - **Prometheus**: http://localhost:9090
-   - **Backend metrics**: http://localhost:3001/api/metrics
+   - **Backend metrics**: http://localhost:4000/metrics
+   - **Indexer metrics**: http://localhost:9091/metrics (when the indexer runs)
 
 4. In Grafana, the business dashboard should be automatically available with:
    - Market creation rate
@@ -563,19 +572,23 @@ npm run dev
 
 1. **Check Prometheus targets**: 
    - Go to http://localhost:9090/targets
-   - Verify `ipredict-backend` target is UP
+   - Verify `prometheus` and `ipredict-backend` are UP
+   - Verify `ipredict-indexer` is UP when the indexer is running with
+     `METRICS_PORT=9091`
+   - `ipredict-oracle` is expected to be DOWN (no `/metrics` endpoint yet)
    
 2. **Test metrics endpoint**:
 ```bash
-curl http://localhost:3001/api/metrics
+curl http://localhost:4000/metrics
 ```
-   Should return Prometheus format with business counters like:
+   Should return Prometheus text format with the backend request histogram, e.g.:
    ```
-   markets_created_total 0
-   bets_placed_total 0
-   volume_xlm_total 0
-   markets_resolved_total 0
+   api_request_duration_ms_bucket{route="GET /metrics",le="5"} 1
+   api_request_duration_ms_sum{route="GET /metrics"} 0.4
+   api_request_duration_ms_count{route="GET /metrics"} 1
    ```
+   With the indexer running, `curl http://localhost:9091/metrics` returns
+   `indexer_lag_ledgers`, `events_processed_total`, and `rpc_errors_total`.
 
 3. **Grafana Dashboard**:
    - Go to http://localhost:3000

@@ -13,6 +13,8 @@ import {
   getIdempotencyRecord,
   storeIdempotencyRecord,
   cleanupExpiredIdempotencyKeys,
+  normalizeOutcome,
+  CANONICAL_OUTCOMES,
   type Queryable,
 } from "../db/oracle.js";
 import { getMarketById } from "../db/markets.js";
@@ -127,12 +129,32 @@ export function signOracleMessage(
   return kp.sign(Buffer.from(message, "utf8")).toString("base64");
 }
 
+/**
+ * `outcome` — markets are binary, so this is a closed set (issue #650).
+ * Booleans and case-insensitive string spellings (`"yes"`, `"YES "`,
+ * `"true"`, `"1"`) are normalised to the canonical `YES` / `NO`; anything
+ * else is rejected here with 400. Providers sign the **canonical** value —
+ * see `buildCanonicalOracleMessage`.
+ */
+const outcomeSchema = z
+  .union([z.string(), z.boolean()])
+  .transform((raw, ctx): "YES" | "NO" => {
+    const normalized = normalizeOutcome(raw);
+    if (normalized === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `outcome must be one of ${CANONICAL_OUTCOMES.join(
+          ", ",
+        )} (accepts yes/no, true/false, y/n, 1/0 — case-insensitive)`,
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
+
 const oracleSubmitBodySchema = z.object({
   marketId: z.number().int().positive(),
-  outcome: z.union([
-    z.string().min(1),
-    z.boolean().transform((v) => String(v)),
-  ]),
+  outcome: outcomeSchema,
   signature: z.string().min(1),
   provider: z.string().min(1),
   nonce: z.string().min(1).optional(),
@@ -160,7 +182,10 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
           required: ["marketId", "outcome", "signature", "provider"],
           properties: {
             marketId: { type: "number" },
-            outcome: { type: "string" },
+            outcome: {
+              description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
+              oneOf: [{ type: "string" }, { type: "boolean" }],
+            },
             signature: { type: "string" },
             provider: { type: "string" },
             nonce: { type: "string" },
@@ -465,7 +490,10 @@ export function registerOracleRoutes(
           required: ["marketId", "outcome", "signature", "provider"],
           properties: {
             marketId: { type: "number" },
-            outcome: { type: "string" },
+            outcome: {
+              description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
+              oneOf: [{ type: "string" }, { type: "boolean" }],
+            },
             signature: { type: "string" },
             provider: { type: "string" },
             nonce: { type: "string" },

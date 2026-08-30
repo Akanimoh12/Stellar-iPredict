@@ -44,4 +44,20 @@ describe('migration prefix uniqueness', () => {
       );
     }
   });
+
+  it('exports MIGRATION_ADVISORY_LOCK_KEY constant for concurrent locking', async () => {
+    const { MIGRATION_ADVISORY_LOCK_KEY } = await import('../migrate.js');
+    expect(MIGRATION_ADVISORY_LOCK_KEY).toBe('8574639201');
+  });
+
+  it('migration 0011 uses guarded DO block for oracle_submission_status ENUM creation', () => {
+    const sqlPath = path.join(MIGRATIONS_DIR, '0011_extend_oracle_submissions.sql');
+    expect(fs.existsSync(sqlPath)).toBe(true);
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+
+    expect(sql).not.toContain('CREATE TYPE IF NOT EXISTS');
+    expect(sql).toContain('DO $$');
+    expect(sql).toContain('CREATE TYPE oracle_submission_status AS ENUM');
+    expect(sql).toContain('WHEN duplicate_object THEN NULL;');
+  });
 });

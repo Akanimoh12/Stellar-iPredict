@@ -402,3 +402,92 @@ describe("Integration: GET /api/markets/:id and 404 handling", () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 });
+
+// ── GET /api/markets/:id/odds ────────────────────────────────────────────────
+describe("Integration: GET /api/markets/:id/odds", () => {
+  it("returns derived odds and implied probabilities for existing market", async () => {
+    const market = makeMarketRow({
+      id: 10,
+      total_yes: "100.0000000",
+      total_no: "50.0000000",
+    });
+    const queryMock = vi.fn().mockResolvedValue({ rows: [market] });
+    const server = await buildTestServer({ query: queryMock });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets/10/odds",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toEqual({
+      market_id: 10,
+      total_yes: "100.0000000",
+      total_no: "50.0000000",
+      total_pool: "150.0000000",
+      yes_odds: 0.6667,
+      no_odds: 0.3333,
+      implied_probability: {
+        yes: 0.6667,
+        no: 0.3333,
+      },
+    });
+  });
+
+  it("handles zero-pool gracefully with 50/50 implied probability", async () => {
+    const market = makeMarketRow({
+      id: 11,
+      total_yes: "0.0000000",
+      total_no: "0.0000000",
+    });
+    const queryMock = vi.fn().mockResolvedValue({ rows: [market] });
+    const server = await buildTestServer({ query: queryMock });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets/11/odds",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toEqual({
+      market_id: 11,
+      total_yes: "0.0000000",
+      total_no: "0.0000000",
+      total_pool: "0.0000000",
+      yes_odds: 0.5,
+      no_odds: 0.5,
+      implied_probability: {
+        yes: 0.5,
+        no: 0.5,
+      },
+    });
+  });
+
+  it("returns 404 for non-existent market", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] });
+    const server = await buildTestServer({ query: queryMock });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets/999/odds",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe("NOT_FOUND");
+  });
+
+  it("returns 400 for invalid market ID format", async () => {
+    const queryMock = vi.fn();
+    const server = await buildTestServer({ query: queryMock });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets/invalid-id/odds",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("BAD_REQUEST");
+  });
+});

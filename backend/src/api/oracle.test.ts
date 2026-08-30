@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { registerOracleRoutes } from "./oracle.js";
+import { registerOracleRoutes, oracleRoutes } from "./oracle.js";
 import { registerErrorHandler } from "../lib/errors.js";
 import type { OracleSubmissionRow } from "../db/types.js";
 
-describe("POST /api/oracle/submit", () => {
+describe("POST /api/oracle/submit (legacy)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];
 
@@ -32,10 +32,14 @@ describe("POST /api/oracle/submit", () => {
         return { rows: [newRow as unknown as T] };
       }
 
-      if (normalizedText.includes("SELECT COUNT(*)::text AS count FROM oracle_submissions")) {
+      if (
+        normalizedText.includes(
+          "SELECT COUNT(*)::text AS count FROM oracle_submissions",
+        )
+      ) {
         const [market_id] = (values ?? []) as [number];
         const count = submissions.filter(
-          (s) => s.market_id === market_id && s.status === "submitted"
+          (s) => s.market_id === market_id && s.status === "submitted",
         ).length;
         return { rows: [{ count: String(count) } as unknown as T] };
       }
@@ -183,6 +187,221 @@ describe("POST /api/oracle/submit", () => {
         outcome: "NO",
         signature: "sig_key",
         provider: "provider_delta",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().accepted).toBe(true);
+  });
+
+  it("returns 409 when duplicate market submission is attempted", async () => {
+    // First submission succeeds
+    const res1 = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 99,
+        outcome: "YES",
+        signature: "sig1",
+        provider: "provider_test",
+      },
+    });
+
+    expect(res1.statusCode).toBe(200);
+
+    // Second submission for same market should fail with 409
+    // Mock the duplicate constraint error
+    const originalQuery = mockDb.query;
+    mockDb.query = async (text: string) => {
+      const normalized = text.replace(/\s+/g, " ").trim();
+      if (normalized.includes("INSERT INTO oracle_submissions")) {
+        const error: any = new Error(
+          "duplicate key value violates unique constraint",
+        );
+        error.code = "23505";
+        error.constraint = "uq_oracle_submissions_market_id";
+        throw error;
+      }
+      return originalQuery.call(mockDb, text);
+    };
+
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 99,
+        outcome: "NO",
+        signature: "sig2",
+        provider: "provider_test2",
+      },
+    });
+
+    expect(res2.statusCode).toBe(409);
+    const body = res2.json();
+    expect(body.error.code).toBe("CONFLICT");
+    expect(body.error.message).toContain("market 99");
+  });
+});
+
+describe("POST /api/v1/oracle/submit (versioned)", () => {
+  let app: FastifyInstance;
+  let submissions: OracleSubmissionRow[];
+
+  const mockDb = {
+    async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
+      const normalizedText = text.replace(/\s+/g, " ").trim();
+
+      if (normalizedText.includes("INSERT INTO oracle_submissions")) {
+        const [market_id, submitter, outcome, bond_amount] = (values ?? []) as [
+          number,
+          string,
+          string,
+          string,
+        ];
+        const newRow: OracleSubmissionRow = {
+          id: submissions.length + 1,
+          market_id,
+          submitter,
+          outcome,
+          bond_amount,
+          submitted_at: new Date(),
+          status: "submitted",
+        };
+        submissions.push(newRow);
+        return { rows: [newRow as unknown as T] };
+      }
+
+      if (
+        normalizedText.includes(
+          "SELECT COUNT(*)::text AS count FROM oracle_submissions",
+        )
+      ) {
+        const [market_id] = (values ?? []) as [number];
+        const count = submissions.filter(
+          (s) => s.market_id === market_id && s.status === "submitted",
+        ).length;
+        return { rows: [{ count: String(count) } as unknown as T] };
+      }
+
+      if (
+        normalizedText.includes("SELECT 1 FROM oracle_submissions WHERE nonce")
+      ) {
+        const [nonce] = (values ?? []) as [string];
+        const exists = submissions.some((s: any) => s.nonce === nonce);
+        return { rows: exists ? [{ exists: true } as unknown as T] : [] };
+      }
+
+      return { rows: [] };
+    },
+  };
+
+  beforeEach(async () => {
+    submissions = [];
+    app = Fastify();
+    registerErrorHandler(app);
+
+    // Register versioned API
+    await app.register(async (routes) => {
+      // Mock pool decorator
+      routes.decorate("pool", mockDb);
+      await routes.register(oracleRoutes, { prefix: "/api/v1" });
+    });
+  });
+
+  it("rejects submission with expired timestamp", async () => {
+    const expiredTimestamp = Math.floor(Date.now() / 1000) - 600; // 10 minutes ago
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 1,
+        outcome: "YES",
+        signature: "sig1",
+        provider: "provider_test",
+        timestamp: expiredTimestamp,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error.message).toContain("Timestamp outside acceptance window");
+  });
+
+  it("rejects submission with duplicate nonce", async () => {
+    const nonce = "unique-nonce-123";
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    // First submission
+    const res1 = await app.inject({
+      method: "POST",
+      url: "/api/v1/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 1,
+        outcome: "YES",
+        signature: "sig1",
+        provider: "provider_test",
+        nonce,
+        timestamp,
+      },
+    });
+
+    expect(res1.statusCode).toBe(200);
+
+    // Store the nonce in our mock
+    (submissions[0] as any).nonce = nonce;
+
+    // Second submission with same nonce should fail
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/v1/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 2,
+        outcome: "NO",
+        signature: "sig2",
+        provider: "provider_test",
+        nonce,
+        timestamp,
+      },
+    });
+
+    expect(res2.statusCode).toBe(400);
+    const body = res2.json();
+    expect(body.error.message).toContain("already been used");
+  });
+
+  it("accepts valid submission with nonce and timestamp", async () => {
+    const nonce = "unique-nonce-456";
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 5,
+        outcome: "YES",
+        signature: "sig1",
+        provider: "provider_test",
+        nonce,
+        timestamp,
       },
     });
 

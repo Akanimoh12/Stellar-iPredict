@@ -1,4 +1,5 @@
 import { rpc, xdr, scValToNative, Address, Contract, nativeToScVal, TransactionBuilder, Keypair } from "@stellar/stellar-sdk";
+import { EVENT_TOPICS } from "@ipredict/shared";
 import type { DataAdapter, Market } from "../adapters/index.js";
 import { createLogger, type Logger } from "../log.js";
 
@@ -115,7 +116,7 @@ export class ChallengeBot {
         {
           type: "contract",
           contractIds: [this.options.contractId],
-          topics: [["oracle", "submitted"]],
+          topics: [[...EVENT_TOPICS.oracle.submitted]],
         },
       ],
     });
@@ -141,7 +142,10 @@ export class ChallengeBot {
       const topics = event.topic.map((t: xdr.ScVal) => scValToNative(t));
       const data = scValToNative(event.value);
 
-      if (topics[0] !== "oracle" || topics[1] !== "submitted") {
+      if (
+        topics[0] !== EVENT_TOPICS.oracle.submitted[0] ||
+        topics[1] !== EVENT_TOPICS.oracle.submitted[1]
+      ) {
         return null;
       }
 

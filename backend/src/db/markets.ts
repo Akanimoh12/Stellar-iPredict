@@ -1,9 +1,10 @@
 import { Pool } from "pg";
+import type { FilterableMarketCategory } from "@ipredict/shared";
 import type { MarketRow } from "./types.js";
 
 export type MarketFilter = "active" | "resolved" | "ended" | "cancelled" | "all";
 export type MarketSort = "newest" | "volume" | "ending_soon" | "bettors";
-export type MarketCategory = "Crypto" | "Sports" | "Politics" | "Entertainment" | "Science";
+export type MarketCategory = FilterableMarketCategory;
 
 export type GetMarketsInput = {
   filter?: MarketFilter;

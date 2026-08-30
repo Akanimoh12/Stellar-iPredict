@@ -8,6 +8,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "migrate": "tsx migrate.ts",
+    "migrate:down": "tsx migrate-down.ts",
     "seed": "tsx seed.ts",
     "test": "vitest run",
     "test:watch": "vitest",

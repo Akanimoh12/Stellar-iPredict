@@ -30,6 +30,7 @@ import {
   marketsActiveKey,
   leaderboardKey,
   betsKey,
+  oddsKey,
 } from "./cacheKeys.js";
 
 // ---------------------------------------------------------------------------
@@ -87,13 +88,13 @@ export async function invalidateOnMarketCreated(
  * Clears the individual market entry (odds/totals changed) and the
  * active-markets list (volume/order may change).
  *
- * Event mapping: `bet:placed` → `market:{id}`, `markets:active`
+ * Event mapping: `bet:placed` → `market:{id}`, `odds:{id}`, `markets:active`
  */
 export async function invalidateOnBetPlaced(
   redis: Pick<Redis, "del">,
   marketId: number | string,
 ): Promise<number> {
-  return invalidate(redis, marketKey(marketId), marketsActiveKey());
+  return invalidate(redis, marketKey(marketId), oddsKey(marketId), marketsActiveKey());
 }
 
 /**
@@ -102,7 +103,7 @@ export async function invalidateOnBetPlaced(
  * Clears the individual market, both market-list caches, the bet list for
  * that market, and the leaderboard (resolved bets may change rankings).
  *
- * Event mapping: `mkt:resolved` → `market:{id}`, `markets:all`,
+ * Event mapping: `mkt:resolved` → `market:{id}`, `odds:{id}`, `markets:all`,
  *                                  `markets:active`, `bets:{id}`,
  *                                  `leaderboard:top20`
  */
@@ -113,6 +114,7 @@ export async function invalidateOnMarketResolved(
   return invalidate(
     redis,
     marketKey(marketId),
+    oddsKey(marketId),
     marketsAllKey(),
     marketsActiveKey(),
     betsKey(marketId),
@@ -126,7 +128,7 @@ export async function invalidateOnMarketResolved(
  * Same scope as resolution — the market status changed and any cached lists
  * are now stale.
  *
- * Event mapping: `mkt:cancelled` → `market:{id}`, `markets:all`,
+ * Event mapping: `mkt:cancelled` → `market:{id}`, `odds:{id}`, `markets:all`,
  *                                   `markets:active`
  */
 export async function invalidateOnMarketCancelled(
@@ -136,6 +138,7 @@ export async function invalidateOnMarketCancelled(
   return invalidate(
     redis,
     marketKey(marketId),
+    oddsKey(marketId),
     marketsAllKey(),
     marketsActiveKey(),
   );

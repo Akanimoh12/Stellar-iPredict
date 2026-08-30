@@ -1,4 +1,5 @@
 import { Redis, RedisOptions } from 'ioredis';
+import { recordCacheHit, recordCacheMiss } from './hitRate.js';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -10,13 +11,33 @@ const options: RedisOptions = {
   },
   // Prevent unbounded queues if redis goes down hard
   maxRetriesPerRequest: 3,
+  // Connect lazily so importing this module never opens a socket — important
+  // for test environments without a running Redis (see src/test/fakeRedis.ts).
+  lazyConnect: true,
+  enableReadyCheck: true,
+  autoResubscribe: false,
 };
+
+let client: Redis | null = null;
 
 /**
  * Single configured Redis client instance for the application.
  * DO NOT instantiate `new Redis()` elsewhere.
  */
-export const redisClient = new Redis(REDIS_URL, options);
+export function getRedisClient(): Redis {
+  if (client === null) {
+    client = new Redis(REDIS_URL, options);
+  }
+  return client;
+}
+
+/**
+ * Replaces the shared client — used by tests to inject a fake Redis
+ * (see src/test/fakeRedis.ts) so cache behaviour is verified without a server.
+ */
+export function setRedisClient(fake: Redis): void {
+  client = fake;
+}
 
 /**
  * Typed JSON helper for caching.
@@ -27,11 +48,19 @@ export const cache = {
    * Returns null if the key doesn't exist or is invalid JSON.
    */
   async get<T>(key: string): Promise<T | null> {
-    const data = await redisClient.get(key);
-    if (!data) return null;
+    const data = await getRedisClient().get(key);
+    if (!data) {
+      recordCacheMiss(key);
+      return null;
+    }
     try {
-      return JSON.parse(data) as T;
+      const value = JSON.parse(data) as T;
+      recordCacheHit(key);
+      return value;
     } catch {
+      // Unparseable entry: the caller gets null and goes to its source, so
+      // this is a miss for `cache_hit_rate` purposes (issue #214).
+      recordCacheMiss(key);
       return null;
     }
   },
@@ -41,11 +70,12 @@ export const cache = {
    * @param ttlSeconds Optional time-to-live in seconds.
    */
   async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
+    const redis = getRedisClient();
     const serialized = JSON.stringify(value);
     if (ttlSeconds !== undefined && ttlSeconds > 0) {
-      await redisClient.set(key, serialized, 'EX', ttlSeconds);
+      await redis.set(key, serialized, 'EX', ttlSeconds);
     } else {
-      await redisClient.set(key, serialized);
+      await redis.set(key, serialized);
     }
   },
 
@@ -53,13 +83,13 @@ export const cache = {
    * Deletes a key.
    */
   async del(key: string): Promise<void> {
-    await redisClient.del(key);
+    await getRedisClient().del(key);
   },
 
   /**
    * Gracefully close the Redis connection.
    */
   async close(): Promise<void> {
-    await redisClient.quit();
+    await getRedisClient().quit();
   },
 };

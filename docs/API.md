@@ -64,6 +64,7 @@ no such route is currently registered, so no endpoint requires a token today.
 - `GET /api/docs` — OpenAPI 3.1 specification (JSON)
 - `GET /api/markets` — list markets (filter/sort/paginate)
 - `GET /api/markets/:id` — market detail
+- `GET /api/markets/:id/odds` — derived odds and implied probability
 - `GET /api/leaderboard` — player rankings
 - `GET /api/stats` — global platform statistics
 - `GET /api/v1/profile/:address` — a user's bets + leaderboard totals
@@ -202,6 +203,45 @@ requested (or default) values.
 |--------|-----------|
 | 400 | Invalid `filter`/`category`/`sort`, or `page`/`limit` out of range (e.g. `limit > 100`, `page = 0`). Body: `{ "error": { "code": "BAD_REQUEST", "message": "Invalid query parameters", "issues": [...] } }` |
 | 429 | Rate limit exceeded (60 req/min window per IP for this route). |
+
+---
+
+### GET /api/markets/:id/odds
+
+**Description:** Returns derived YES/NO odds and implied probabilities for a market by its integer id. Handles zero-pool markets gracefully by defaulting probabilities to 0.5 (50%/50%).
+
+**Authentication:** none.
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `id` | `string` | Positive integer market id. |
+
+**Query Parameters:** none.
+
+**Response** `200 OK`:
+```json
+{
+  "market_id": 42,
+  "total_yes": "60.0000000",
+  "total_no": "40.0000000",
+  "total_pool": "100.0000000",
+  "yes_odds": 0.6,
+  "no_odds": 0.4,
+  "implied_probability": {
+    "yes": 0.6,
+    "no": 0.4
+  }
+}
+```
+
+**Error Responses:**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | `id` is not a positive integer (e.g. `GET /api/markets/not-a-number/odds`). |
+| 404 | Market not found. Body: `{ "error": { "code": "NOT_FOUND", "message": "Market not found" } }` |
 
 ---
 

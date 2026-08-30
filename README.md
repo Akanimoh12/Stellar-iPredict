@@ -339,6 +339,7 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 
 ## Documentation
 
+- [Contributor Onboarding](docs/ONBOARDING.md) — guided onboarding path for new contributors through starting issues and setup.
 - [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.

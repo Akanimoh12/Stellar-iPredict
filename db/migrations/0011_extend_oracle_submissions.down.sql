@@ -1,5 +1,5 @@
--- Down migration: 0008_extend_oracle_submissions.down
--- Reverts 0008_extend_oracle_submissions.sql
+-- Down migration: 0011_extend_oracle_submissions.down
+-- Reverts 0011_extend_oracle_submissions.sql
 --
 -- NOTE: The up-migration idempotently creates oracle_submission_status ENUM, but the
 --       type itself originates from 0006_oracle_submissions. This down-migration does

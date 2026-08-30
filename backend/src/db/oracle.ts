@@ -3,6 +3,49 @@ import type { OracleSubmissionRow } from "./types.js";
 
 export type { Queryable };
 
+// ── Outcome canonicalization (issue #650) ────────────────────────────────────
+
+/**
+ * The permitted outcome representations. Markets are binary, so this is a
+ * closed two-value set. The canonical form is uppercase `YES` / `NO`
+ * (chosen deliberately over the boolean-coerced `"true"`/`"false"` the
+ * schema used to persist — existing rows are migrated to match in
+ * `db/migrations/0017_oracle_outcome_canonical.sql`). A matching
+ * `CHECK (outcome IN ('YES','NO'))` constraint enforces it at the database
+ * regardless of the write path.
+ */
+export const CANONICAL_OUTCOMES = ["YES", "NO"] as const;
+export type CanonicalOutcome = (typeof CANONICAL_OUTCOMES)[number];
+
+const OUTCOME_ALIASES: Record<string, CanonicalOutcome> = {
+  YES: "YES",
+  Y: "YES",
+  TRUE: "YES",
+  "1": "YES",
+  NO: "NO",
+  N: "NO",
+  FALSE: "NO",
+  "0": "NO",
+};
+
+/**
+ * Normalise a submitted outcome to its canonical form, or return `null` if it
+ * is not a recognised binary outcome. Accepts booleans and case-insensitive,
+ * whitespace-padded string spellings (`"yes"`, `"YES "`, `"true"`, `"1"`), so
+ * every spelling of the same outcome persists identically.
+ */
+export function normalizeOutcome(raw: unknown): CanonicalOutcome | null {
+  if (typeof raw === "boolean") return raw ? "YES" : "NO";
+  if (typeof raw !== "string") return null;
+  const key = raw.trim().toUpperCase();
+  return OUTCOME_ALIASES[key] ?? null;
+}
+
+/** Type guard for an already-canonical outcome value. */
+export function isCanonicalOutcome(value: unknown): value is CanonicalOutcome {
+  return typeof value === "string" && (CANONICAL_OUTCOMES as readonly string[]).includes(value);
+}
+
 // ── Provider registry ────────────────────────────────────────────────────────
 
 let providerCache: Set<string> | null = null;
@@ -103,6 +146,15 @@ export async function recordOracleSubmission(
 ): Promise<OracleSubmissionRow> {
   const bondAmountStr = String(input.bondAmount ?? "0");
 
+  // Defence in depth (issue #650): the API schema already canonicalises, but
+  // never write a non-canonical outcome even if a future caller forgets to.
+  const canonicalOutcome = normalizeOutcome(input.outcome);
+  if (canonicalOutcome === null) {
+    throw new Error(
+      `recordOracleSubmission: outcome "${input.outcome}" is not one of ${CANONICAL_OUTCOMES.join(", ")}`,
+    );
+  }
+
   const queryText = `
     INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status, nonce, request_timestamp)
     VALUES ($1, $2, $3, $4, 'submitted', $5, $6)
@@ -112,7 +164,7 @@ export async function recordOracleSubmission(
   const result = await db.query<OracleSubmissionRow>(queryText, [
     input.marketId,
     input.provider,
-    input.outcome,
+    canonicalOutcome,
     bondAmountStr,
     input.nonce ?? null,
     input.requestTimestamp ?? null,

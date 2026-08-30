@@ -1,4 +1,5 @@
 
+import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
@@ -154,6 +155,11 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
  * Starts the metrics server and runs the indexer polling loop.
  */
 export async function main(): Promise<void> {
+  // Resolve the secrets source before anything reads process.env. See
+  // docs/SECRETS.md; the summary is counts only, never names or values.
+  const secrets = await loadSecrets();
+  console.info(`[ipredict-indexer] secrets: ${summariseSecretsLoad(secrets)}`);
+
   // Initialize metrics server
   const metricsServer = new MetricsServer();
 

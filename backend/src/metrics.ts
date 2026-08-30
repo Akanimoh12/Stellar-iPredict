@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { serializeCacheMetrics } from "./cache/hitRate.js";
 
 /**
  * Request-duration histogram — issue #87
@@ -340,7 +341,10 @@ export function serializeMetrics(): string {
     }
   }
 
-  return lines.join("\n") + "\n";
+  // Cache hit rate (issue #214). Always emitted, even before the first
+  // lookup — a series that only appears once traffic arrives is a series
+  // nobody can build a dashboard panel against.
+  return lines.join("\n") + "\n" + serializeCacheMetrics();
 }
 
 // ---------------------------------------------------------------------------

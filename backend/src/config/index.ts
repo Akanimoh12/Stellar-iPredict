@@ -47,6 +47,18 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 600))
+  ORACLE_NONCE_RETENTION_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 600))
+    .pipe(z.number().int().positive()),
+  // Minimum bond required for oracle submissions (in XLM)
+  SUBMITTER_BOND_XLM: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 100))
+    .pipe(z.number().positive()),
+});
     .pipe(z.number().int().positive()),
 });
 

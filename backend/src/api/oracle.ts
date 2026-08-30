@@ -22,6 +22,7 @@ const oracleSubmitBodySchema = z.object({
   ]),
   signature: z.string().min(1),
   provider: z.string().min(1),
+  bondAmount: z.union([z.string().min(1), z.number().positive()]),
   nonce: z.string().min(1).optional(),
   timestamp: z.number().int().positive().optional(),
 });
@@ -44,12 +45,13 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider"],
+          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
           properties: {
             marketId: { type: "number" },
             outcome: { type: "string" },
             signature: { type: "string" },
             provider: { type: "string" },
+            bondAmount: { type: ["string", "number"] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -141,7 +143,16 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         });
       }
 
-      const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
+      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Validate bond amount against configured minimum
+      const bondNumeric = Number(bondAmount);
+      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+      if (bondNumeric < minBondStroops) {
+        throw badRequest(
+          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+        );
+      }
 
       // Replay protection: validate timestamp window
       if (timestamp !== undefined) {
@@ -173,6 +184,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             marketId,
             provider,
             outcome: String(outcome),
+            bondAmount,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
@@ -236,12 +248,13 @@ export function registerOracleRoutes(
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider"],
+          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
           properties: {
             marketId: { type: "number" },
             outcome: { type: "string" },
             signature: { type: "string" },
             provider: { type: "string" },
+            bondAmount: { type: ["string", "number"] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -294,6 +307,18 @@ export function registerOracleRoutes(
         });
       }
 
+      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Validate bond amount against configured minimum
+      const bondNumeric = Number(bondAmount);
+      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+      if (bondNumeric < minBondStroops) {
+        throw badRequest(
+          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+        );
+      }
+
+      // Replay protection: validate timestamp window
       const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
 
       // Replay protection: validate timestamp window
@@ -325,6 +350,9 @@ export function registerOracleRoutes(
           {
             marketId,
             provider,
+            outcome: String(outcome),
+            bondAmount,
+            nonce,
             outcome: String(outcome),
             nonce,
             requestTimestamp: timestamp

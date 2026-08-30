@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { profileRoutes } from "./profile.js";
+import { oracleRoutes } from "./oracle.js";
 
 /**
  * Route index.
@@ -23,7 +24,7 @@ export const API_PREFIX = `/api/${API_VERSION}`;
  * Routers are plain Fastify plugins: each gets its own encapsulated context, so
  * a hook or decorator added by one cannot leak into another.
  */
-export const routers: FastifyPluginAsync[] = [profileRoutes];
+export const routers: FastifyPluginAsync[] = [profileRoutes, oracleRoutes];
 
 /** The versioned API as one plugin, with no prefix of its own. */
 export const apiRoutes: FastifyPluginAsync = async (api) => {

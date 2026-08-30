@@ -51,7 +51,7 @@ const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => 
   };
 
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
-    if (sql.includes("SELECT (SELECT COUNT(*)::text FROM markets) AS total_markets")) {
+    if (sql.includes("AS total_markets")) {
       return {
         rows: [
           {
@@ -165,6 +165,7 @@ describe("backend smoke test", () => {
         server.inject({ method: "GET", url: "/api/docs" }),
         server.inject({ method: "GET", url: "/api/markets" }),
         server.inject({ method: "GET", url: "/api/markets/1" }),
+        server.inject({ method: "GET", url: "/api/markets/1/odds" }),
         server.inject({ method: "GET", url: "/api/markets/1/bets" }),
         server.inject({ method: "GET", url: "/api/leaderboard" }),
         server.inject({ method: "GET", url: "/api/stats" }),
@@ -194,11 +195,12 @@ describe("backend smoke test", () => {
         200,
         200,
         200,
+        200,
       ]);
 
       expect(responses[2].headers["content-type"]).toContain("text/plain");
       expect(responses[3].json()).toHaveProperty("openapi");
-      expect(responses[10].json()).toEqual({
+      expect(responses[11].json()).toEqual({
         accepted: true,
         submissionsNeeded: 2,
       });

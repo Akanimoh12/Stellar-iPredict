@@ -31,7 +31,7 @@ export interface RateLimitStore {
   increment(
     key: string,
     limit: number,
-    windowSec: number
+    windowSec: number,
   ): RateLimitResult | Promise<RateLimitResult>;
   destroy?(): void | Promise<void>;
 }
@@ -85,7 +85,7 @@ export class SlidingWindowStore implements RateLimitStore {
   increment(
     key: string,
     limit: number,
-    windowSec: number
+    windowSec: number,
   ): { allowed: boolean; remaining: number; resetMs: number } {
     const now = Date.now();
     const windowMs = windowSec * 1_000;
@@ -172,7 +172,7 @@ export class SlidingWindowStore implements RateLimitStore {
 export function resolveRateLimit(
   method: string,
   url: string,
-  limits: Record<string, RateLimitConfig> = RATE_LIMITS
+  limits: Record<string, RateLimitConfig> = RATE_LIMITS,
 ): RateLimitConfig {
   const path = url.split("?")[0]!;
   const key = `${method} ${path}`;
@@ -206,8 +206,19 @@ export function resolveRateLimit(
 /**
  * Extract a per-client identifier from a request.  Uses the leftmost IP
  * in `X-Forwarded-For` when behind a reverse proxy, otherwise `req.ip`.
+ *
+ * For oracle endpoints, uses the authenticated provider identity instead of IP
+ * to prevent providers from bypassing limits via IP changes.
  */
 function clientId(req: FastifyRequest): string {
+  // For oracle endpoints, use provider identity from request body if available
+  if (req.url.includes("/oracle/submit") && req.body) {
+    const body = req.body as any;
+    if (body.provider && typeof body.provider === "string") {
+      return `provider:${body.provider}`;
+    }
+  }
+
   const xff = req.headers["x-forwarded-for"];
   if (typeof xff === "string") {
     const first = xff.split(",")[0]?.trim();
@@ -232,7 +243,7 @@ export function registerRateLimiter(
   server: FastifyInstance,
   limits: Record<string, RateLimitConfig> = RATE_LIMITS,
   /** @internal override for tests */
-  overrideStore?: RateLimitStore
+  overrideStore?: RateLimitStore,
 ): void {
   const s: RateLimitStore = overrideStore ?? store;
 
@@ -251,7 +262,7 @@ export function registerRateLimiter(
       reply.header("X-RateLimit-Remaining", result.remaining);
       reply.header(
         "X-RateLimit-Reset",
-        Math.ceil((Date.now() + result.resetMs) / 1_000)
+        Math.ceil((Date.now() + result.resetMs) / 1_000),
       );
 
       if (!result.allowed) {
@@ -263,6 +274,6 @@ export function registerRateLimiter(
           retryAfter,
         });
       }
-    }
+    },
   );
 }

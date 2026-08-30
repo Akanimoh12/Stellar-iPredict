@@ -1,3 +1,5 @@
+
+import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
@@ -189,13 +191,13 @@ export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, 
  * live (--backfill) or starts live polling from the configured start ledger.
  */
 export async function main(): Promise<void> {
-  if (process.env.NODE_ENV !== "test") {
-    const metricsServer = new MetricsServer();
-    await metricsServer.start();
-  }
+  // Resolve the secrets source before anything reads process.env. See
+  // docs/SECRETS.md; the summary is counts only, never names or values.
+  const secrets = await loadSecrets();
+  console.info(`[ipredict-indexer] secrets: ${summariseSecretsLoad(secrets)}`);
 
-  const { config } = await import("./config/index.js");
-  const { runBackfill } = await import("./backfill.js");
+  // Initialize metrics server
+  const metricsServer = new MetricsServer();
 
   const isBackfill = process.argv.includes("--backfill");
 

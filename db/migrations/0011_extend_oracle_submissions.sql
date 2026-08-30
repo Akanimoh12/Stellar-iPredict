@@ -1,4 +1,4 @@
--- Migration: 0008_extend_oracle_submissions
+-- Migration: 0011_extend_oracle_submissions
 -- Description: Add finalization tracking and idempotency for oracle submissions.
 
 -- PostgreSQL has no CREATE TYPE ... IF NOT EXISTS, so the re-run guard has to

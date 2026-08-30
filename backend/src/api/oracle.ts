@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import type { Pool } from "pg";
 import { z } from "zod";
@@ -13,6 +14,26 @@ import { config } from "../config/index.js";
 
 const DEFAULT_ORACLE_THRESHOLD = 3;
 const DEFAULT_DEV_API_KEY = "test-oracle-api-key";
+
+export function compareSecretValues(
+  candidate: string | undefined,
+  expected: string,
+): boolean {
+  if (candidate === undefined) {
+    return false;
+  }
+
+  const candidateHash = crypto
+    .createHash("sha256")
+    .update(Buffer.from(candidate, "utf8"))
+    .digest();
+  const expectedHash = crypto
+    .createHash("sha256")
+    .update(Buffer.from(expected, "utf8"))
+    .digest();
+
+  return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
 
 const oracleSubmitBodySchema = z.object({
   marketId: z.number().int().positive(),
@@ -126,7 +147,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         token = token.slice(8).trim();
       }
 
-      if (token !== expectedApiKey) {
+      if (!compareSecretValues(token, expectedApiKey)) {
         throw unauthorized("Invalid API key");
       }
 
@@ -279,7 +300,7 @@ export function registerOracleRoutes(
         token = token.slice(8).trim();
       }
 
-      if (token !== expectedApiKey) {
+      if (!compareSecretValues(token, expectedApiKey)) {
         throw unauthorized("Invalid API key");
       }
 

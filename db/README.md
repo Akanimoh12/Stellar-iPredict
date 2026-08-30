@@ -102,6 +102,50 @@ Indexes:
 - `idx_events_ledger` on `ledger_seq DESC`
 - `idx_events_tx_hash_event_index` unique on `(tx_hash, event_index)`
 
+## Event archival and retention policy
+
+The `events` table is retained only for the replay window the indexer needs. The default hot retention is `30 days` and older rows are moved to `events_archive` in small batches so regular writes are not stalled by a huge delete.
+
+- Hot rows stay in `events` when `created_at >= NOW() - INTERVAL '30 days'`
+- Older rows are archived using `archive_old_events(retention_days => 30, batch_size => 10000)`
+- The archive table keeps the same event payload and ledger metadata as the hot table for forensic recovery
+- Replay and dedupe remain valid for the retained window because rows kept in `events` still carry the `(tx_hash, event_index)` uniqueness guard
+
+Example archive maintenance job:
+
+```sql
+SELECT archive_old_events(30, 10000);
+```
+
+To recover a historical range after an outage or re-index request:
+
+```sql
+INSERT INTO events (
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+)
+SELECT
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+FROM events_archive
+WHERE created_at BETWEEN :start_ts AND :end_ts
+ON CONFLICT (tx_hash, event_index) DO NOTHING;
+```
+
+This restores only the required date range and keeps the hot table free from stale data.
+
 ### `oracle_submissions`
 
 Tracks oracle submissions for dispute and resolution workflows.

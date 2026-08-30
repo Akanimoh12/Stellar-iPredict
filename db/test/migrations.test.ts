@@ -60,4 +60,15 @@ describe('migration prefix uniqueness', () => {
     expect(sql).toContain('CREATE TYPE oracle_submission_status AS ENUM');
     expect(sql).toContain('WHEN duplicate_object THEN NULL;');
   });
+
+  it('adds an events archive table and retention procedure for hot-table cleanup', () => {
+    const sqlPath = path.join(MIGRATIONS_DIR, '0013_events_archival.sql');
+    expect(fs.existsSync(sqlPath)).toBe(true);
+
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS events_archive');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION archive_old_events');
+    expect(sql).toContain('retention_days');
+    expect(sql).toContain('events_archive');
+  });
 });

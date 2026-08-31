@@ -171,15 +171,15 @@ Tracks oracle submissions for dispute and resolution workflows.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `SERIAL` | Auto-incrementing primary key |
-| `market_id` | `INTEGER` | Market identifier |
-| `submitter` | `VARCHAR(255)` | Wallet address of the submitter |
-| `outcome` | `VARCHAR(255)` | Proposed outcome |
+| `market_id` | `BIGINT` | Market identifier; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
+| `submitter` | `CHAR(56)` | Wallet address of the submitter; `CHECK` enforces the Stellar public-key shape (#408) |
+| `outcome` | `VARCHAR(255)` | Proposed outcome; `CHECK (outcome IN ('YES','NO'))` (#650) |
 | `bond_amount` | `NUMERIC` | Bond attached to the submission |
 | `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
 | `status` | `oracle_submission_status` | Lifecycle state: `submitted`, `challenged`, `finalized`, or `rejected` |
 | `decision` | `VARCHAR(255)` | Finalized decision (`yes`/`no`) |
 | `tx_hash` | `CHAR(64)` | Finalization transaction hash |
-| `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
+| `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp; `NULL` until the row is actually finalized (#409) — never trust it as populated without also checking `status = 'finalized'` |
 | `council_votes` | `JSONB` | Council vote records used to resolve the market |
 
 `status` follows the optimistic-oracle lifecycle: `submitted` is the initial
@@ -188,6 +188,9 @@ claim was accepted, and `rejected` means it was ruled incorrect. The indexer
 writes submissions and challenge/finalization transitions; `updated_at` is
 maintained by the shared database trigger.
 
+`market_id` was widened from `INTEGER` to `BIGINT` in migration `0021` so it
+can carry a foreign key to `markets.id` (also `BIGINT`) — see below.
+
 ### `oracle_disputes`
 
 Stores the bond and escalation details for challenged submissions.
@@ -195,10 +198,10 @@ Stores the bond and escalation details for challenged submissions.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `SERIAL` | Primary key |
-| `market_id` | `INTEGER` | Market under dispute; unique |
-| `submitter` | `VARCHAR(255)` | Original oracle submitter |
-| `challenger` | `VARCHAR(255)` | Wallet that challenged the submission |
-| `outcome` | `VARCHAR(255)` | Disputed outcome |
+| `market_id` | `BIGINT` | Market under dispute; unique; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
+| `submitter` | `CHAR(56)` | Original oracle submitter; `CHECK` enforces the Stellar public-key shape (#408) |
+| `challenger` | `CHAR(56)` | Wallet that challenged the submission; same `CHECK` (#408) |
+| `outcome` | `VARCHAR(255)` | Disputed outcome; `CHECK (outcome IN ('YES','NO'))` (#408) |
 | `submitter_bond` | `NUMERIC` | Positive original bond |
 | `challenger_bond` | `NUMERIC` | Positive bond strictly greater than `submitter_bond` |
 | `total_bond` | `NUMERIC` | Combined escrowed bond |
@@ -218,8 +221,8 @@ erDiagram
     MARKETS ||--o{ COUNCIL_VOTES : receives
     ORACLE_SUBMISSIONS ||--o| ORACLE_DISPUTES : escalates_to
     MARKETS { BIGINT id PK }
-    ORACLE_SUBMISSIONS { SERIAL id PK; INTEGER market_id FK; oracle_submission_status status }
-    ORACLE_DISPUTES { SERIAL id PK; INTEGER market_id FK; oracle_dispute_status status }
+    ORACLE_SUBMISSIONS { SERIAL id PK; BIGINT market_id FK; oracle_submission_status status }
+    ORACLE_DISPUTES { SERIAL id PK; BIGINT market_id FK; oracle_dispute_status status }
     COUNCIL_VOTES { BIGINT market_id FK; CHAR member PK }
 ```
 
@@ -233,6 +236,18 @@ Indexes:
 - `idx_oracle_submissions_market_id` unique on `market_id`
 - `idx_oracle_submissions_status` on `status`
 
+**Foreign keys (#407):** `oracle_submissions.market_id`,
+`oracle_disputes.market_id`, and `council_votes.market_id` all reference
+`markets(id)` `ON DELETE RESTRICT` (migration `0021`). `RESTRICT` rather than
+`CASCADE` or `SET NULL`: this app never deletes a `markets` row in normal
+operation, and a resolved or cancelled market still needs its oracle audit
+trail retained (see "Full retention policy" above) — so an attempt to delete
+a market with oracle history fails loudly instead of silently destroying or
+orphaning that trail. Orphan rows (referencing a `market_id` with no matching
+`markets` row) are deleted, with counts and a sample of the affected
+`market_id`s logged via `RAISE NOTICE`, in the same migration before the
+constraint is added.
+
 ### `council_votes`
 
 Tracks each Phase 1.5 council member's submitted outcome per market. One row
@@ -242,7 +257,7 @@ is reached.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `market_id` | `BIGINT` | Market identifier |
+| `market_id` | `BIGINT` | Market identifier; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
 | `member` | `CHAR(56)` | Council member wallet address |
 | `outcome` | `BOOLEAN` | The member's submitted outcome |
 | `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
@@ -338,11 +353,63 @@ migrations/
   0008_council_votes.sql
 ```
 
-Apply with the migration runner (tracked as its own issue) or manually:
+Apply with the migration runner:
+
+```bash
+cd db
+npm run migrate
+```
+
+or manually with `psql`:
 
 ```bash
 psql "$DATABASE_URL" -f db/migrations/0001_create_markets.sql
 ```
+
+### Migration checksums (#406)
+
+`schema_migrations` records a SHA-256 checksum of each migration file's raw
+bytes alongside its filename. Every run recomputes the checksum for every
+file on disk and compares it against the stored value for files already
+marked applied:
+
+- **Unmodified migration** — checksum matches the stored value. Skipped, no
+  output beyond the normal "already applied" line.
+- **Edited-after-apply migration** — checksum differs from the stored value.
+  The run **fails immediately**, naming the file:
+
+  ```
+  Migration checksum mismatch for 0006_oracle_submissions.sql: its contents
+  have changed since it was applied, so this file no longer describes the
+  deployed schema. If the edit was intentional (e.g. a comment-only change
+  with no effect on already-migrated databases), rerun with
+  --allow-checksum-update to accept the new checksum. Otherwise, restore the
+  file's original contents.
+  ```
+
+  This is what catches an environment silently drifting from what its
+  migration files describe — see the original problem this closes.
+- **Pre-existing row with no checksum** — a deployment that applied
+  migrations before this feature shipped has `checksum = NULL` for every
+  existing row. The runner **trusts it once and backfills the checksum**
+  (rather than failing every environment on the first run after upgrading);
+  drift is caught for that file starting from the next run. This choice is
+  intentional: failing on a NULL checksum would make adopting this feature a
+  breaking change for every existing deployment, for edits that happened
+  before the check existed to catch them anyway.
+
+**Escape hatch:** when an edit to an already-applied migration is
+intentional, rerun with the `--allow-checksum-update` flag:
+
+```bash
+cd db
+npm run migrate -- --allow-checksum-update
+```
+
+This must be passed explicitly — there is no environment variable or
+config-file equivalent, so accepting a changed migration is always a
+deliberate, visible choice (it prints a warning naming the file and records
+the new checksum) rather than something that can be silently defaulted on.
 
 ### Schema drift check
 

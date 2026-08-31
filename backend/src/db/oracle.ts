@@ -158,7 +158,7 @@ export async function recordOracleSubmission(
   const queryText = `
     INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status, nonce, request_timestamp)
     VALUES ($1, $2, $3, $4, 'submitted', $5, $6)
-    RETURNING id, market_id, submitter, outcome, bond_amount, submitted_at, status
+    RETURNING id, market_id::text AS market_id, submitter, outcome, bond_amount, submitted_at, status
   `;
 
   const result = await db.query<OracleSubmissionRow>(queryText, [

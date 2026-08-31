@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { Keypair } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import { badRequest, unauthorized, conflict, forbidden, notFound } from "../lib/errors.js";
+import { logOracleSubmissionAttempt } from "../lib/log.js";
 import {
   recordOracleSubmission,
   getOracleSubmissionsCount,
@@ -338,13 +339,43 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         throw notFound(`Market ${marketId} does not exist`);
       }
       if (market.resolved) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_request",
+            message: `Market ${marketId} is already resolved`,
+          },
+          request.log,
+        );
         throw badRequest(`Market ${marketId} is already resolved`);
       }
       if (market.cancelled) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_request",
+            message: `Market ${marketId} is cancelled`,
+          },
+          request.log,
+        );
         throw badRequest(`Market ${marketId} is cancelled`);
       }
       const now = Date.now();
       if (Number(market.end_time) * 1000 > now) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_request",
+            message: `Market ${marketId} has not expired yet`,
+          },
+          request.log,
+        );
         throw badRequest(
           `Market ${marketId} has not expired yet — submissions are only accepted after the market end time`,
         );
@@ -356,6 +387,16 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         const windowMs = config.ORACLE_TIMESTAMP_WINDOW_SEC * 1000;
 
         if (Math.abs(now - timestampMs) > windowMs) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "bad_request",
+              message: `Timestamp outside acceptance window`,
+            },
+            request.log,
+          );
           throw badRequest(
             `Timestamp outside acceptance window of ${config.ORACLE_TIMESTAMP_WINDOW_SEC}s`,
           );
@@ -366,6 +407,16 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       if (nonce !== undefined) {
         const nonceUsed = await hasNonceBeenUsed(nonce, db);
         if (nonceUsed) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "bad_request",
+              message: `Nonce has already been used`,
+            },
+            request.log,
+          );
           throw badRequest(`Nonce "${nonce}" has already been used`);
         }
       }
@@ -412,13 +463,43 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
           error.code === "23505" &&
           error.constraint === "uq_oracle_submissions_market_id"
         ) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "duplicate_market",
+              message: `Market ${marketId} already has an oracle submission`,
+            },
+            request.log,
+          );
           throw conflict(
             `Oracle submission for market ${marketId} already exists. Each market can only have one submission.`,
           );
         }
         // Re-throw other errors
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "internal_error",
+            message: error.message || "Failed to record submission",
+          },
+          request.log,
+        );
         throw error;
       }
+
+      logOracleSubmissionAttempt(
+        {
+          requestId: request.id,
+          provider,
+          marketId,
+          outcome: "accepted",
+        },
+        request.log,
+      );
 
       const count = await getOracleSubmissionsCount(marketId, db);
       const submissionsNeeded = Math.max(
@@ -609,6 +690,16 @@ export function registerOracleRoutes(
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider: (request.body as any)?.provider || "unknown",
+            marketId: (request.body as any)?.marketId || 0,
+            outcome: "bad_request",
+            message: "Invalid request body",
+          },
+          request.log,
+        );
         return reply.status(400).send({
           error: {
             code: "BAD_REQUEST",
@@ -629,6 +720,16 @@ export function registerOracleRoutes(
         signature,
       );
       if (!signed) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_signature",
+            message: "Invalid oracle submission signature",
+          },
+          request.log,
+        );
         throw unauthorized(
           "Invalid oracle submission signature; ensure it was produced by the claimed provider keypair",
         );
@@ -638,6 +739,16 @@ export function registerOracleRoutes(
       const db = dbOverride || pool;
       const isProviderRegistered = await isRegisteredProvider(provider, db);
       if (!isProviderRegistered) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_key",
+            message: `Provider "${provider}" is not registered`,
+          },
+          request.log,
+        );
         throw forbidden(
           `Provider "${provider}" is not a registered oracle provider`,
         );
@@ -646,6 +757,16 @@ export function registerOracleRoutes(
       // Issue #439: Validate market preconditions
       const market = await getMarketById(marketId, db);
       if (!market) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_request",
+            message: `Market ${marketId} does not exist`,
+          },
+          request.log,
+        );
         throw notFound(`Market ${marketId} does not exist`);
       }
       if (market.resolved) {

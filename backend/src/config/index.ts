@@ -82,17 +82,44 @@ export const envSchema = z.object({
   ORACLE_API_KEY: z.string().optional(),
 });
 
-const result = envSchema.safeParse(process.env);
+type EnvConfig = z.infer<typeof envSchema>;
 
-if (!result.success) {
-  const issues = result.error.issues
-    .map((i) => `  ${i.path.join(".")}: ${i.message}`)
-    .join("\n");
-  process.stderr.write(
-    `[ipredict-backend] invalid configuration:\n${issues}\n`,
-  );
-  process.exit(1);
+let cached: EnvConfig | null = null;
+let cachedError: Error | null = null;
+
+/**
+ * Validates the environment and returns the parsed configuration.
+ *
+ * The config is validated lazily on first access so importing this module (or
+ * anything that transitively imports it — e.g. `db/pool.ts`) does not throw or
+ * exit the process when `DATABASE_URL` is unset. The error only surfaces when a
+ * value is actually consumed, which keeps unit tests that never touch the
+ * database from crashing on import.
+ */
+export function loadConfig(): EnvConfig {
+  if (cached) return cached;
+  if (cachedError) throw cachedError;
+
+  const result = envSchema.safeParse(process.env);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    cachedError = new Error(`[ipredict-backend] invalid configuration:\n${issues}`);
+    throw cachedError;
+  }
+
+  cached = result.data;
+  return cached;
 }
+
+// Lazily-evaluated proxy so `import { config }` call sites keep working
+// unchanged while validation is deferred to first property access.
+export const config: EnvConfig = new Proxy({} as EnvConfig, {
+  get(_target, prop) {
+    return Reflect.get(loadConfig(), prop);
+  },
+});
 
 /**
  * Oracle credentials, resolved once at startup.

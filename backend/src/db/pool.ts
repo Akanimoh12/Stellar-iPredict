@@ -24,11 +24,14 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is required");
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: DEFAULT_POOL_SIZE,
-  idleTimeoutMillis: IDLE_TIMEOUT_MS,
-  connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+// Lazy accessor so `import { pool }` call sites keep working unchanged while
+// the underlying pool is only constructed on first property access. Every
+// property (query, connect, end, on, ...) is forwarded to the lazily-created
+// `Pool`.
+export const pool: Pool = new Proxy({} as Pool, {
+  get(_target, prop) {
+    return Reflect.get(getPool(), prop);
+  },
 });
 
 pool.on("connect", async (client) => {
@@ -84,9 +87,9 @@ export async function query<Row extends object>(
 }
 
 export async function getClient(): Promise<PoolClient> {
-  return pool.connect();
+  return getPool().connect();
 }
 
 export async function shutdown(): Promise<void> {
-  await pool.end();
+  await getPool().end();
 }

@@ -206,20 +206,34 @@ export function registerGracefulShutdown(
     isShuttingDown = true;
     server.log.info({ signal }, "Graceful shutdown started");
 
+    let failure: unknown;
+
     try {
       await server.close();
-      if (shutdownDatabase) {
+    } catch (error) {
+      failure = error;
+      server.log.error({ err: error, signal }, "Error closing HTTP server during shutdown");
+    }
+
+    if (shutdownDatabase) {
+      try {
         const shutdownFn = options.shutdownDatabaseFn ?? (await import("./db/pool.js")).shutdown;
         await shutdownFn();
+      } catch (error) {
+        failure ??= error;
+        server.log.error({ err: error, signal }, "Error closing database pool during shutdown");
       }
+    }
+
+    if (failure) {
+      server.log.error({ err: failure, signal }, "Graceful shutdown failed");
+      if (exitProcess) {
+        process.exit(1);
+      }
+    } else {
       server.log.info({ signal }, "Graceful shutdown complete");
       if (exitProcess) {
         process.exit(0);
-      }
-    } catch (error) {
-      server.log.error({ err: error, signal }, "Graceful shutdown failed");
-      if (exitProcess) {
-        process.exit(1);
       }
     }
   };

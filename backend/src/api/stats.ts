@@ -3,6 +3,7 @@ import type { Redis } from "ioredis";
 import type { Pool } from "pg";
 import { getOrSet } from "../cache/cacheAside.js";
 import { statsKey } from "../cache/cacheKeys.js";
+import { getGlobalStats, type Queryable } from "../db/stats.js";
 
 const STATS_CACHE_TTL = 60;
 
@@ -13,34 +14,22 @@ export interface StatsResponse {
   totalBets: number;
 }
 
+
 export function registerStatsRoutes(
   server: FastifyInstance,
-  pool: Pool,
+  pool: Pool | Queryable,
   redis?: Redis
 ): void {
   server.get("/api/stats", async (_request, reply) => {
     const key = statsKey();
 
     const loader = async (): Promise<StatsResponse> => {
-      const result = await pool.query<{
-        total_markets: string;
-        total_volume: string;
-        total_users: string;
-        total_bets: string;
-      }>(`
-        SELECT
-          (SELECT COUNT(*)::text FROM markets) AS total_markets,
-          (SELECT COALESCE(SUM(total_yes + total_no), 0)::text FROM markets) AS total_volume,
-          (SELECT COUNT(DISTINCT address)::text FROM leaderboard) AS total_users,
-          (SELECT COUNT(*)::text FROM bets) AS total_bets
-      `);
-
-      const row = result.rows[0];
+      const stats = await getGlobalStats(pool);
       return {
-        totalMarkets: Number(row?.total_markets ?? 0),
-        totalVolume: row?.total_volume ?? "0",
-        totalUsers: Number(row?.total_users ?? 0),
-        totalBets: Number(row?.total_bets ?? 0),
+        totalMarkets: stats.totalMarkets,
+        totalVolume: stats.totalVolume,
+        totalUsers: stats.totalUsers,
+        totalBets: stats.totalBets,
       };
     };
 

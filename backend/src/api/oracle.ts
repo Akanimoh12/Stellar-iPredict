@@ -178,66 +178,7 @@ export function buildCanonicalOracleMessage(
   ].join("\n");
 }
 
-/**
- * Verify an oracle submission signature against the claimed `provider`
- * public key using the Stellar SDK.
- *
- * The signature is expected in the base64 form produced by
- * `Keypair.sign(...)`. Any failure (invalid key, malformed signature,
- * mismatched key) returns `false` rather than throwing.
- */
-export function verifyOracleSubmissionSignature(
-  input: OracleVerificationInput,
-  signature: string,
-): boolean {
-  if (!signature) {
-    return false;
-  }
-  const message = buildCanonicalOracleMessage(input);
-  try {
-    // `verify` takes signature *bytes*. Passing the base64 string straight
-    // through — as this did — makes every verification fail, so every
-    // otherwise-valid submission was rejected with 401.
-    return Keypair.fromPublicKey(input.provider).verify(
-      Buffer.from(message, "utf8"),
-      Buffer.from(signature, "base64"),
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Sign the canonical message with a provider keypair (helper for tests/docs). */
-export function signOracleMessage(
-  input: OracleVerificationInput,
-  kp: Keypair,
-): string {
-  const message = buildCanonicalOracleMessage(input);
-  return kp.sign(Buffer.from(message, "utf8")).toString("base64");
-}
-
-/**
- * `outcome` — markets are binary, so this is a closed set (issue #650).
- * Booleans and case-insensitive string spellings (`"yes"`, `"YES "`,
- * `"true"`, `"1"`) are normalised to the canonical `YES` / `NO`; anything
- * else is rejected here with 400. Providers sign the **canonical** value —
- * see `buildCanonicalOracleMessage`.
- */
-const outcomeSchema = z
-  .union([z.string(), z.boolean()])
-  .transform((raw, ctx): "YES" | "NO" => {
-    const normalized = normalizeOutcome(raw);
-    if (normalized === null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `outcome must be one of ${CANONICAL_OUTCOMES.join(
-          ", ",
-        )} (accepts yes/no, true/false, y/n, 1/0 — case-insensitive)`,
-      });
-      return z.NEVER;
-    }
-    return normalized;
-  });
+const DEFAULT_ORACLE_THRESHOLD = 3;
 
 const oracleSubmitBodySchema = z.object({
   marketId: z.number().int().positive(),
@@ -363,7 +304,30 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       },
     },
     async (request, reply) => {
-      const credential = authenticateOracleRequest(request.headers);
+      const expectedApiKey = process.env.ORACLE_API_KEY;
+
+      if (!expectedApiKey) {
+        throw unauthorized("Oracle API key is not configured");
+      }
+
+      const authHeader =
+        request.headers.authorization ||
+        (request.headers["x-api-key"] as string | undefined);
+
+      if (!authHeader) {
+        throw unauthorized("Missing authorization header");
+      }
+
+      let token = authHeader.trim();
+      if (token.startsWith("Bearer ")) {
+        token = token.slice(7).trim();
+      } else if (token.startsWith("API-Key ")) {
+        token = token.slice(8).trim();
+      }
+
+      if (token !== expectedApiKey) {
+        throw unauthorized("Invalid API key");
+      }
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -617,34 +581,6 @@ export function registerOracleRoutes(
               },
             },
           },
-          403: {
-            type: "object",
-            required: ["error"],
-            properties: {
-              error: {
-                type: "object",
-                required: ["code", "message"],
-                properties: {
-                  code: { type: "string" },
-                  message: { type: "string" },
-                },
-              },
-            },
-          },
-          404: {
-            type: "object",
-            required: ["error"],
-            properties: {
-              error: {
-                type: "object",
-                required: ["code", "message"],
-                properties: {
-                  code: { type: "string" },
-                  message: { type: "string" },
-                },
-              },
-            },
-          },
           409: {
             type: "object",
             required: ["error"],
@@ -655,6 +591,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  marketId: { type: "number" },
                 },
               },
             },
@@ -667,7 +604,30 @@ export function registerOracleRoutes(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
       );
 
-      const credential = authenticateOracleRequest(request.headers);
+      const expectedApiKey = process.env.ORACLE_API_KEY;
+
+      if (!expectedApiKey) {
+        throw unauthorized("Oracle API key is not configured");
+      }
+
+      const authHeader =
+        request.headers.authorization ||
+        (request.headers["x-api-key"] as string | undefined);
+
+      if (!authHeader) {
+        throw unauthorized("Missing authorization header");
+      }
+
+      let token = authHeader.trim();
+      if (token.startsWith("Bearer ")) {
+        token = token.slice(7).trim();
+      } else if (token.startsWith("API-Key ")) {
+        token = token.slice(8).trim();
+      }
+
+      if (token !== expectedApiKey) {
+        throw unauthorized("Invalid API key");
+      }
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {

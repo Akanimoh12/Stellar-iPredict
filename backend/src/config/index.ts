@@ -6,8 +6,13 @@ import {
   type OracleCredential,
 } from "./oracleApiKeys.js";
 
-const envSchema = z.object({
-  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+export const envSchema = z.object({
+  DATABASE_URL: z
+    .string({ message: "DATABASE_URL is required" })
+    .min(1, "DATABASE_URL is required"),
+  ORACLE_API_KEY: z
+    .string({ message: "ORACLE_API_KEY is required" })
+    .min(1, "ORACLE_API_KEY is required"),
   PORT: z
     .string()
     .optional()

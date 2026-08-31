@@ -226,6 +226,6 @@ export async function cleanupExpiredNonces(
     RETURNING id
   `;
 
-  const result = await executor.query(queryText, [cutoffTime]);
-  return (result as any).rowCount ?? 0;
+  const result = await executor.query<{ id: number }>(queryText, [cutoffTime]);
+  return result.rows.length;
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AggregatorMetrics, ORACLE_RESOLUTION_LAG_H_METRIC } from "../src/aggregator/metrics.js";
+import {
+  AggregatorMetrics,
+  ORACLE_RESOLUTION_LAG_H_METRIC,
+  assessAggregatorAvailability,
+} from "../src/aggregator/metrics.js";
 
 describe("AggregatorMetrics", () => {
   it("records a resolution and exposes lag in hours", () => {
@@ -159,5 +163,71 @@ describe("AggregatorMetrics", () => {
     for (const line of metrics.serializeAll(ORACLE_RESOLUTION_LAG_H_METRIC)) {
       expect(line).toMatch(/^oracle_resolution_lag_h\{/);
     }
+  });
+});
+
+// ── Aggregator availability (issue #645) ────────────────────────────────────
+describe("assessAggregatorAvailability", () => {
+  const opts = { degradedAfterMs: 15 * 60_000, alertAfterMs: 60 * 60_000 };
+
+  it("is unavailable and alerting when no poll has ever completed", () => {
+    const a = assessAggregatorAvailability({ lastPollCompletedAt: null, now: 1_000, ...opts });
+    expect(a.available).toBe(false);
+    expect(a.degraded).toBe(true);
+    expect(a.shouldAlert).toBe(true);
+    expect(a.level).toBe("critical");
+    expect(a.sinceLastPollMs).toBeNull();
+  });
+
+  it("is available while the last poll is within the degraded threshold", () => {
+    const now = 100 * 60_000;
+    const a = assessAggregatorAvailability({ lastPollCompletedAt: now - 5 * 60_000, now, ...opts });
+    expect(a.available).toBe(true);
+    expect(a.degraded).toBe(false);
+    expect(a.shouldAlert).toBe(false);
+    expect(a.level).toBe("ok");
+  });
+
+  it("degrades after 15m and alerts after 60m", () => {
+    const now = 100 * 60_000;
+    const degraded = assessAggregatorAvailability({ lastPollCompletedAt: now - 20 * 60_000, now, ...opts });
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.shouldAlert).toBe(false);
+    expect(degraded.level).toBe("degraded");
+
+    const alerting = assessAggregatorAvailability({ lastPollCompletedAt: now - 75 * 60_000, now, ...opts });
+    expect(alerting.shouldAlert).toBe(true);
+    expect(alerting.level).toBe("critical");
+  });
+});
+
+describe("AggregatorMetrics availability", () => {
+  it("tracks the last completed poll and clears the failure streak", () => {
+    const m = new AggregatorMetrics();
+    m.recordPollFailure();
+    m.recordPollFailure();
+    expect(m.availability(10_000).consecutiveFailures).toBe(2);
+
+    m.recordPollCompleted(9_000);
+    const a = m.availability(9_500);
+    expect(a.lastPollCompletedAt).toBe(9_000);
+    expect(a.consecutiveFailures).toBe(0);
+    expect(a.available).toBe(true);
+  });
+
+  it("serializeAvailability reports 0 unavailable-seconds while healthy", () => {
+    const m = new AggregatorMetrics();
+    m.recordPollCompleted(1_000);
+    const lines = m.serializeAvailability(2_000);
+    expect(lines).toContain("oracle_aggregator_unavailable_seconds 0");
+    expect(lines).toContain("oracle_aggregator_available 1");
+  });
+
+  it("serializeAvailability reports the stall length once degraded", () => {
+    const m = new AggregatorMetrics();
+    m.recordPollCompleted(0);
+    const lines = m.serializeAvailability(20 * 60_000, { degradedAfterMs: 15 * 60_000, alertAfterMs: 60 * 60_000 });
+    expect(lines).toContain("oracle_aggregator_unavailable_seconds 1200");
+    expect(lines).toContain("oracle_aggregator_available 0");
   });
 });

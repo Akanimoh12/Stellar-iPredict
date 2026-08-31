@@ -430,18 +430,89 @@ What the scripts guarantee:
   it requires typing `restore` at a prompt, or `--yes`. Non-interactively
   without `--yes` it refuses outright.
 
-Schedule it from cron on the host (not in a container — it needs the docker
+### Schedule
+
+Backups run from cron on the host (not in a container — it needs the docker
 socket or a reachable `DATABASE_URL`):
 
 ```cron
+# 03:15 daily — full verified dump, 7-day retention
 15 3 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups ./scripts/backup.sh >> /var/log/ipredict-backup.log 2>&1
+# 04:15 daily — prove the newest dump actually restores
+15 4 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups VERIFY_METRICS_FILE=/var/lib/node_exporter/textfile/ipredict_backup.prom BACKUP_ALERT_WEBHOOK_URL=$ALERT_WEBHOOK_URL ./scripts/verify-backup.sh >> /var/log/ipredict-verify.log 2>&1
 ```
 
-Restore into a scratch database and diff row counts on a schedule. A backup
-nobody has restored is a hypothesis, not a backup.
+- **Frequency:** daily. **Retention:** 7 daily dumps (`BACKUP_RETENTION_DAYS`).
+- **Offsite:** sync `/srv/backups` to object storage after each run (`aws s3
+  sync`, `rclone`) — a backup on the same host is not a backup.
 
-After a restore, re-run migrations so `schema_migrations` matches the code,
-then restart the API and indexer so they reconnect to the rebuilt schema.
+### Verification (not assumed — proven)
+
+[`scripts/verify-backup.sh`](scripts/verify-backup.sh) is the automated restore
+test. It stands up a throwaway `postgres:16` container, restores the newest
+dump into it, checks the result, and tears it down. It exits non-zero — and
+POSTs `{"type":"backup.verification_failed"}` to `$BACKUP_ALERT_WEBHOOK_URL`
+(or `$ALERT_WEBHOOK_URL`) — if any check fails:
+
+- every core table is present (`markets`, `bets`, `events`,
+  `oracle_submissions`, `leaderboard`, `council_votes`, `schema_migrations`);
+- `pg_restore --exit-on-error` completed — no partial restore;
+- the dump's `schema_migrations` count is **≥** the repo's up-migration count
+  (catches a backup taken before a schema change);
+- referential sanity — no `bets` rows orphaned from `markets`.
+
+With `VERIFY_METRICS_FILE` set it writes a Prometheus textfile:
+`ipredict_backup_verify_success`, `..._restore_seconds`,
+`..._dump_age_seconds`, `..._timestamp_seconds`.
+
+```bash
+./scripts/verify-backup.sh                    # newest dump in $BACKUP_DIR
+./scripts/verify-backup.sh /srv/backups/x.dump
+```
+
+### Recovery objectives (measured)
+
+| Objective | Target | How it is measured |
+|---|---|---|
+| **RPO** (max data loss) | ≤ 24h from backup; ~minutes in practice | `dump_age_seconds` from `verify-backup.sh`. Chain-derived rows after the last dump are recoverable by replay (see below), so effective RPO for that state is ~0. |
+| **RTO** (time to restore service) | ≤ 1h | `restore_seconds` from `verify-backup.sh` (dominant term) + migration re-run + service restart. Record the observed number here after each DR drill: `<fill in>`. |
+
+Non–chain-derived state (that which a replay cannot rebuild — see
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery") sets the true RPO floor, which
+is why the daily off-host backup is load-bearing.
+
+### Secondary recovery path — replay from chain
+
+Most state (`markets`, `bets`, resolutions) derives from on-chain events and can
+be rebuilt without a backup by replaying: `indexer … --backfill`, then
+`npm run rebuild:leaderboard`. Bounded by RPC event retention —
+`getBackfillCoverage()` (`indexer/src/backfill.ts`) reports the ledger range a
+replay can currently reach. Full procedure and the reconstructible/not list:
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery".
+
+### After any restore
+
+Re-run migrations so `schema_migrations` matches the code, then restart the API
+and indexer so they reconnect to the rebuilt schema.
+
+## Data retention
+
+Full policy: [`docs/DATA-RETENTION.md`](../docs/DATA-RETENTION.md). Every data
+category has a stated retention period and justification, recorded in the
+`data_retention_policies` table. Operational data is purged automatically;
+audit data (finalized oracle submissions, council votes, disputes) is kept for
+a deliberately long window and only ever removed by a reviewed manual process.
+
+Run the operational sweep daily from cron on the DB host:
+
+```cron
+30 3 * * * psql "$DATABASE_URL" -c "SELECT * FROM enforce_data_retention();" >> /var/log/ipredict-retention.log 2>&1
+```
+
+`enforce_data_retention()` returns a row count per category and is safe to
+re-run. Alert if the log shows no run in 48h, or if `dead_letter_events` /
+`events` row counts grow past their windows (Prometheus: scrape
+`pg_stat_user_tables` or add a small exporter query).
 
 ## Contributing
 

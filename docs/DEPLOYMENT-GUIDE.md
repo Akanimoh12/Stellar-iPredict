@@ -360,3 +360,228 @@ below. Fill these in for your deployment:
 | Status page | `<TBD>` | Authoritative incident status |
 | Discord / Telegram | `<TBD>` | User Q&A during an incident |
 | X / Twitter | `<TBD>` | Broad SEV1 announcements |
+
+---
+
+## Oracle aggregator outage — graceful degradation
+
+Issue #645. If the oracle aggregator stops, markets stop resolving but the rest
+of the platform keeps working. The decision below is deliberate: **surface the
+delay honestly and keep the platform open**, rather than fail silently or lock
+users out.
+
+### Detection
+
+| Signal | Where | Meaning |
+|---|---|---|
+| `oracle_aggregator_unavailable_seconds` | oracle `/metrics` | Seconds since the last completed poll cycle once past the degraded threshold; `0` while healthy. From `AggregatorMetrics.serializeAvailability()`. |
+| `GET /health/live` on the aggregator | oracle health server | `503 { status: "dead" }` once `lastPollCompletedAt` is older than `MAX_POLL_STALE_MS`. |
+| `GET /resolution-status` | backend API | Backend-side inference — counts markets past `end_time + RESOLUTION_GRACE_SECONDS` that are still unresolved and not cancelled. `status`: `on_time` \| `delayed` \| `stalled`. Works even if the aggregator process is unreachable. |
+
+`assessAggregatorAvailability()` (`oracle/src/aggregator/metrics.ts`) is the
+shared definition of "too stale": degraded after 15 min, alert after 60 min
+(both overridable).
+
+### User-facing surface
+
+`GET /api/markets/resolution-status` returns the same `on_time` / `delayed` /
+`stalled` status plus `oldestOverdueSeconds` and `delayedMarketIds`. The
+frontend shows a banner on affected markets — *"Resolution is delayed. This
+market ended <n> ago and is awaiting the oracle."* A user discovering a stalled
+resolution themselves is far more damaging to trust than an acknowledged delay.
+
+### Decision: new markets during an outage
+
+**Market creation stays available.** Markets are created on-chain and the
+backend neither can nor should gate that. Instead:
+
+- the resolution-delay banner is shown at creation time and on every market
+  detail page while `status != on_time`;
+- if the outage is `stalled`, the frontend additionally warns before accepting a
+  new bet on an already-overdue market.
+
+Rationale: blocking creation pushes users to a worse, unmonitored path (raw
+contract calls) and gives no benefit — the honest signal does. Revisit only if
+an outage routinely exceeds the RPC event-retention window (see
+`docs/DEPLOYMENT-GUIDE.md` disaster-recovery notes), which would make new markets
+genuinely unresolvable.
+
+### Alerting
+
+Prometheus (add to `infra/prometheus/`):
+
+```yaml
+- alert: OracleAggregatorUnavailable
+  expr: oracle_aggregator_unavailable_seconds > 3600
+  for: 5m
+  labels: { severity: SEV2 }
+  annotations:
+    summary: "Oracle aggregator has not completed a poll in >1h"
+- alert: MarketResolutionStalled
+  expr: ipredict_resolution_oldest_overdue_seconds > 43200
+  for: 10m
+  labels: { severity: SEV2 }
+  annotations:
+    summary: "Oldest unresolved overdue market >12h — resolution stalled"
+```
+
+Escalate as SEV2 (degraded, no confirmed fund impact) unless a stalled market
+holds user stakes near a claim deadline, which is SEV1.
+
+---
+
+## Database backups & verification
+
+Issue #647. The database holds all derived state — markets, bets, leaderboard,
+oracle submissions, audit records. An unverified backup is an assumption, not a
+recovery plan.
+
+### Procedure & schedule
+
+Operational detail lives in [`infra/README.md` § "Backups"](../infra/README.md#backups).
+Summary:
+
+| | What | When |
+|---|---|---|
+| Backup | `infra/scripts/backup.sh` — verified `pg_dump -Fc` + `.sha256`, 7-day retention, synced offsite | 03:15 daily (cron) |
+| Verification | `infra/scripts/verify-backup.sh` — restores the newest dump into a throwaway Postgres, checks it, tears it down | 04:15 daily (cron) |
+
+`verify-backup.sh` checks: every core table present; `pg_restore
+--exit-on-error` clean (no partial restore); dump `schema_migrations` ≥ repo
+up-migration count (catches a stale backup); no orphaned `bets`. It exits
+non-zero and POSTs `{"type":"backup.verification_failed","severity":"SEV2"}` to
+`$BACKUP_ALERT_WEBHOOK_URL` on failure, and writes Prometheus metrics via
+`VERIFY_METRICS_FILE`.
+
+### Recovery objectives
+
+| Objective | Target | Measured by |
+|---|---|---|
+| **RPO** | ≤ 24h (≈ minutes effective — chain replay covers the gap) | `ipredict_backup_verify_dump_age_seconds` |
+| **RTO** | ≤ 1h | `ipredict_backup_verify_restore_seconds` + migrations + restart; confirm each DR drill |
+
+Record the last drill's observed RTO in `infra/README.md` § "Recovery
+objectives".
+
+### Alerting
+
+```yaml
+- alert: BackupVerificationFailing
+  expr: ipredict_backup_verify_success == 0 or time() - ipredict_backup_verify_timestamp_seconds > 172800
+  for: 15m
+  labels: { severity: SEV2 }
+  annotations:
+    summary: "DB backup verification failed or has not run in 48h"
+```
+
+The webhook alert (`backup.verification_failed`) is the primary signal; the
+Prometheus rule catches the case where the cron job itself stopped running.
+
+---
+
+## Disaster recovery — full state reconstruction
+
+Issue #648. Most database state derives from on-chain events and is in principle
+rebuildable by replaying from the indexer. This section establishes what
+actually is, how long it takes, and where the boundary falls.
+
+### What is reconstructible from chain, and what is not
+
+| State | Table(s) | Reconstructible? | How / why not |
+|---|---|---|---|
+| Markets | `markets` | ✅ within RPC retention | Replayed from `market_created` / `market_resolved` / `market_cancelled` events by `runBackfill()`. |
+| Bets | `bets` | ✅ within RPC retention | Replayed from `bet_placed` events. `bet_count` is recomputed (`npm run backfill:bet-count`). |
+| Leaderboard | `leaderboard` | ✅ always (given `events`) | Pure fold over `events` — `npm run rebuild:leaderboard`. Holds no independent state. |
+| Raw events | `events` | ✅ within RPC retention only | `getEvents` serves a bounded window. Older ledgers cannot be re-fetched — see boundary below. |
+| Oracle submissions | `oracle_submissions` | ⚠️ partial | On-chain `resolve_market` / bond events give outcome + tx, but off-chain workflow fields (`status` transitions, `nonce`, `request_timestamp`, idempotency) are **not** on chain. |
+| Council votes | `council_votes` | ❌ not from chain | Phase 1.5 council votes are recorded off-chain before the on-chain finalize. Backup-only. |
+| Oracle disputes (workflow) | `oracle_disputes` | ⚠️ partial | Challenge/escalation exist on chain; `council_deadline`, internal status do not. |
+| Dead-letter events | `dead_letter_events` | ❌ (and not worth it) | Operational debug data; acceptable to lose. |
+| Idempotency keys / nonces | `idempotency_keys` | ❌ (and not worth it) | Short-TTL operational data; loss only re-opens a brief replay window. |
+| Token balances cache | `token_balances` | ✅ | Re-derivable from chain / re-fetch. |
+
+**Backup-only state** — `council_votes`, off-chain fields of
+`oracle_submissions` and `oracle_disputes` — is exactly the audit-class data
+with 7-year retention (`docs/DATA-RETENTION.md`). Losing it means losing the
+record of *how* a disputed market was decided. This is why the daily off-host
+backup is load-bearing and not merely a convenience.
+
+### The chain-retention boundary
+
+`getEvents` on the Soroban RPC only returns events within the provider's
+retention window (commonly ~7 days on public RPC; longer on a dedicated /
+archival node). Ledgers older than that **cannot** be replayed from chain at
+all. Consequences:
+
+- `events` older than the window → recoverable only from `events` /
+  `events_archive` in a backup.
+- The `events_archive` retention (400 days, migration `0018`) is deliberately
+  set well beyond any RPC window so the archive + a recent backup together
+  cover the full history.
+- Establish your RPC's actual retention and record it here: `<fill in>`.
+  If it is shorter than the backup interval, shorten the backup interval.
+
+`getBackfillCoverage()` (`indexer/src/backfill.ts`) reports the ledger range a
+replay can currently reach for a given database.
+
+### Reconstruction procedure (end to end)
+
+Pre-req: a Postgres instance with the schema applied (`db/migrate` or the
+`migrate` compose profile) but no data, `SOROBAN_RPC_URL` pointing at an RPC
+with the widest available retention, and `MARKET_CONTRACT_ID` set.
+
+1. **Restore the newest verified backup** if one exists (this is the primary
+   path — it recovers backup-only state too):
+   `infra/scripts/restore.sh -d "$DATABASE_URL" <dump>` then re-run migrations.
+   Skip to step 4 if the restore is complete and current.
+2. **Backfill events from chain** (fills gaps since the dump, or everything if
+   there is no dump):
+   `cd indexer && npm run build && node dist/index.js --backfill`
+   Repeat until `getBackfillCoverage().latestLedger` reaches the network head.
+3. **Recompute derived aggregates:**
+   `npm run backfill:bet-count` (bets → `markets.bet_count`), then
+   `npm run rebuild:leaderboard` (events → `leaderboard`).
+4. **Reconcile oracle/council state** that is not on chain: from the backup if
+   available; otherwise from the council audit exports
+   (`npm run audit:export` output kept in cold storage) and the
+   `oracle-monitor` alert history. Mark any market whose off-chain decision
+   record cannot be recovered for manual review before its claim deadline.
+5. **Verify:** run `infra/scripts/verify-backup.sh`-style checks against the
+   rebuilt DB — table row counts sane, no orphan bets, `schema_migrations`
+   current — then bring up the API and indexer (live polling) and confirm
+   `/readyz` and `/resolution-status`.
+
+### Measured rebuild time
+
+Fill in from a real drill (see below). Rough shape on testnet-scale data:
+
+| Step | What determines it | Observed |
+|---|---|---|
+| Restore backup | dump size, `restore_seconds` metric | `<fill in>` |
+| Backfill events | ledgers to replay, RPC rate limits (`fetchWithRetry` backs off on 429) | `<fill in>` |
+| `backfill:bet-count` | row count in `bets` | `<fill in>` |
+| `rebuild:leaderboard` | row count in `events` — `snapshot.durationMs` | `<fill in>` |
+| **Total** | | `<fill in>` — must be ≤ RTO (1h) |
+
+### Testing the procedure (non-production)
+
+Run this as a scheduled quarterly drill against staging, and after any change to
+the indexer's event handlers or the schema:
+
+```bash
+# 1. fresh scratch DB
+createdb ipredict_dr_drill
+DATABASE_URL=postgres://…/ipredict_dr_drill npm --prefix db run migrate
+
+# 2. reconstruct (no backup — worst case, chain only)
+cd indexer
+SOROBAN_RPC_URL=$ARCHIVAL_RPC MARKET_CONTRACT_ID=$MAINNET_MARKET_ID \
+  DATABASE_URL=postgres://…/ipredict_dr_drill node dist/index.js --backfill
+DATABASE_URL=…/ipredict_dr_drill npm run backfill:bet-count
+DATABASE_URL=…/ipredict_dr_drill npm run rebuild:leaderboard   # note durationMs
+
+# 3. diff against production (row counts, a sample of markets/bets, leaderboard top 50)
+```
+
+Record the date, the observed timings, the RPC retention window hit, and any
+state that did not reconstruct. Last drill: `<date>` — result: `<fill in>`.

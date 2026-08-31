@@ -1,3 +1,16 @@
 {
-  "private": true
+  "name": "stellar-ipredict",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "indexer",
+    "oracle",
+    "shared"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@ipredict/shared && npm run build --workspaces --if-present",
+    "typecheck": "npm run build --workspace=@ipredict/shared && npm run typecheck --workspaces --if-present",
+    "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present"
+  }
 }

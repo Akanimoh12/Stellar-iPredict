@@ -10,6 +10,12 @@ the API service, the indexer, and the oracle services.
 Start Postgres + Redis (enough to run the backend and indexer locally):
 
 ```bash
+make up          # from the repo root — waits until both are healthy
+```
+
+or by hand:
+
+```bash
 cd infra
 docker compose -f docker-compose.dev.yml up -d
 ```
@@ -57,6 +63,7 @@ backend stack. It follows the design in
 | `redis` | Cache + rate-limiter store, persisted per [`redis.conf`](redis.conf) | 1 |
 | `api` | REST API (`backend/`) | `API_REPLICAS`, default 3 |
 | `indexer` | Soroban event indexer (`indexer/`) | 1, always |
+| `proxy` | Caddy reverse proxy / TLS termination in front of `api` | 1 |
 | `oracle-aggregator` | Council tally and on-chain finalization (`oracle/`) | 1 |
 | `oracle-monitor` | Read-only oracle watchdog and alerting (`oracle/`) | 1 |
 | `log-collector` | Aggregates container logs with Fluent Bit | 1 |
@@ -65,14 +72,28 @@ backend stack. It follows the design in
 ```bash
 cd infra
 cp .env.example .env          # then fill in every CHANGE_ME value
+./scripts/deploy.sh           # migrate, then bring up the whole stack
+```
+
+[`scripts/deploy.sh`](scripts/deploy.sh) runs DB migrations **before** any
+application service starts, then brings up the stack — see
+[Deploy flow](#deploy-flow). For a plain compose bring-up without the explicit
+migration step (e.g. first boot, where the postgres container already applies
+`db/migrations`), the equivalent is:
+
+```bash
 docker compose -f docker-compose.production.yml up -d --build
 docker compose -f docker-compose.production.yml ps
 ```
 
-The API replicas take one host port each from `API_PORT_RANGE` (4000–4002 by
-default) so a load balancer can address them individually and you can roll one
-replica at a time. Postgres and Redis publish no host port at all: they are
-reachable only from inside the compose network.
+The **only public entry point is the `proxy`** service: Caddy terminates TLS
+on ports 80/443 and forwards to the API — see
+[Reverse proxy and TLS](#reverse-proxy-and-tls). The API replicas each bind
+one loopback-only host port from `API_PORT_RANGE` (4000–4002 by default) so
+you can address one replica at a time for debugging and rolling updates
+without exposing anything unencrypted to the world. Postgres and Redis
+publish no host port at all: they are reachable only from inside the compose
+network.
 
 ### Single indexer instance
 
@@ -96,6 +117,7 @@ restarts, database working-set size, and indexer lag before changing them.
 |---|---:|---:|
 | API | 1.00 | 512 MiB |
 | Indexer | 0.75 | 384 MiB |
+| Proxy (Caddy) | 0.25 | 128 MiB |
 | Postgres | 1.00 | 1 GiB |
 | Redis | 0.50 | 256 MiB |
 | Oracle aggregator | 0.50 | 384 MiB |
@@ -128,22 +150,6 @@ INDEXER_IMAGE_TAG=implementation-drips-a1b2c3d \
 ORACLE_IMAGE_TAG=v1.4.0 \
 docker compose -f docker-compose.production.yml up -d --no-build
 ```
-
-> **Known issue — the `indexer` image does not build today.** This is
-> pre-existing on `implementation-drips` and unrelated to the compose file:
-> `indexer/` does not typecheck, so its Dockerfile's `npm run build` fails.
-> Six errors, three causes — `zod` is imported by
-> `indexer/src/config/index.ts` but is not in `indexer/package.json`;
-> `indexer/src/backfill.ts` imports a `pool` export that `./db.js` does not
-> have; and `handlers/claim.ts` and `handlers/reward_points.ts` pass a
-> `CacheClient` where `RedisClient` is expected, whose `del` return types
-> disagree. Reproduce with `cd indexer && npm run typecheck`. Every other
-> service builds and comes up. Bring the rest up with:
->
-> ```bash
-> docker compose -f docker-compose.production.yml up -d --build \
->   postgres redis api oracle-aggregator oracle-monitor
-> ```
 
 ### Why the oracle is two services
 
@@ -192,6 +198,81 @@ docker compose -f docker-compose.production.yml --profile migrate run --rm migra
 Both paths run [`scripts/init-db.sh`](scripts/init-db.sh) and both are
 idempotent — already-applied migrations are skipped, and each migration
 commits together with its bookkeeping row.
+
+### Deploy flow
+
+[`scripts/deploy.sh`](scripts/deploy.sh) is the deploy entry point: it runs the
+migration step and then starts the application services, in the right order,
+so api/indexer never boot against a half-migrated schema.
+
+```bash
+cd infra
+./scripts/deploy.sh                        # migrate + full stack
+./scripts/deploy.sh --services api,indexer # migrate, then only those services
+./scripts/deploy.sh --skip-migrate         # deploy without migrating
+./scripts/deploy.sh --no-build             # reuse existing images
+```
+
+What it does, in order:
+
+1. **Data plane.** Starts `postgres`, `redis` and `log-collector` and waits
+   for postgres to report healthy (`--wait`).
+2. **Migrations.** Runs the `migrate` profile (`init-db.sh`) against the
+   running database — the same idempotent path documented above.
+3. **Application services.** Brings up the rest of the stack (api, indexer,
+   oracle-*), or only the services named with `--services` / positional args.
+
+The script reads everything from `infra/.env` (override with `--env-file` or
+`COMPOSE_FILE`), never touches host state outside `infra/`, and is safe to run
+repeatedly and from CI. Passing `--skip-migrate` disables step 2 for
+operations that already applied migrations out of band — use with care.
+
+### Reverse proxy and TLS
+
+The `proxy` service runs [Caddy](https://caddyserver.com/) in front of the
+API and terminates TLS. Config lives entirely in
+[`proxy/`](proxy/): the [`Caddyfile`](proxy/Caddyfile) and a one-line
+[`Dockerfile`](proxy/Dockerfile) that pins the official `caddy:2.11.2-alpine`
+image. Clients reach the stack only over HTTPS; the API's own host ports stay
+bound to `127.0.0.1`, so nothing can bypass the proxy.
+
+**How it proxies.** Caddy forwards everything to `api:4000` on the compose
+network. Docker's built-in DNS resolves `api` round-robin across all API
+replicas, so no explicit upstream list or extra load balancer is needed —
+Caddy just load-balances whatever Docker hands it. Responses are gzip-encoded.
+
+**Local testing (default).** With `PROXY_DOMAIN=localhost` (the default in
+`.env.example`) Caddy serves HTTPS using an internally-trusted certificate:
+
+```bash
+cd infra && ./scripts/deploy.sh
+curl -k https://localhost/healthz     # -> ok (through TLS + proxy)
+curl -k https://localhost/api/v1/...  # -> your API response
+```
+
+`curl -k` is only needed because the localhost certificate is not in your
+system trust store. The proxy's own container healthcheck hits a plain-HTTP
+liveness endpoint on an internal port, so the service reports healthy
+regardless of the TLS certificate state.
+
+**Production.** Set a real domain and a Let's Encrypt account email in
+`infra/.env` and redeploy:
+
+```bash
+PROXY_DOMAIN=api.ipredict.app
+ACME_EMAIL=ops@example.com
+```
+
+Caddy then provisions and renews a Let's Encrypt certificate automatically
+(automatic HTTPS). Requirements: ports 80 and 443 reachable from the
+internet, and a DNS `A`/`AAAA` record pointing at the host. Certificates and
+the ACME account live in the persistent `caddy-data` volume, so restarts do
+not re-issue them.
+
+**Custom internal hostnames.** For a non-public hostname that is not
+`localhost` (e.g. `api.internal`), add `tls internal` to the site block in
+[`proxy/Caddyfile`](proxy/Caddyfile) so Caddy uses its internal CA instead of
+attempting Let's Encrypt.
 
 ## Configuration and secrets
 
@@ -270,10 +351,14 @@ would leave `POST /api/v1/oracle/submit` open rather than disabled.
   (`oracle/src/aggregator/key-rotation.ts`) — rotate the on-chain resolver
   first, then the file.
 - **Beyond one host.** `.env` on disk is the right size of tool for a
-  single-host compose deployment. Anything larger should mount Docker
-  secrets or pull from a manager (Vault, AWS Secrets Manager, SOPS) into the
-  same variable names; nothing in the services reads a file path, so the
-  substitution is a compose-level change only.
+  single-host compose deployment. Anything larger should mount Docker secrets
+  or pull from a manager (Vault, AWS Secrets Manager, SOPS). Every service now
+  resolves `<NAME>_FILE` into `<NAME>` at startup
+  ([`shared/src/secrets.ts`](../shared/src/secrets.ts)), so pointing at a
+  mounted path takes no code change:
+  `RESOLVER_KEY_FILE=/run/secrets/resolver_key`. See
+  [`docs/SECRETS.md`](../docs/SECRETS.md) for the backends, the precedence
+  rules, and the reserved Vault variables.
 - **Never log a secret.** `restore.sh` redacts the password out of the
   connection string before printing it, and the Redis health check reads
   `REDISCLI_AUTH` from the environment so the password never lands in the
@@ -382,15 +467,46 @@ format (the standard Prometheus scrape protocol).
 - `api_request_duration_ms_sum{route}` — sum of all request durations
 - `api_request_duration_ms_count{route}` — total number of requests
 - `api_errors_total{route}` — total number of 5xx responses per route
+- `cache_hit_rate` — gauge, Redis cache hits ÷ lookups since start. `NaN`
+  before the first lookup: a backend that has served no traffic has not
+  achieved a 0% hit rate, and emitting 0 would fire `LowCacheHitRate` on every
+  deploy
+- `cache_hits_total` / `cache_misses_total` — counters, so a dashboard can
+  compute a *windowed* hit rate instead of the lifetime one:
+
+  ```promql
+  sum(rate(cache_hits_total[5m]))
+    / clamp_min(sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])), 0.001)
+  ```
+
+- `cache_namespace_hits_total{namespace}` /
+  `cache_namespace_misses_total{namespace}` — counters, broken down by cache
+  key entity (`market`, `markets`, `leaderboard`, `stats`, `bets`, `other`).
+  The namespace list is closed on purpose: keys embed market ids, so an
+  open-ended label would be one series per market. The per-namespace series use
+  their own metric names rather than a label on `cache_hits_total`, because
+  mixing labelled and unlabelled samples under one metric name makes Prometheus
+  reject the whole scrape
+
+A lookup is any read that consults Redis before falling back to its loader —
+`getOrSet` in [`backend/src/cache/cacheAside.ts`](../backend/src/cache/cacheAside.ts)
+and `cache.get` in [`backend/src/cache/redis.ts`](../backend/src/cache/redis.ts).
+An absent key is a miss; so is a stored value that fails to parse, because the
+caller still paid for the loader. A Redis *error* is neither — counting an
+outage as a cold cache would point the investigation at the wrong thing.
 
 **Example:** After running the backend for a while, visit
-`http://localhost:3000/metrics` (or your configured backend port) to see
-all metrics.
+`http://localhost:4000/metrics` (the default port from `backend/.env.example`,
+override with `PORT`) to see all metrics.
 
 #### Indexer Metrics
 
 The indexer exposes Prometheus metrics at `GET /metrics` on port 9090 (or
-`$METRICS_PORT` if set) in text exposition format.
+`$METRICS_PORT` if set) in text exposition format. The server binds `0.0.0.0`
+(override with `METRICS_HOST`) so a containerized Prometheus can reach it.
+When running the indexer on the host alongside the monitoring stack, set
+`METRICS_PORT=9091` — the code default 9090 is the same host port the
+Prometheus container publishes (see `indexer/.env.example`).
 
 **Metrics exposed:**
 
@@ -404,26 +520,104 @@ The `service` and `operation` labels are intentionally low-cardinality. Other
 services can use the same metric and identify their stable RPC operation with
 those labels. Do not attach URLs, errors, transaction hashes, or market IDs.
 
-**Example:** After running the indexer, visit `http://localhost:9090/metrics`
-to see all metrics.
+**Example:** After running the indexer with `METRICS_PORT=9091`, visit
+`http://localhost:9091/metrics` to see all metrics.
+
+#### Oracle Metrics
+
+The **oracle aggregator** exposes Prometheus metrics at `GET /metrics` on port
+9101 (`$ORACLE_METRICS_PORT`), plus `GET /health` for a compose `healthcheck`.
+Like the indexer's, the server is plain `node:http`
+([`oracle/src/metrics/server.ts`](../oracle/src/metrics/server.ts)) and binds
+`0.0.0.0` by default (`ORACLE_METRICS_HOST`).
+
+**Metrics exposed:**
+
+- `oracle_submissions_total` — counter, rows in `oracle_submissions`
+- `oracle_disputes_total` — counter, rows in `oracle_disputes` (one per
+  disputed market, challenged or escalated)
+- `oracle_resolution_lag_h{market_id}` — gauge, hours from `markets.end_time`
+  to `oracle_submissions.finalized_at`
+- `oracle_up` — gauge, 1 when the collector reached Postgres. Distinct from
+  Prometheus's built-in `up`, which cannot tell a broken collector from an
+  unreachable host
+- `oracle_metrics_last_refresh_timestamp_seconds` — gauge, Unix time of the
+  last successful refresh
+- `oracle_metrics_collection_errors_total` — counter, refreshes that failed
+
+The first three are the names the Grafana oracle dashboard
+([`grafana/oracle.json`](grafana/oracle.json)) already queries, and the ones in
+the catalogue in
+[`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#monitoring).
+
+**Why the aggregator and not the monitor.** Prometheus scrapes one oracle
+target, and the aggregator is the process whose absence is worth alerting on.
+The monitor stays exactly as it is — read-only, no signing credential, no
+listener.
+
+**Why the totals come from Postgres.** `AggregatorMetrics`
+([`oracle/src/aggregator/metrics.ts`](../oracle/src/aggregator/metrics.ts)) is
+an in-process registry: it counts what one process saw since it started.
+Submissions also arrive through the API and the challenge bot, and a restart
+would reset every counter to zero while the rows are still there — a counter
+that resets on deploy makes every `rate()` over it spike. The collector reads
+the totals from Postgres instead, so they survive restarts and do not depend on
+which process handled a given submission.
+
+**Scrapes never query.** A background timer refreshes a cached snapshot every
+`ORACLE_METRICS_REFRESH_MS` (default 15s) and scrapes are served from it, so a
+scrape storm cannot become database load and a slow query cannot stall a
+scrape. A failed refresh keeps the previous snapshot rather than blanking it
+— see `OracleMetricsStale` in [`prometheus/alerts.yml`](prometheus/alerts.yml),
+which is the only thing that distinguishes a stale 200 from a healthy one.
+
+**Cardinality.** `oracle_resolution_lag_h` is labelled by `market_id`, so it
+grows with every market ever finalized. `ORACLE_METRICS_LAG_SERIES` (default
+100) caps it at the most recently finalized markets; the dashboard queries it
+through `avg()`/`max()`, which only needs the recent ones.
+
+**Example:** with the aggregator running, `curl http://localhost:9101/metrics`.
 
 ### Prometheus Configuration
 
-Configure Prometheus to scrape both services by adding to `prometheus.yml`:
+The scrape config lives at
+[`prometheus/prometheus.yml`](prometheus/prometheus.yml) and covers every
+service `/metrics` endpoint:
 
-```yaml
-scrape_configs:
-  - job_name: "ipredict-backend"
-    static_configs:
-      - targets: ["localhost:3000"]
-    metrics_path: "/metrics"
-    scrape_interval: 15s
+| Job | Local target | Service |
+| --- | --- | --- |
+| `prometheus` | `localhost:9090` | Prometheus self-scrape |
+| `ipredict-backend` | `host.docker.internal:4000` | Backend API, `GET /metrics` |
+| `ipredict-indexer` | `host.docker.internal:9091` | Indexer, `GET /metrics` (run it with `METRICS_PORT=9091`) |
+| `ipredict-oracle` | `host.docker.internal:9101` | Oracle aggregator, `GET /metrics` (override with `ORACLE_METRICS_PORT`) |
 
-  - job_name: "ipredict-indexer"
-    static_configs:
-      - targets: ["localhost:9090"]
-    metrics_path: "/metrics"
-    scrape_interval: 15s
+App services run on the host during local development, so the containerized
+Prometheus reaches them via `host.docker.internal`.
+`docker-compose.monitoring.yml` maps that name to the host gateway through
+`extra_hosts`, which is required on Linux. In a full compose deployment
+(`docker-compose.production.yml`), target the Compose service names instead
+(e.g. `api:4000`).
+
+The config loads [`prometheus/alerts.yml`](prometheus/alerts.yml) from
+`rule_files`. Validate the config and the rules before deploying:
+
+```bash
+promtool check config infra/prometheus/prometheus.yml
+promtool check rules infra/prometheus/alerts.yml
+```
+
+The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
+`HighAPILatency`, `DatabaseSlow`, `LowCacheHitRate`, and `OracleMetricsStale`.
+
+`LowCacheHitRate` is written against the *counters*, not the `cache_hit_rate`
+gauge: the gauge averages over the whole process lifetime, so a cache that
+stopped working an hour ago barely moves it. The rule also requires more than
+100 lookups in the window, so a handful of requests at 3am cannot page anyone.
+
+The `MarketStuck` rule expects
+`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
+to be exported. API and database latency must be Prometheus histograms with
+millisecond buckets.
 
 ### Production compose notes
 
@@ -440,33 +634,12 @@ cd infra
 docker compose -f docker-compose.production.yml up -d --build
 ```
 
-If you need to bring an individual component up for debugging (skipping the
-indexer build problems), run the subset explicitly:
+If you need to bring an individual component up for debugging, run the subset
+explicitly:
 
 ```bash
 docker compose -f docker-compose.production.yml up -d postgres redis api
 ```
-
-```
-
-Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:
-
-```yaml
-rule_files:
-  - /etc/prometheus/alerts.yml
-```
-
-Validate the rules before deploying:
-
-```bash
-promtool check rules infra/prometheus/alerts.yml
-```
-
-The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
-`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
-`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
-to be exported. API and database latency must be Prometheus histograms with
-millisecond buckets.
 
 ### Grafana dashboards
 
@@ -513,8 +686,12 @@ alongside your backend service to visualize business metrics in real-time.
 
 #### Prerequisites
 
-1. Backend service running locally on port 3001 (default for `npm run dev`)
-2. Docker and Docker Compose installed
+1. Docker and Docker Compose installed
+2. At least one app service running on the host with its `/metrics` endpoint:
+   - **Backend API** on port 4000 (default from `backend/.env.example`)
+   - **Indexer** with `METRICS_PORT=9091` (the code default 9090 collides with
+     the Prometheus container's published port) and `METRICS_HOST=0.0.0.0`
+   - **Oracle aggregator** on port 9101 (`ORACLE_METRICS_PORT`)
 
 #### Environment Variables (Optional)
 
@@ -541,16 +718,21 @@ cd infra
 docker compose -f docker-compose.monitoring.yml up -d
 ```
 
-2. Start your backend service (in a separate terminal):
+2. Start the app services (in separate terminals), e.g.:
 ```bash
 cd backend
-npm run dev
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict npx tsx src/index.ts
+
+cd indexer
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict \
+METRICS_PORT=9091 npx tsx src/index.ts
 ```
 
 3. Access the services:
    - **Grafana**: http://localhost:3000 (use GRAFANA_ADMIN_PASSWORD env var or default credentials)
    - **Prometheus**: http://localhost:9090
-   - **Backend metrics**: http://localhost:3001/api/metrics
+   - **Backend metrics**: http://localhost:4000/metrics
+   - **Indexer metrics**: http://localhost:9091/metrics (when the indexer runs)
 
 4. In Grafana, the business dashboard should be automatically available with:
    - Market creation rate
@@ -563,19 +745,26 @@ npm run dev
 
 1. **Check Prometheus targets**: 
    - Go to http://localhost:9090/targets
-   - Verify `ipredict-backend` target is UP
+   - Verify `prometheus` and `ipredict-backend` are UP
+   - Verify `ipredict-indexer` is UP when the indexer is running with
+     `METRICS_PORT=9091`
+   - Verify `ipredict-oracle` is UP when the aggregator is running
+
+   Or, from the repo root: `make metrics` curls all three and reports which
+   ones answer.
    
 2. **Test metrics endpoint**:
 ```bash
-curl http://localhost:3001/api/metrics
+curl http://localhost:4000/metrics
 ```
-   Should return Prometheus format with business counters like:
+   Should return Prometheus text format with the backend request histogram, e.g.:
    ```
-   markets_created_total 0
-   bets_placed_total 0
-   volume_xlm_total 0
-   markets_resolved_total 0
+   api_request_duration_ms_bucket{route="GET /metrics",le="5"} 1
+   api_request_duration_ms_sum{route="GET /metrics"} 0.4
+   api_request_duration_ms_count{route="GET /metrics"} 1
    ```
+   With the indexer running, `curl http://localhost:9091/metrics` returns
+   `indexer_lag_ledgers`, `events_processed_total`, and `rpc_errors_total`.
 
 3. **Grafana Dashboard**:
    - Go to http://localhost:3000

@@ -38,6 +38,18 @@ happens on the **`implementation-drips`** branch — not `main`.
 > There is **no CI/GitHub Actions** on this branch yet — checks are manual.
 > Please run typecheck/tests locally before requesting review.
 
+### Pre-PR verification script
+
+Run the one-liner verification script **before opening a PR**:
+
+```bash
+./scripts/verify-all.sh
+```
+
+This runs `npm run typecheck` and `npm test` for **all three Node services** — backend, indexer, and oracle — in a single pass. If any step fails, the script exits non-zero and clearly identifies which service failed.
+
+> **Tip:** The script runs every check regardless of intermediate failures, so you can see the full picture without fix-and-re-run cycles.
+
 For the current host-based local workflow across infra, backend, indexer, frontend, and oracle, use [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
 ## Repo layout
@@ -54,22 +66,35 @@ docs/       Architecture & design docs
 ```
 
 Key references:
+- [Contributor Onboarding](docs/ONBOARDING.md) — guided path for new contributors through starting issues and setup.
 - [API Reference](docs/API.md) — backend HTTP endpoints, request/response schemas, and error formats.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — running, backfilling, and recovering the event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for the API.
+- [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
+- [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram.
+- [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model for keys, bonds, and RPC trust.
+- [Glossary](docs/GLOSSARY.md) — definitions of domain and system terms used across the codebase.
 
 ## Local setup
 
 ```bash
-# 1. Start Postgres + Redis
+# 1. Install backend, indexer, oracle, and shared dependencies
+npm install
+
+# 2. Start Postgres + Redis
 cd infra && docker compose -f docker-compose.dev.yml up -d
 
-# 2. Run a service (example: backend)
+# 3. Run a service (example: backend)
 cd ../backend
 cp .env.example .env
-npm install
 npm run dev
 ```
 
+From the repository root, `npm run typecheck` and `npm test` run checks across all Node workspaces. Service scripts can still be run from their own directories.
+
 The design reference for everything is
 [`docs/ORACLE_AND_BACKEND.md`](docs/ORACLE_AND_BACKEND.md).
+The implemented and target topology is summarized in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+For end-to-end oracle operations (council + optimistic), see
+[`docs/ORACLE_RUNBOOK.md`](docs/ORACLE_RUNBOOK.md).

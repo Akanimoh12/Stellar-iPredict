@@ -14,6 +14,12 @@ services:
       - '--web.enable-lifecycle'
     ports:
       - "9090:9090"
+    extra_hosts:
+      # Map host.docker.internal to the host gateway so Prometheus can scrape
+      # app services running on the host during local development (backend
+      # :4000, indexer metrics :9091). Harmless on Docker Desktop, required
+      # on Linux where host.docker.internal does not exist by default.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml
@@ -33,8 +39,14 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/datasources:/etc/grafana/provisioning/datasources
-      - ./grafana/business.json:/etc/grafana/provisioning/dashboards/business.json
-      - ./grafana/oracle.json:/etc/grafana/provisioning/dashboards/oracle.json
+      # Dashboard JSON files get their own provisioning directory. Mounting
+      # them INTO the ./grafana/dashboards dir mount above nests a file mount
+      # inside a directory mount, which breaks container startup on Docker
+      # Desktop (virtiofs) and is fragile elsewhere. dashboards.yml points its
+      # file provider at this directory.
+      - ./grafana/business.json:/etc/grafana/provisioning/dashboards-json/business.json:ro
+      - ./grafana/oracle.json:/etc/grafana/provisioning/dashboards-json/oracle.json:ro
+      - ./grafana/system.json:/etc/grafana/provisioning/dashboards-json/system.json:ro
     networks:
       - monitoring
     depends_on:

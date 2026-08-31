@@ -102,6 +102,50 @@ Indexes:
 - `idx_events_ledger` on `ledger_seq DESC`
 - `idx_events_tx_hash_event_index` unique on `(tx_hash, event_index)`
 
+## Event archival and retention policy
+
+The `events` table is retained only for the replay window the indexer needs. The default hot retention is `30 days` and older rows are moved to `events_archive` in small batches so regular writes are not stalled by a huge delete.
+
+- Hot rows stay in `events` when `created_at >= NOW() - INTERVAL '30 days'`
+- Older rows are archived using `archive_old_events(retention_days => 30, batch_size => 10000)`
+- The archive table keeps the same event payload and ledger metadata as the hot table for forensic recovery
+- Replay and dedupe remain valid for the retained window because rows kept in `events` still carry the `(tx_hash, event_index)` uniqueness guard
+
+Example archive maintenance job:
+
+```sql
+SELECT archive_old_events(30, 10000);
+```
+
+To recover a historical range after an outage or re-index request:
+
+```sql
+INSERT INTO events (
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+)
+SELECT
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+FROM events_archive
+WHERE created_at BETWEEN :start_ts AND :end_ts
+ON CONFLICT (tx_hash, event_index) DO NOTHING;
+```
+
+This restores only the required date range and keeps the hot table free from stale data.
+
 ### `oracle_submissions`
 
 Tracks oracle submissions for dispute and resolution workflows.
@@ -119,6 +163,53 @@ Tracks oracle submissions for dispute and resolution workflows.
 | `tx_hash` | `CHAR(64)` | Finalization transaction hash |
 | `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
 | `council_votes` | `JSONB` | Council vote records used to resolve the market |
+
+`status` follows the optimistic-oracle lifecycle: `submitted` is the initial
+claim, `challenged` means a larger bond disputed it, `finalized` means the
+claim was accepted, and `rejected` means it was ruled incorrect. The indexer
+writes submissions and challenge/finalization transitions; `updated_at` is
+maintained by the shared database trigger.
+
+### `oracle_disputes`
+
+Stores the bond and escalation details for challenged submissions.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `SERIAL` | Primary key |
+| `market_id` | `INTEGER` | Market under dispute; unique |
+| `submitter` | `VARCHAR(255)` | Original oracle submitter |
+| `challenger` | `VARCHAR(255)` | Wallet that challenged the submission |
+| `outcome` | `VARCHAR(255)` | Disputed outcome |
+| `submitter_bond` | `NUMERIC` | Positive original bond |
+| `challenger_bond` | `NUMERIC` | Positive bond strictly greater than `submitter_bond` |
+| `total_bond` | `NUMERIC` | Combined escrowed bond |
+| `status` | `oracle_dispute_status` | `challenged` or `escalated` |
+| `challenged_at` | `TIMESTAMPTZ` | When the challenge was recorded |
+| `escalated_at` | `TIMESTAMPTZ` | When council escalation was recorded |
+| `council_deadline` | `TIMESTAMPTZ` | Council decision deadline |
+| `created_at` | `TIMESTAMPTZ` | Row creation time |
+| `updated_at` | `TIMESTAMPTZ` | Last update time, set by trigger |
+
+### Oracle relationships and lifecycle
+
+```mermaid
+erDiagram
+    MARKETS ||--o| ORACLE_SUBMISSIONS : receives
+    MARKETS ||--o| ORACLE_DISPUTES : may_have
+    MARKETS ||--o{ COUNCIL_VOTES : receives
+    ORACLE_SUBMISSIONS ||--o| ORACLE_DISPUTES : escalates_to
+    MARKETS { BIGINT id PK }
+    ORACLE_SUBMISSIONS { SERIAL id PK; INTEGER market_id FK; oracle_submission_status status }
+    ORACLE_DISPUTES { SERIAL id PK; INTEGER market_id FK; oracle_dispute_status status }
+    COUNCIL_VOTES { BIGINT market_id FK; CHAR member PK }
+```
+
+The lifecycle is `submitted → challenged → finalized` or `rejected`; an
+unchallenged submission may finalize directly. The oracle/indexer records the
+on-chain events, while the council/resolver is responsible for the final
+decision. See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md) for
+the design rationale and contract API.
 
 Indexes:
 - `idx_oracle_submissions_market_id` unique on `market_id`
@@ -234,6 +325,35 @@ Apply with the migration runner (tracked as its own issue) or manually:
 ```bash
 psql "$DATABASE_URL" -f db/migrations/0001_create_markets.sql
 ```
+
+### Schema drift check
+
+`test/schema-drift.test.ts` applies every up-migration in order against a fresh
+scratch schema, dumps the result with `pg_dump --schema-only`, normalises it for
+ordering, and compares it to the checked-in snapshot
+[`test/schema_drift.snapshot.sql`](./test/schema_drift.snapshot.sql). A mismatch
+fails the suite with a table/column-level diff, so a migration with invalid SQL
+or an unintended schema change is caught instead of shipping silently.
+
+The suite is gated on a reachable Postgres like the backend integration tests:
+when no database is running it is skipped, keeping `npm test` passable on a
+machine without `infra/docker-compose.dev.yml` started.
+
+**Regenerating the snapshot (intentionally):** after adding or editing a
+migration, regenerate the snapshot so the drift check tracks the new schema:
+
+```bash
+cd db
+npm run schema:dump
+```
+
+The command applies the current migration set, dumps the scratch schema, and
+overwrites `test/schema_drift.snapshot.sql`. Commit the regenerated snapshot in
+the same PR as the migration — the drift test fails until it is regenerated.
+
+Connection uses `TEST_DATABASE_URL` → `DATABASE_URL`, defaulting to
+`postgres://ipredict:ipredict@localhost:5432/ipredict_test` (same default as the
+backend integration tests).
 
 ## Local Seed Data
 

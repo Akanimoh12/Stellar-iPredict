@@ -1,169 +1,96 @@
-# iPredict — Architecture
+# iPredict Architecture
 
+This document separates what runs today from the intended production path. The detailed API and oracle design is in [ORACLE_AND_BACKEND.md](ORACLE_AND_BACKEND.md).
 
-## System Overview
+## Current system
 
-iPredict is a decentralized prediction market built on Stellar's Soroban smart contract platform with a Next.js 14 frontend.
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Frontend (Next.js 14)                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │  Pages    │  │  Hooks   │  │  Services    │  │  Wallet Kit   │  │
-│  │  (7 routes)│ │  (9 hooks)│ │  (7 modules) │  │  (Freighter,  │  │
-│  └──────────┘  └──────────┘  └──────┬───────┘  │  xBull,Albedo)│  │
-│                                     │           └───────┬───────┘  │
-└─────────────────────────────────────┼───────────────────┼──────────┘
-                                      │ Soroban RPC       │ Sign TX
-                                      ▼                   ▼
-┌─────────────────────────── Stellar Testnet ─────────────────────────┐
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │               PredictionMarket Contract                     │    │
-│  │  create_market · place_bet · resolve_market · cancel_market │    │
-│  │  claim · get_market · get_odds · withdraw_fees              │    │
-│  │                                                             │    │
-│  │  Calls ──►  IPredictToken.mint()                           │    │
-│  │  Calls ──►  Leaderboard.add_points() / record_bet()        │    │
-│  │  Calls ──►  ReferralRegistry.credit()                      │    │
-│  └─────────────────────────────────────────────────────────────┘    │
-│           │                 │                    │                   │
-│           ▼                 ▼                    ▼                   │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐     │
-│  │ IPredictToken│  │ Leaderboard  │  │  ReferralRegistry     │     │
-│  │  (SAC-like)  │  │              │  │                       │     │
-│  │  mint·burn   │  │  add_points  │  │  register_referral    │     │
-│  │  transfer    │  │  record_bet  │  │  credit (fee split)   │     │
-│  │  balance     │  │  get_top     │  │  get_display_name     │     │
-│  │  set_minter  │  │  get_stats   │  │                       │     │
-│  └──────────────┘  └──────────────┘  └───────────────────────┘     │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Inter-Contract Call Flow
-
-### User Places a Bet (2% fee)
-
-```
-User → PredictionMarket.place_bet(user, market_id, YES, 100 XLM)
+```text
+Users
   │
-  ├─ 1. Validate: market active, side matches existing bet (if any)
-  ├─ 2. Transfer 100 XLM from user to contract
-  ├─ 3. Deduct 2% fee (2 XLM):
-  │     ├─ Check ReferralRegistry.has_referrer(user)
-  │     │   ├── YES: 1.5 XLM → AccumulatedFees, 0.5 XLM → referrer
-  │     │   │   └─ ReferralRegistry.credit(user, 0.5 XLM, 3 bonus_pts)
-  │     │   │        ├─ Send 0.5 XLM to referrer
-  │     │   │        ├─ Leaderboard.add_bonus_pts(referrer, 3)
-  │     │   │        └─ Emit referral_credited event
-  │     │   └── NO:  2 XLM → AccumulatedFees (platform keeps full 2%)
-  │     └─ Net bet: 98 XLM added to YES pool
-  ├─ 4. Leaderboard.record_bet(user) → increment bet counter
-  ├─ 5. Update BettorAt index for the market
-  └─ 6. Emit bet_placed event
+  ▼
+Next.js frontend ───── Soroban RPC ───── Stellar contracts
+                                               │ events
+                                               ▼
+                         Indexer ───────── PostgreSQL
+                                               ▲
+                         Backend API ───────────┘
+                              │
+                            Redis
+
+Data providers ───── Oracle adapters/council ───── Stellar contracts
 ```
 
-### Admin Resolves Market
+- `frontend/` is a Next.js application that reads contracts through Soroban RPC and signs transactions through the user's wallet.
+- `contracts/` contains the prediction market, token, referral, and leaderboard contracts. The prediction market supports direct resolver calls and the optimistic-oracle lifecycle.
+- `indexer/` polls contract events, validates them, and writes market, bet, referral, and oracle state to PostgreSQL. Redis cache entries are invalidated after relevant events.
+- `backend/` exposes the indexed read model through Fastify and uses Redis for caching and rate limiting.
+- `oracle/` contains provider adapters, council aggregation, submission, dispute, audit, and monitoring code.
+- `db/` owns PostgreSQL migrations and seed tooling. `shared/` owns common Node service types, categories, and event topics.
 
-```
-Admin → PredictionMarket.resolve_market(market_id, YES)
-  │
-  ├─ 1. Set market.resolved = true, market.outcome = YES
-  ├─ 2. Store resolution timestamp
-  ├─ 3. No funds move yet (payouts happen at claim time)
-  └─ 4. Emit market_resolved event
-```
+The services exist, but the frontend still has a direct-RPC data path and production deployment remains environment-specific.
 
-### User Claims Rewards
+## Target production system
 
-```
-User → PredictionMarket.claim(user, market_id)
-  │
-  ├─ WINNER (bet matches outcome):
-  │   ├─ 1. Calculate payout: (user_bet / winning_pool) × total_pool
-  │   ├─ 2. Transfer XLM payout to user
-  │   ├─ 3. Leaderboard.add_points(user, 30) — WIN_POINTS
-  │   ├─ 4. IPredictToken.mint(user, 10) — WIN_TOKENS
-  │   └─ 5. Emit reward_claimed event
-  │
-  ├─ LOSER (bet doesn't match outcome):
-  │   ├─ 1. No XLM payout
-  │   ├─ 2. Leaderboard.add_points(user, 10) — LOSE_POINTS
-  │   ├─ 3. IPredictToken.mint(user, 2) — LOSE_TOKENS
-  │   └─ 4. Emit reward_claimed event
-  │
-  └─ CANCELLED:
-      ├─ 1. Refund net bet amount to user
-      └─ 2. Emit reward_claimed event
+```text
+                         read requests
+Users ─── Next.js ─────────────────────────► Backend API ─── Redis
+  │          │                                    │
+  │          └── signed transactions              ▼
+  │                         ┌─────────────── PostgreSQL ◄──── Indexer
+  │                         │                                  ▲
+  └────────────────────────►│ Stellar contracts ─── events ───┘
+                            │        ▲
+Data providers ─► adapters ─┴► oracle council / submitter
+                                     │
+                              challenge + finalize
 ```
 
-### User Registers for Referral (Optional)
+The target moves high-volume reads to the backend while keeping writes non-custodial. The indexer is the only component that projects on-chain events into the database. Oracle providers retain raw, redacted provenance, aggregate outcomes, and submit or challenge resolutions on-chain. PostgreSQL remains rebuildable from contract events; Redis remains disposable.
 
-```
-User → ReferralRegistry.register_referral(user, "CryptoKing", referrer?)
-  │
-  ├─ 1. Store display name
-  ├─ 2. Link referrer (if provided and valid, no self-referral)
-  ├─ 3. Leaderboard.add_bonus_pts(user, 5) — welcome bonus
-  ├─ 4. IPredictToken.mint(user, 1) — welcome token
-  ├─ 5. If referrer provided:
-  │     ├─ Leaderboard.add_bonus_pts(referrer, 5)
-  │     └─ IPredictToken.mint(referrer, 1)
-  └─ 7. Emit referral_registered event
-```
+## Main flows
 
-## Data Flow Summary
+### Market reads
 
-### Storage Layout
+1. The frontend requests markets, bets, profiles, and leaderboard data from the backend.
+2. The backend serves cached data when available and otherwise reads PostgreSQL.
+3. The indexer updates PostgreSQL from finalized Soroban events and invalidates affected cache keys.
 
-| Contract | Key Storage Items |
-|----------|-------------------|
-| **PredictionMarket** | `MarketCount`, `Market(id)`, `Bet(market_id, user)`, `BettorCount(market_id)`, `BettorAt(market_id, index)`, `AccumulatedFees` |
-| **IPredictToken** | `Admin`, `AuthorizedMinter(address) → bool`, `Balance(address)`, `TotalSupply`, `TokenMeta` |
-| **Leaderboard** | `Points(address)`, `TotalBets(address)`, `WonBets(address)`, `LostBets(address)`, `TopPlayers (sorted Vec)` |
-| **ReferralRegistry** | `DisplayName(address)`, `Referrer(address)`, `ReferralCount(address)`, `Earnings(address)`, linked contract IDs |
+### Bets and claims
 
-### Fee Model
+1. The frontend builds a contract call and the user's wallet signs it.
+2. Stellar executes the transaction and emits typed events.
+3. The indexer validates and stores those events; the UI reads the resulting projection from the backend.
 
-| Source | Platform (AccumulatedFees) | Referrer | Total |
-|--------|---------------------------|----------|-------|
-| User has referrer | 1.5% (150 BPS) | 0.5% (50 BPS) | 2.0% |
-| User has no referrer | 2.0% (200 BPS) | 0% | 2.0% |
+### Market resolution
 
-### Reward Model
+1. Category adapters query independent data providers.
+2. The oracle records sources, redacted raw values, confidence, and the decision for audit.
+3. A confident outcome is submitted on-chain. Conflicting or low-confidence outcomes enter manual review.
+4. An unchallenged outcome finalizes after the challenge window; challenged outcomes go to the council.
 
-| Outcome | Points | IPREDICT Tokens | XLM Payout |
-|---------|--------|-----------------|------------|
-| Win | +30 | +10 | proportional share of pool |
-| Lose | +10 | +2 | none |
-| Cancel | 0 | 0 | net bet refund |
-| Register (referral) | +5 | +1 | — |
-| Referrer per bet | +3 | 0 | +0.5% of referred bet |
+## Ownership and boundaries
 
-## Frontend Architecture
+| Component | Owns | Does not own |
+|---|---|---|
+| Frontend | Presentation, wallet interaction, transaction signing | Canonical market state |
+| Contracts | Funds, bets, resolution state, payouts | Search and historical projections |
+| Indexer | Event ingestion and database projections | Contract decisions |
+| Backend | Read APIs, validation, cache and rate limits | User keys or transaction signing |
+| Oracle | External evidence, aggregation, provenance, submissions | Custody of user funds |
+| PostgreSQL | Queryable off-chain projection and audit data | Canonical on-chain state |
+| Redis | Disposable cache and limiter state | Durable records |
 
-```
-Next.js 14 (App Router)
-├── Server Components (pages, layout)
-├── Client Components ('use client')
-│   ├── Data hooks (useMarkets, useLeaderboard, etc.)
-│   ├── Action hooks (useBet, useClaim)
-│   └── Context (WalletProvider via useWallet)
-├── Services Layer
-│   ├── soroban.ts — RPC client, buildAndSendTx
-│   ├── market.ts — PredictionMarket calls
-│   ├── token.ts — IPredictToken calls
-│   ├── leaderboard.ts — Leaderboard calls
-│   ├── referral.ts — ReferralRegistry calls
-│   ├── events.ts — Soroban event polling
-│   └── cache.ts — TTL localStorage cache (ip_ prefix)
-└── Wallet Kit (Freighter, xBull, Albedo)
+## Source layout
+
+```text
+backend/    Fastify read API
+contracts/  Soroban contracts
+db/         PostgreSQL migrations and seed tools
+frontend/   Next.js client
+indexer/    Soroban event ingestion
+oracle/     Data adapters, council, submitter, monitoring
+shared/     Shared TypeScript types and event constants
+infra/      Local and production service configuration
 ```
 
-### Error Handling Strategy
-
-- **React Error Boundaries** wrap every major section (market grid, betting panel, leaderboard table, claim section)
-- **Service-level errors** classified into `AppError` types: `NETWORK`, `WALLET`, `CONTRACT`, `VALIDATION`, `SIMULATION`, `TIMEOUT`
-- **Toast notifications** for transaction success/failure feedback
-- **Graceful fallbacks** — failed contract calls return `null` / empty arrays instead of crashing
+See [LOCAL_DEV.md](LOCAL_DEV.md) for local startup, [API.md](API.md) for endpoints, [INDEXER_RUNBOOK.md](INDEXER_RUNBOOK.md) for indexer operations, and [ORACLE_RUNBOOK.md](ORACLE_RUNBOOK.md) for resolution operations.

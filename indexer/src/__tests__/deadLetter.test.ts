@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deadLetterTableSqL from "../deadLetter.js";
+import { deadLetterTableSql } from "../deadLetter.js";
 
 describe("deadLetter", () => {
   it("exports dead letter table DGL", () => {

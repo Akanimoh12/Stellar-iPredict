@@ -72,6 +72,10 @@ export function betsKey(marketId: MarketId): CacheKey {
   return cacheKey("bets", marketId);
 }
 
+export function oddsKey(id: MarketId): CacheKey {
+  return cacheKey("odds", id);
+}
+
 export const CACHE_TTLS = {
   marketsAll: 30,
   marketsActive: 15,
@@ -79,6 +83,7 @@ export const CACHE_TTLS = {
   leaderboardTop20: 60,
   statsGlobal: 60,
   bets: 30,
+  odds: 30,
 } as const;
 
 export const CACHE_TTL_MS = {
@@ -88,6 +93,7 @@ export const CACHE_TTL_MS = {
   leaderboardTop20: CACHE_TTLS.leaderboardTop20 * 1_000,
   statsGlobal: CACHE_TTLS.statsGlobal * 1_000,
   bets: CACHE_TTLS.bets * 1_000,
+  odds: CACHE_TTLS.odds * 1_000,
 } as const;
 
 export const CACHE_KEYS = {
@@ -97,6 +103,7 @@ export const CACHE_KEYS = {
   leaderboardTop20: leaderboardKey,
   statsGlobal: statsKey,
   bets: betsKey,
+  odds: oddsKey,
 } as const;
 
 export const CACHE_REGISTRY = {
@@ -135,6 +142,12 @@ export const CACHE_REGISTRY = {
     build: betsKey,
     ttl: CACHE_TTLS.bets,
     ttlSeconds: CACHE_TTLS.bets,
+  },
+  odds: {
+    key: oddsKey,
+    build: oddsKey,
+    ttl: CACHE_TTLS.odds,
+    ttlSeconds: CACHE_TTLS.odds,
   },
 } as const;
 

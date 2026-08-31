@@ -2,6 +2,28 @@
 
 This guide is the fastest way to run the current iPredict stack locally.
 
+## The Short Version
+
+Every command below has a `make` target at the repo root. `make` on its own
+lists them all.
+
+```bash
+make install      # dependencies for the workspaces, db, and frontend
+make env          # create any missing .env from its .env.example
+make up           # Postgres + Redis, waits until healthy
+make migrate      # apply db/migrations
+make seed         # local sample markets, bets, leaderboard rows
+make dev-backend  # in one terminal; also dev-indexer, dev-oracle, dev-frontend
+make test         # every Node suite
+```
+
+Overrides are variables: `make up ENV=staging`, `make logs SERVICE=redis`,
+`make migrate DATABASE_URL=postgres://…`. `make db-reset` destroys the volumes
+and rebuilds the database from migrations and seed data.
+
+The rest of this document is what those targets do, for when you need to run a
+step by hand.
+
 ## What Runs Locally
 
 - `infra/` provides Postgres and Redis.

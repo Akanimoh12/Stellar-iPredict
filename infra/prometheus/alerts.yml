@@ -49,3 +49,37 @@ groups:
         annotations:
           summary: Database p99 query latency is above 500 ms
           description: "Database p99 query latency is {{ $value | humanize }} ms."
+
+      # Windowed, not the lifetime cache_hit_rate gauge: the gauge averages
+      # over the whole process lifetime, so a cache that stopped working an
+      # hour ago barely moves it. The rate ratio reacts within the window.
+      # clamp_min keeps a zero-traffic window from dividing by zero, and the
+      # 100-lookup floor stops a handful of requests at 3am from paging anyone.
+      - alert: LowCacheHitRate
+        expr: |
+          (
+            sum(rate(cache_hits_total[10m]))
+            / clamp_min(sum(rate(cache_hits_total[10m])) + sum(rate(cache_misses_total[10m])), 0.001)
+          ) < 0.5
+          and
+          (sum(increase(cache_hits_total[10m])) + sum(increase(cache_misses_total[10m]))) > 100
+        for: 15m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Cache hit rate is below 50%
+          description: "Redis is serving {{ $value | humanizePercentage }} of cache lookups; the rest are hitting Postgres. Check for a key-shape change or over-eager invalidation."
+
+      # The oracle serves scrapes from a cached snapshot, so a broken collector
+      # returns stale numbers with a 200 rather than failing the scrape. Only
+      # this alert distinguishes the two.
+      - alert: OracleMetricsStale
+        expr: (time() - oracle_metrics_last_refresh_timestamp_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: oracle
+        annotations:
+          summary: Oracle metrics have not refreshed in over 5 minutes
+          description: "The oracle metrics collector last succeeded {{ $value | humanizeDuration }} ago; oracle_submissions_total and oracle_disputes_total are stale."

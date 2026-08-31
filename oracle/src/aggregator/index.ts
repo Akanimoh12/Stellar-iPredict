@@ -2,6 +2,25 @@ import { rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
 import { createLogger, type Logger } from "../log.js";
+import {
+  loadOracleMetricsConfig,
+  startOracleMetrics,
+  type OracleMetricsRuntime,
+} from "../metrics/index.js";
+
+export {
+  OracleMetricsCollector,
+  OracleMetricsServer,
+  ORACLE_METRICS_DEFAULT_PORT,
+  collectOracleMetrics,
+  loadOracleMetricsConfig,
+  serializeOracleMetrics,
+  startOracleMetrics,
+  type OracleMetricsConfig,
+  type OracleMetricsRuntime,
+  type OracleMetricsSnapshot,
+  type ResolutionLagSample,
+} from "../metrics/index.js";
 
 export { detectConflict, type ConflictReport } from "./conflict-detection.js";
 export {
@@ -129,10 +148,26 @@ export {
   type SubmissionValidationConfig,
 } from "./submission-validator.js";
 
+import {
+  AggregatorHealthServer,
+  type AggregatorHealthServerOptions,
+  type DependencyCheckResult,
+  type ReadinessCheckResult,
+} from "./health.js";
+
+export {
+  AggregatorHealthServer,
+  type AggregatorHealthServerOptions,
+  type DependencyCheckResult,
+  type ReadinessCheckResult,
+};
+
 export interface AggregatorMarket { id: string; cancelled: boolean; }
 export interface AggregatorDependencies {
   connect(): Promise<void>;
-  listExpiredUnresolvedMarkets(now: Date): Promise<AggregatorMarket[]>;
+  listExpiredUnresolvedMarkets(now: Date, limit?: number, offset?: number): Promise<AggregatorMarket[]>;
+  getBacklogDepth?(now: Date): Promise<number>;
+  checkReadiness?(): Promise<{ db: { ok: boolean; latencyMs?: number; error?: string }; rpc: { ok: boolean; latencyMs?: number; error?: string } }>;
   processMarket(market: AggregatorMarket): Promise<void>;
   close(): Promise<void>;
 }
@@ -148,14 +183,53 @@ export function createProductionDependencies(
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
       logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
     },
-    async listExpiredUnresolvedMarkets(now) {
+    async listExpiredUnresolvedMarkets(now, limit, offset = 0) {
+      if (limit !== undefined && limit > 0) {
+        const result = await database.query<AggregatorMarket>(
+          `SELECT id::text, cancelled FROM markets
+           WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+           ORDER BY end_time ASC, id ASC
+           LIMIT $2 OFFSET $3`,
+          [Math.floor(now.getTime() / 1_000), limit, offset],
+        );
+        return result.rows;
+      }
       const result = await database.query<AggregatorMarket>(
         `SELECT id::text, cancelled FROM markets
          WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
-         ORDER BY end_time ASC`,
+         ORDER BY end_time ASC, id ASC`,
         [Math.floor(now.getTime() / 1_000)],
       );
       return result.rows;
+    },
+    async getBacklogDepth(now) {
+      const result = await database.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM markets
+         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE`,
+        [Math.floor(now.getTime() / 1_000)],
+      );
+      return parseInt(result.rows[0]?.count ?? "0", 10);
+    },
+    async checkReadiness() {
+      const startDb = Date.now();
+      let dbRes: { ok: boolean; latencyMs?: number; error?: string };
+      try {
+        await database.query("SELECT 1");
+        dbRes = { ok: true, latencyMs: Date.now() - startDb };
+      } catch (err) {
+        dbRes = { ok: false, latencyMs: Date.now() - startDb, error: err instanceof Error ? err.message : String(err) };
+      }
+
+      const startRpc = Date.now();
+      let rpcRes: { ok: boolean; latencyMs?: number; error?: string };
+      try {
+        await server.getLatestLedger();
+        rpcRes = { ok: true, latencyMs: Date.now() - startRpc };
+      } catch (err) {
+        rpcRes = { ok: false, latencyMs: Date.now() - startRpc, error: err instanceof Error ? err.message : String(err) };
+      }
+
+      return { db: dbRes, rpc: rpcRes };
     },
     async processMarket() {
       // Threshold evaluation and finalization are composed by follow-up modules.
@@ -169,29 +243,71 @@ export function createProductionDependencies(
 
 export async function runAggregator(
   dependencies: AggregatorDependencies,
-  options: { signal: AbortSignal; pollIntervalMs: number; logger?: Logger },
+  options: {
+    signal: AbortSignal;
+    pollIntervalMs: number;
+    batchSize?: number;
+    logger?: Logger;
+    onIterationComplete?: (timestamp: number) => void;
+  },
 ): Promise<void> {
   const logger = options.logger;
   await dependencies.connect();
   try {
     while (!options.signal.aborted) {
       const startedAt = Date.now();
-      const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
-      for (const market of markets) {
+      const now = new Date();
+      const backlogDepth = dependencies.getBacklogDepth ? await dependencies.getBacklogDepth(now) : undefined;
+      
+      let marketsChecked = 0;
+      let offset = 0;
+      const batchSize = options.batchSize;
+
+      for (;;) {
         if (options.signal.aborted) break;
-        await dependencies.processMarket(market);
+
+        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, offset);
+        if (batch.length === 0) break;
+
+        for (const market of batch) {
+          if (options.signal.aborted) break;
+          try {
+            await dependencies.processMarket(market);
+          } catch (error) {
+            logger?.error("error processing market in aggregator poll", {
+              marketId: market.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          marketsChecked += 1;
+        }
+
+        if (batchSize === undefined || batchSize <= 0 || batch.length < batchSize) {
+          break;
+        }
+        offset += batchSize;
       }
+
+      const completedAt = Date.now();
+      options.onIterationComplete?.(completedAt);
+
       logger?.info("poll iteration complete", {
-        marketsChecked: markets.length,
-        durationMs: Date.now() - startedAt,
+        marketsChecked,
+        backlogDepth,
+        durationMs: completedAt - startedAt,
       });
+
       if (!options.signal.aborted) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, options.pollIntervalMs);
-          options.signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve();
-          }, { once: true });
+          options.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
         });
       }
     }
@@ -207,14 +323,61 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+
+  let metrics: OracleMetricsRuntime | undefined;
+  let healthServer: AggregatorHealthServer | undefined;
+  let lastPollCompletedAt: number | null = null;
+
+  const dependencies = createProductionDependencies(config, logger);
+
   try {
-    await runAggregator(createProductionDependencies(config, logger), {
+    try {
+      metrics = await startOracleMetrics({
+        config: loadOracleMetricsConfig(env),
+        databaseUrl: config.DATABASE_URL,
+        logger,
+      });
+    } catch (error) {
+      logger.error("oracle metrics endpoint failed to start", { error });
+    }
+
+    if (config.HEALTH_ENABLED) {
+      try {
+        healthServer = new AggregatorHealthServer({
+          port: config.HEALTH_PORT,
+          host: config.HEALTH_HOST,
+          maxStaleMs: config.MAX_POLL_STALE_MS,
+          getLastPollCompletedAt: () => lastPollCompletedAt,
+          checkReadiness: async () => {
+            if (dependencies.checkReadiness) {
+              return dependencies.checkReadiness();
+            }
+            return {
+              db: { ok: true },
+              rpc: { ok: true },
+            };
+          },
+          logger,
+        });
+        await healthServer.start();
+      } catch (error) {
+        logger.error("oracle health endpoint failed to start", { error });
+      }
+    }
+
+    await runAggregator(dependencies, {
       signal: controller.signal,
       pollIntervalMs: config.POLL_INTERVAL_MS,
+      batchSize: config.AGGREGATOR_BATCH_SIZE,
       logger,
+      onIterationComplete: (timestamp) => {
+        lastPollCompletedAt = timestamp;
+      },
     });
   } finally {
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
+    await healthServer?.stop();
+    await metrics?.stop();
   }
 }

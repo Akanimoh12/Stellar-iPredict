@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import type { Pool } from "pg";
-import { Keypair } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import { badRequest, unauthorized, conflict, forbidden, notFound } from "../lib/errors.js";
 import {
@@ -130,6 +130,43 @@ export function signOracleMessage(
 }
 
 /**
+ * Resolves the configured API keys. `ORACLE_API_KEYS` is a comma-separated list
+ * (the primary, intended config). `ORACLE_API_KEY` is kept as a single-value
+ * backward-compatible fallback; if neither is set the well-known development key
+ * is used so local `npm run dev` still works.
+ */
+export function resolveApiKeys(): string[] {
+  const raw = process.env.ORACLE_API_KEYS?.trim();
+  if (raw) return raw.split(",").map((k) => k.trim()).filter(Boolean);
+
+  const single = process.env.ORACLE_API_KEY?.trim();
+  if (single) return [single];
+
+  return [DEFAULT_DEV_API_KEY];
+}
+
+/** Extracts the bearer/api-key token from an Authorization header (or x-api-key). */
+export function extractApiKey(authHeader: string | undefined): string | undefined {
+  if (authHeader === undefined) return undefined;
+  let token = authHeader.trim();
+  if (token.startsWith("Bearer ")) token = token.slice(7).trim();
+  else if (token.startsWith("API-Key ")) token = token.slice(8).trim();
+  return token.length > 0 ? token : undefined;
+}
+
+/** Returns the key that matched, or throws `unauthorized`. */
+export function authenticateApiKey(authHeader: string | undefined): string {
+  const token = extractApiKey(authHeader);
+  if (token === undefined) throw unauthorized("Missing authorization header");
+
+  const keys = resolveApiKeys();
+  for (const key of keys) {
+    if (compareSecretValues(token, key)) return key;
+  }
+  throw unauthorized("Invalid API key");
+}
+
+/**
  * `outcome` — markets are binary, so this is a closed set (issue #650).
  * Booleans and case-insensitive string spellings (`"yes"`, `"YES "`,
  * `"true"`, `"1"`) are normalised to the canonical `YES` / `NO`; anything
@@ -156,10 +193,13 @@ const oracleSubmitBodySchema = z.object({
   marketId: z.number().int().positive(),
   outcome: outcomeSchema,
   signature: z.string().min(1),
-  provider: z.string().min(1),
-  nonce: z.string().min(1).optional(),
-  timestamp: z.number().int().positive().optional(),
+  provider: z.string().refine(StrKey.isValidEd25519PublicKey, {
+    message: "provider must be a Stellar account public key (G...)",
+  }),
+  nonce: z.string().min(1),
+  timestamp: z.number().int().positive(),
 });
+
 
 /**
  * Oracle routes as a Fastify plugin for proper versioning.
@@ -279,22 +319,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       const authHeader =
         request.headers.authorization ||
         (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
-
-      if (!authHeader) {
-        throw unauthorized("Missing authorization header");
-      }
-
-      let token = authHeader.trim();
-      if (token.startsWith("Bearer ")) {
-        token = token.slice(7).trim();
-      } else if (token.startsWith("API-Key ")) {
-        token = token.slice(8).trim();
-      }
-
-      if (!compareSecretValues(token, expectedApiKey)) {
-        throw unauthorized("Invalid API key");
-      }
+      authenticateApiKey(authHeader);
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -398,7 +423,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
           {
             marketId,
             provider,
-            outcome: String(outcome),
+            outcome,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
@@ -590,32 +615,11 @@ export function registerOracleRoutes(
       const authHeader =
         request.headers.authorization ||
         (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
-
-      if (!authHeader) {
-        throw unauthorized("Missing authorization header");
-      }
-
-      let token = authHeader.trim();
-      if (token.startsWith("Bearer ")) {
-        token = token.slice(7).trim();
-      } else if (token.startsWith("API-Key ")) {
-        token = token.slice(8).trim();
-      }
-
-      if (!compareSecretValues(token, expectedApiKey)) {
-        throw unauthorized("Invalid API key");
-      }
+      authenticateApiKey(authHeader);
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
-        return reply.status(400).send({
-          error: {
-            code: "BAD_REQUEST",
-            message: "Invalid request body",
-            issues: parsed.error.issues,
-          },
-        });
+        throw badRequest("Invalid request body");
       }
 
       const { marketId, outcome, provider, signature, nonce, timestamp } =
@@ -706,7 +710,7 @@ export function registerOracleRoutes(
           {
             marketId,
             provider,
-            outcome: String(outcome),
+            outcome,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)

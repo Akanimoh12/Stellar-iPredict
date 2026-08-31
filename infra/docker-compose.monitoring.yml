@@ -27,6 +27,28 @@ services:
     networks:
       - monitoring
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ipredict-alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--config.expand-env=true'
+    ports:
+      - "9093:9093"
+    environment:
+      # Default to a no-op local sink so the stack starts without secrets; set
+      # these in infra/.env for real deliveries (see .env.monitoring.example).
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-http://host.docker.internal:8090/ipredict-alerts}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+
   grafana:
     image: grafana/grafana:11.2.0
     container_name: ipredict-grafana
@@ -55,6 +77,7 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
 
 networks:
   monitoring:

@@ -1,0 +1,56 @@
+# Alertmanager configuration for iPredict.
+#
+# Prometheus evaluates the rules in `prometheus/prometheus.yml` (rule_files ->
+# alerts.yml) and forwards every FIRING/REVOCED alert to this receiver.
+# Notifications fan out to a generic webhook and (optionally) a Slack channel.
+#
+# Secrets are never committed: webhook/Slack URLs come from the environment and
+# are expanded at startup, which requires the `--config.expand-env=true` flag
+# on the Alertmanager command line (see docker-compose.monitoring.yml).
+
+global:
+  # How long before Alertmanager stops sending a "resolved" notification.
+  resolve_timeout: 5m
+  # Leave empty unless you want Slack; the compose file surfaces
+  # SLACK_WEBHOOK_URL into this setting.
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+route:
+  # Alerts are grouped per alert/service/severity so a burst of related alerts
+  # (e.g. every backend replica tripping HighAPILatency) arrives as one message.
+  receiver: "webhook"
+  group_by: ["alertname", "service", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts fan out to Slack as well (continue keeps them flowing to
+    # the generic webhook receiver too).
+    - matchers:
+        - severity = "critical"
+      receiver: "on-call-slack"
+      continue: true
+    # Everything else (warning and unlabelled alerts) stays on the webhook.
+    - matchers:
+        - severity =~ "warning|info"
+      continue: true
+
+receivers:
+  - name: "webhook"
+    # Generic JSON webhook. In local monitoring this defaults to a no-op sink on
+    # the host (host.docker.internal) so the stack starts without any secrets;
+    # point ALERT_WEBHOOK_URL at a real endpoint (Slack incoming webhook,
+    # PagerDuty Events API, a custom service) in production.
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        send_resolved: true
+
+  - name: "on-call-slack"
+    # Only used when SLACK_WEBHOOK_URL is set. Slack ignores a notify if its
+    # webhook URL is empty, so this receiver is a no-op in a local smoke test.
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL}"
+        channel: "#ipredict-alerts"
+        send_resolved: true
+        title: '{{ template "slack.default.title" . }}'
+        text: '{{ template "slack.default.text" . }}'

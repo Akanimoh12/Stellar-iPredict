@@ -476,6 +476,14 @@ export function registerOracleRoutes(
   pool?: Pool,
   dbOverride?: Queryable,
 ): void {
+  // Validate that a database is available at registration time, not per-request.
+  // This fails loudly at startup when the route is misconfigured.
+  if (!pool && !dbOverride) {
+    throw new Error(
+      "Oracle routes require a database pool. Pass options.pool to buildServer or dbOverride to registerOracleRoutes.",
+    );
+  }
+
   server.post(
     "/api/oracle/submit",
     {

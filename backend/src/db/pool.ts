@@ -1,32 +1,27 @@
 import { Pool, type PoolClient, type QueryResult } from "pg";
-import { config } from "../config/index.js";
+import { logSlowQuery } from "../lib/log.js";
 
-let poolInstance: Pool | null = null;
+const DEFAULT_POOL_SIZE = Number.parseInt(process.env.DB_POOL_SIZE ?? "10", 10);
+const IDLE_TIMEOUT_MS = Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS ?? "30000", 10);
+const CONNECTION_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_CONNECTION_TIMEOUT_MS ?? "5000",
+  10,
+);
+const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
+  process.env.DB_SLOW_QUERY_THRESHOLD_MS ?? "200",
+  10,
+);
+const STATEMENT_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_STATEMENT_TIMEOUT_MS ?? "30000",
+  10,
+);
+const IDLE_IN_TRANSACTION_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS ?? "60000",
+  10,
+);
 
-/**
- * Builds the shared Postgres pool on first use.
- *
- * The pool (and its connection string) is sourced from the validated `config`
- * module (backend/src/config/index.ts) rather than reading `process.env`
- * again, so pool tuning values come from exactly one place. Pool construction
- * and the connection-string read are deferred until first use so that
- * importing this module — and anything that transitively imports it — does not
- * throw (or exit) when `DATABASE_URL` is unset. The error surfaces clearly on
- * the first actual query instead.
- */
-export function getPool(): Pool {
-  if (!poolInstance) {
-    poolInstance = new Pool({
-      connectionString: config.DATABASE_URL,
-      max: config.DB_POOL_SIZE,
-      idleTimeoutMillis: config.DB_IDLE_TIMEOUT_MS,
-      connectionTimeoutMillis: config.DB_CONNECTION_TIMEOUT_MS,
-    });
-    poolInstance.on("error", (err) => {
-      console.error("Unexpected pool error:", err);
-    });
-  }
-  return poolInstance;
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL environment variable is required");
 }
 
 // Lazy accessor so `import { pool }` call sites keep working unchanged while
@@ -39,11 +34,55 @@ export const pool: Pool = new Proxy({} as Pool, {
   },
 });
 
+pool.on("connect", async (client) => {
+  await client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+  await client.query(`SET idle_in_transaction_session_timeout = ${IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
+});
+
+pool.on("error", (err) => {
+  console.error("Unexpected pool error:", err);
+});
+
+export { pool };
+
+/**
+ * Pool saturation gauges, readable without attaching a debugger.
+ *
+ * `total` is the number of connections currently held by the pool, `idle` how
+ * many are available for immediate reuse, and `waiting` how many requests are
+ * queued because all connections are checked out. A rising `waiting` count is
+ * the first sign of exhaustion.
+ */
+export interface PoolMetrics {
+  total: number;
+  idle: number;
+  waiting: number;
+}
+
+export function getPoolMetrics(): PoolMetrics {
+  return {
+    total: pool.totalCount,
+    idle: pool.idleCount,
+    waiting: pool.waitingCount,
+  };
+}
+
 export async function query<Row extends object>(
   text: string,
   params: (string | number | boolean | null | Date)[],
 ): Promise<QueryResult<Row>> {
-  const result = await getPool().query(text, params);
+  const startedAt = performance.now();
+  const result = await pool.query(text, params);
+  const durationMs = performance.now() - startedAt;
+
+  if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
+    logSlowQuery({
+      query: text,
+      durationMs,
+      thresholdMs: SLOW_QUERY_THRESHOLD_MS,
+    });
+  }
+
   return result as QueryResult<Row>;
 }
 
@@ -54,6 +93,3 @@ export async function getClient(): Promise<PoolClient> {
 export async function shutdown(): Promise<void> {
   await getPool().end();
 }
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);

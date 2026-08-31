@@ -32,6 +32,7 @@ export interface PoliticsMarketParams {
 export interface Market {
   id: string;
   category: AdapterMarketCategory;
+  tags?: string[];
   /** Category-specific query parameters an adapter maps to a provider query. */
   params: Record<string, unknown>;
 }
@@ -58,6 +59,7 @@ export interface AdapterHealth {
 
 export interface DataAdapter {
   readonly id: string;
+  readonly tags?: readonly string[];
   /** Whether this adapter can resolve the given market (category + required params present). */
   supports(market: Market): boolean;
   fetchOutcome(market: Market): Promise<AdapterOutcome>;
@@ -91,10 +93,35 @@ export function isPoliticsMarketParams(
 }
 
 /**
- * Selects data adapters for a market by category. Adapters are tried in
- * registration order, so register primary sources before fallbacks (see
- * the source priority table in docs/ORACLE_AND_BACKEND.md).
+ * Selects data adapters for a market by category and optional metadata tags. Adapters are tried in
+ * registration order, prioritizing tag matches when specified (see the source priority table in docs/ORACLE_AND_BACKEND.md).
  */
+export function selectAdaptersForMarket(
+  market: Market,
+  adapters: readonly DataAdapter[],
+): DataAdapter[] {
+  const supported = adapters.filter((adapter) => adapter.supports(market));
+  if (!market.tags || market.tags.length === 0) {
+    return supported;
+  }
+
+  const normalizedTags = market.tags.map((t) => t.toLowerCase());
+
+  const matchesTag = (adapter: DataAdapter): boolean => {
+    const adapterId = adapter.id.toLowerCase();
+    if (normalizedTags.includes(adapterId)) return true;
+    if (adapter.tags) {
+      return adapter.tags.some((t) => normalizedTags.includes(t.toLowerCase()));
+    }
+    return false;
+  };
+
+  const taggedAdapters = supported.filter(matchesTag);
+  const untaggedAdapters = supported.filter((a) => !matchesTag(a));
+
+  return [...taggedAdapters, ...untaggedAdapters];
+}
+
 export class AdapterRegistry {
   private readonly adapters: DataAdapter[] = [];
 
@@ -102,9 +129,9 @@ export class AdapterRegistry {
     this.adapters.push(adapter);
   }
 
-  /** Adapters that support this market, in registration order. */
+  /** Adapters that support this market, selecting by category + tags in priority order. */
   adaptersFor(market: Market): DataAdapter[] {
-    return this.adapters.filter((adapter) => adapter.supports(market));
+    return selectAdaptersForMarket(market, this.adapters);
   }
 
   getById(id: string): DataAdapter | undefined {

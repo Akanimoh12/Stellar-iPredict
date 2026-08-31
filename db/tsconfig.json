@@ -11,6 +11,6 @@
     "types": ["node", "vitest/globals"],
     "noEmit": true
   },
-  "include": ["*.ts", "test/*.ts"],
+  "include": ["*.ts", "scripts/*.ts", "test/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -326,3 +326,37 @@ After deployment, verify each feature end-to-end:
 | `WASM too large` | Ensure `[profile.release]` has `opt-level = "z"` and `lto = true` |
 | `Wallet not connecting` | Ensure Freighter is on Testnet network |
 | `Build fails` | Run `rustup target add wasm32v1-none` (Stellar CLI v25+ requires this target) |
+
+---
+
+## Incident Response
+
+The above table is for deploy-time hiccups. A **production incident** —
+anything that could lock or lose user funds (a stuck market holding stakes, a
+bond discrepancy, an unresolvable dispute) — follows the procedure in
+[`oracle/docs/COUNCIL_RUNBOOK.md` § "Incident Response"](../oracle/docs/COUNCIL_RUNBOOK.md#incident-response):
+
+- **Severity** — SEV1 (funds at risk/locked), SEV2 (degraded, no confirmed
+  fund impact), SEV3 (transient). **Anything touching user funds is SEV1.**
+  The aggregator's `oracle.aggregator.submit_failed` webhook carries the
+  computed `severity`.
+- **Escalation** — on-call operator is the Incident Commander; SEV1 pages the
+  IC + Oracle lead + Protocol/Funds owner, and any fund-movement action is
+  authorized through the council multisig, not a single key.
+- **User communication** — SEV1: first status within 1 hour, hourly updates,
+  a resolved post stating plainly whether funds were at risk or lost.
+- **Post-incident review** — blameless, within 5 business days of a SEV1/SEV2,
+  published, with owner-and-due-date action items tracked as
+  `production-readiness` issues; fund-safety fixes get a regression test
+  before close.
+
+### Status page & community channels
+
+Incident updates are posted to `<status page URL>` and the community channels
+below. Fill these in for your deployment:
+
+| Channel | URL | Used for |
+|---|---|---|
+| Status page | `<TBD>` | Authoritative incident status |
+| Discord / Telegram | `<TBD>` | User Q&A during an incident |
+| X / Twitter | `<TBD>` | Broad SEV1 announcements |

@@ -54,7 +54,7 @@ export interface GracefulShutdownOptions {
 }
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
-  const databasePool = options.pool as any;
+  const databasePool = options.pool;
   const redis = options.redis;
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import type { FastifyInstance } from "fastify";
 
 import { buildServer } from "../src/server.js";
@@ -124,6 +124,95 @@ export async function truncateAll(pool: Pool): Promise<void> {
   await pool.query(
     `TRUNCATE TABLE ${MANAGED_TABLES.join(", ")} RESTART IDENTITY CASCADE`
   );
+}
+
+/**
+ * A client running inside a single PostgreSQL transaction that is rolled back
+ * at the end of the test.
+ *
+ * The route code only ever calls `.query()`, so a wrapper with that one method is
+ * enough to stand in for the real `Pool` — the integration tests exercise the
+ * real schema, real migrations and real constraint enforcement without ever
+ * committing a write. Rolling back one transaction per test is faster than
+ * truncating five tables and guarantees no state leaks regardless of test order.
+ */
+export class TestTxn {
+  private readonly client: PoolClient;
+  private readonly release: () => void;
+  private rolledBack = false;
+  private savepointSeq = 0;
+
+  private constructor(client: PoolClient, release: () => void) {
+    this.client = client;
+    this.release = release;
+  }
+
+  static async create(pool: Pool): Promise<TestTxn> {
+    const client = await pool.connect();
+    await client.query("BEGIN");
+    return new TestTxn(client, () => client.release());
+  }
+
+  /**
+   * Runs a query inside a nested SAVEPOINT so that expected failures — e.g. a
+   * UNIQUE constraint violation exercised by the duplicate-submission test —
+   * roll back to the savepoint instead of aborting the whole transaction.
+   * Without this, Postgres poisons the transaction after any error and every
+   * subsequent assertion query fails with "transaction is aborted".
+   */
+  async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
+    const sp = `test_txn_sp_${this.savepointSeq++}`;
+    await this.client.query(`SAVEPOINT ${sp}`);
+    try {
+      const result = await this.client.query(text, values);
+      await this.client.query(`RELEASE SAVEPOINT ${sp}`);
+      return { rows: result.rows as T[] };
+    } catch (err) {
+      await this.client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+      await this.client.query(`RELEASE SAVEPOINT ${sp}`);
+      throw err;
+    }
+  }
+
+  /** Ends the test by rolling back the transaction so nothing is persisted. */
+  async rollback(): Promise<void> {
+    if (this.rolledBack) return;
+    this.rolledBack = true;
+    try {
+      await this.client.query("ROLLBACK");
+    } finally {
+      this.release();
+    }
+  }
+}
+
+export interface TxnTestApp {
+  server: FastifyInstance;
+  pool: Pool;
+  txn: TestTxn;
+}
+
+/**
+ * Boots the real app and wraps every request in a fresh transaction that is
+ * rolled back on {@link closeTxnTestApp}. Mirrors {@link createTestApp} but with
+ * transactional rollback instead of truncation — the recommended approach for
+ * integration tests that must run in any order without manual cleanup.
+ */
+export async function createTxnTestApp(): Promise<TxnTestApp> {
+  const pool = new Pool({ connectionString: getTestDatabaseUrl() });
+  await runMigrations(pool);
+  const txn = await TestTxn.create(pool);
+
+  const server = buildServer({ pool: txn as unknown as Pool, corsOrigins: [] });
+  await server.ready();
+
+  return { server, pool, txn };
+}
+
+export async function closeTxnTestApp(app: TxnTestApp): Promise<void> {
+  await app.server.close();
+  await app.txn.rollback();
+  await app.pool.end();
 }
 
 export interface TestApp {

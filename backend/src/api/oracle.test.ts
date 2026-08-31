@@ -351,7 +351,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
     // Second submission for same market should fail with 409
     // Mock the duplicate constraint error
     const originalQuery = mockDb.query;
-    mockDb.query = async (text: string) => {
+    mockDb.query = async <T>(text: string, _values?: unknown[]): Promise<{ rows: T[] }> => {
       const normalized = text.replace(/\s+/g, " ").trim();
       if (normalized.includes("INSERT INTO oracle_submissions")) {
         const error: any = new Error(
@@ -361,7 +361,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
         error.constraint = "uq_oracle_submissions_market_id";
         throw error;
       }
-      return originalQuery.call(mockDb, text);
+      return originalQuery.call(mockDb, text) as Promise<{ rows: T[] }>;
     };
 
     const res2 = await app.inject({

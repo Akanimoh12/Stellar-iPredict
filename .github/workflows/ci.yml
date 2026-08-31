@@ -46,7 +46,63 @@ jobs:
           path: frontend/.next
           retention-days: 7
 
-  # ── Job 2: Rust contract check & test ──────────────────────────────────────
+  # ── Job 2: Backend integration tests (real Postgres) ────────────────────────
+  backend-integration:
+    name: Backend (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18, 20]
+
+    # A real Postgres 16 for the integration suites. The oracle submission tests
+    # gate on database availability, so this job only runs where the service is
+    # healthy.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/ipredict_test
+      ORACLE_API_KEYS: test-oracle-api-key
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Create test database
+        run: |
+          PGPASSWORD=postgres psql \
+            -h localhost -U postgres -d postgres \
+            -c "CREATE DATABASE ipredict_test;"
+
+      - name: Run backend tests
+        working-directory: backend
+        run: npm test
+
+  # ── Job 3: Rust contract check & test ──────────────────────────────────────
   contract-check:
     name: Contracts (Rust)
     runs-on: ubuntu-latest

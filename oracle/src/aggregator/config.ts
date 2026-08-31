@@ -35,6 +35,12 @@ const schema = z.object({
   /** Initial resolver key for signing finalization transactions. */
   RESOLVER_KEY: optionalEnv(z.string().min(1)),
 
+  /** Deployed prediction-market contract the aggregator resolves against. */
+  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
+
+  /** Network passphrase for signing; defaults to Stellar testnet when unset. */
+  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
+
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
 

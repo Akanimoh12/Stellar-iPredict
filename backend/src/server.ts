@@ -70,6 +70,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   registerMetricsEndpoint(server);
   registerErrorHandler(server);
 
+  // Expose the pool on the instance so plugins that resolve it via the
+  // decorator (e.g. oracleRoutes' `(routes as any).pool`) get the real
+  // pool — or the test transaction wrapper in integration tests.
+  server.decorate("pool", databasePool);
+
   // One error envelope for every failure, including unknown routes and methods.
   // Registered before anything adds a route: the 404/405 handler learns which
   // methods a path accepts from an onRoute hook, which only sees later routes.

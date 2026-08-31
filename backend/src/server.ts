@@ -20,6 +20,7 @@ import {
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
+import { registerStatusRoutes } from "./api/status.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
@@ -174,6 +175,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
 
   // Readiness probe: verifies DB and Redis are reachable.
   server.register(healthRoutes);
+
+  // Public status feed for an external status page. Unversioned alongside the
+  // probes: it publishes operational signals, not the client API contract.
+  registerStatusRoutes(server, databasePool, redis);
 
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:
   // they are infrastructure, not part of the contract clients code against.

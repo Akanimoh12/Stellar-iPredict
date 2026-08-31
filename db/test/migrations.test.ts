@@ -60,4 +60,39 @@ describe('migration prefix uniqueness', () => {
     expect(sql).toContain('CREATE TYPE oracle_submission_status AS ENUM');
     expect(sql).toContain('WHEN duplicate_object THEN NULL;');
   });
+
+  it('adds an events archive table and retention procedure for hot-table cleanup', () => {
+    const sqlPath = path.join(MIGRATIONS_DIR, '0013_events_archival.sql');
+    expect(fs.existsSync(sqlPath)).toBe(true);
+
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS events_archive');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION archive_old_events');
+    expect(sql).toContain('retention_days');
+    expect(sql).toContain('events_archive');
+  });
+
+  it('0018 defines a retention policy registry and an operational enforcement function', () => {
+    const sqlPath = path.join(MIGRATIONS_DIR, '0018_data_retention.sql');
+    expect(fs.existsSync(sqlPath)).toBe(true);
+
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+    // Machine-readable policy, one row per category, with a justification.
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS data_retention_policies');
+    expect(sql).toContain("class IN ('operational', 'audit')");
+    expect(sql).toContain('justification');
+    // Operational purge functions, all batched.
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION purge_dead_letter_events');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION purge_events_archive');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION purge_idempotency_keys');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION purge_stale_oracle_submissions');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION enforce_data_retention');
+    // Purge of stale submissions must only touch rejected ones, never finalized.
+    expect(sql).toContain("s.status = 'rejected'");
+    // Repairs the non-functional 0013 archive_old_events (RETURNING with no INTO).
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION archive_old_events');
+    expect(sql).toContain('SELECT count(*) INTO moved_count FROM deleted');
+    // Down migration exists.
+    expect(fs.existsSync(path.join(MIGRATIONS_DIR, '0018_data_retention.down.sql'))).toBe(true);
+  });
 });

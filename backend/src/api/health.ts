@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { pingDb } from "../db/health.js";
 import { pingRedis } from "../db/redis.js";
+import { getResolutionDelayStatus } from "../db/markets.js";
 
 interface CheckResult {
   ok: boolean;
@@ -97,6 +98,55 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
       };
 
       reply.status(ready ? 200 : 503).send(body);
+    }
+  );
+
+  // ── GET /resolution-status ──────────────────────────────────────────────────
+  // Issue #645: surface oracle-aggregator degradation. A stalled aggregator does
+  // not make the API unhealthy, so this always returns 200 — the signal is in
+  // the body. Alert on `status == "stalled"` or a climbing `oldestOverdueSeconds`
+  // (see docs/DEPLOYMENT-GUIDE.md § "Oracle aggregator outage").
+  server.get(
+    "/resolution-status",
+    {
+      schema: {
+        summary:
+          "Oracle resolution health — detects aggregator unavailability from overdue markets",
+        tags: ["system"],
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              status: { type: "string", enum: ["on_time", "delayed", "stalled"] },
+              overdueMarkets: { type: "number" },
+              oldestOverdueSeconds: { type: ["number", "null"] },
+              delayedMarketIds: { type: "array", items: { type: "number" } },
+              graceSeconds: { type: "number" },
+              checkedAt: { type: "string" },
+            },
+            required: ["status", "overdueMarkets", "oldestOverdueSeconds", "checkedAt"],
+          },
+          503: {
+            type: "object",
+            properties: {
+              status: { type: "string", enum: ["unknown"] },
+              error: { type: "string" },
+            },
+            required: ["status", "error"],
+          },
+        },
+      },
+    },
+    async (_req, reply) => {
+      try {
+        const status = await getResolutionDelayStatus();
+        reply.status(200).send(status);
+      } catch (error) {
+        reply.status(503).send({
+          status: "unknown",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   );
 };

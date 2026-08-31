@@ -108,3 +108,37 @@ export function registerRequestLogging(app: FastifyInstance): void {
     );
   });
 }
+
+/**
+ * Structured slow-query entry emitted by the database layer.
+ *
+ * Only the parameterised SQL text is logged — never the bound values, which
+ * may carry user data and must not reach log aggregators.
+ */
+export interface SlowQueryLogEntry {
+  /** Parameterised SQL text (with `$1`/`$2` placeholders, never bound values). */
+  query: string;
+  /** Measured duration of the query in milliseconds. */
+  durationMs: number;
+  /** Configured threshold in milliseconds that the query exceeded. */
+  thresholdMs: number;
+}
+
+/**
+ * Emit a single-line log entry for a slow database query.
+ *
+ * Lives here so the db layer shares the project's logging conventions without
+ * depending on a Fastify request context (queries can run outside a request —
+ * e.g. indexer backfills). Uses `console.warn` to guarantee exactly one line.
+ */
+export function logSlowQuery(entry: SlowQueryLogEntry): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      msg: "slow db query",
+      durationMs: Math.round(entry.durationMs * 10) / 10,
+      thresholdMs: entry.thresholdMs,
+      query: entry.query,
+    }),
+  );
+}

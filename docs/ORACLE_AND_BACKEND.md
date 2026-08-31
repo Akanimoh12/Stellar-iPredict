@@ -511,6 +511,61 @@ POST /api/oracle/submit
      Response: { accepted: boolean, submissionsNeeded: number }
 ```
 
+### Oracle submission signature (canonical message)
+
+`/api/oracle/submit` (and its versioned `POST /api/v1/oracle/submit`) rejects
+submissions whose `signature` does not verify against the claimed `provider`
+keypair. The endpoint returns `401` and records nothing on failure, so the
+shared API key alone cannot forge an outcome attributed to a provider.
+
+The `signature` is the Stellar SDK ed25519 signature over the **exact** UTF-8
+bytes of this canonical message (LF-separated, no trailing newline, fields in
+this order):
+
+```
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
+```
+
+Rules:
+- `<marketId>` is the integer market id; `<outcome>` is the string form of the
+  outcome (`"YES"` / `"NO"` or any other string value).
+- `<provider>` is the uppercase Stellar public key (G…) claimed in the body.
+- `<timestamp>` is the Unix timestamp in **seconds** from the body — `0` when
+  the body omits it.
+- `<nonce>` is the nonce string from the body — the empty string when omitted.
+  Both timestamp and nonce make the signature non-replayable; providers should
+  send at least one.
+- No other field, whitespace or trailing newline is part of the message.
+
+The endpoint reconstructs this exact message from the request and calls
+`Keypair.fromPublicKey(provider).verify(message, signature)`. The signature is
+the base64 output of `Keypair.sign(message)`.
+
+Minimal signing implementation:
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+const message = [
+  "ipredict-oracle-submit",
+  `market_id:${marketId}`,
+  `outcome:${outcome}`,
+  `provider:${provider}`,
+  `timestamp:${timestamp}`,
+  `nonce:${nonce}`,
+].join("\n");
+
+const signature = kp.sign(Buffer.from(message, "utf8")).toString("base64");
+```
+
+Any change to field order or stringification invalidates existing signatures, so
+keep this exact serialisation when implementing a signer.
+
 ---
 
 ### Caching Strategy

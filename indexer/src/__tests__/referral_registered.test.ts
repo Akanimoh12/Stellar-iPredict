@@ -127,7 +127,7 @@ describe("referral_registered handler", () => {
       expect.stringContaining("INSERT INTO leaderboard"),
       [BOB, 5],
     );
-    expect(redis.del).toHaveBeenCalledWith("leaderboard:top20");
+    expect(redis.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");
   });
 
   it("skips the referrer write when none is supplied", async () => {
@@ -142,6 +142,6 @@ describe("referral_registered handler", () => {
       expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, "Alice", 5],
     );
-    expect(redis.del).toHaveBeenCalledWith("leaderboard:top20");
+    expect(redis.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");
   });
 });

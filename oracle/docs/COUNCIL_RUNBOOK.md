@@ -426,6 +426,106 @@ The `RESOLVER_SECRET_KEY` is used by the aggregator to submit the final on-chain
 
 ---
 
+## Incident Response
+
+*(Issue #649. This is the top-level procedure; the topic-specific playbooks in
+["Troubleshooting"](#troubleshooting) — market not finalizing, incorrect
+outcome finalized, aggregator crashed — are the sub-procedures invoked from
+here.)*
+
+The platform holds user funds and can fail in ways that lock them. Every
+incident follows the same loop: **classify → respond → communicate →
+review**. The review step is not optional — the audit findings this runbook
+exists for were caught by review, not by systematic learning from failures.
+
+### Severity levels
+
+| Severity | Definition | Concrete examples | First response |
+|---|---|---|---|
+| **SEV1** — funds at risk / locked | User stakes cannot move, or an accounting invariant touching funds is violated. **Anything touching user funds is SEV1.** | A market past its end time cannot finalize while it holds staked balances (`stuck-market` monitor firing with a non-zero pool); a dispute bond discrepancy (`bond-reconciliation` / `bond-monitor` flags a mismatch); an unresolvable dispute blocking withdrawal; the resolver key submits an unexpected `resolve_market`. | Page the on-call **immediately**. Consider `pause` on the affected contract path if one exists. Do **not** attempt a fix before the incident channel is open and an IC is named. |
+| **SEV2** — degraded, no confirmed fund impact | Finalization or submission is persistently failing but no funds are confirmed locked; the platform is otherwise up. | The aggregator's `oracle.aggregator.submit_failed` alert with `severity:"SEV2"` (≥5 failed attempts, RPC/contract errors, config problems); council submission intake returning 5xx; indexer lag past threshold. | Alert the on-call (channel, not page). Triage within 30 min. |
+| **SEV3** — transient / low impact | A small number of failures likely to self-resolve; cosmetic or informational. | `submit_failed` alert with `severity:"SEV3"`; a single transient RPC 502; a non-canonical outcome value reported by the audit script (issue #650). | Log and watch. Fix on the normal queue. Escalate to SEV2 if it recurs. |
+
+The aggregator's alert payload carries the computed `severity`
+(`oracle/src/aggregator/alert.ts` → `classifyAlertSeverity`): a market known
+to hold funds, or an error mentioning a bond/stake/balance discrepancy, is
+always SEV1.
+
+### Escalation path
+
+```
+Detection (monitor alert / user report / audit finding)
+        │
+        ▼
+On-call oracle operator  ──assumes Incident Commander (IC) until handoff──
+        │
+   ┌────┴─────────────────────────────┐
+   │ SEV1                             │ SEV2 / SEV3
+   ▼                                  ▼
+ Page: IC + Oracle lead +           Notify: IC + Oracle lead (channel)
+       Protocol/Funds owner
+   │                                  │
+   ▼                                  ▼
+ If funds-movement decision needed:  Triage; fix or schedule per severity.
+   → Council multisig / Protocol
+     owner authorizes pause /
+     bond adjustment / manual
+     resolution.
+```
+
+- **IC** owns the incident: coordinates, is the single source of truth for
+  status, decides when to hand off. Whoever is on-call when the alert fires
+  is IC until handoff. For SEV1 the IC and the person authorizing any
+  fund-movement action **must not be the same person**.
+- **Oracle lead** — confirms root cause in the aggregator / oracle API,
+  prepares the fix, drives the topic-specific troubleshooting sub-procedure.
+- **Protocol / Funds owner** — the only party that authorizes a pause, a
+  bond adjustment, or a manual on-chain resolution. For SEV1 this authority
+  is exercised through the council multisig, not a single key.
+
+### User communication
+
+The IC designates one communicator; nobody else posts externally.
+
+- **SEV1:** first public status within **1 hour**, then hourly updates until
+  resolved, then a "resolved" post. State plainly whether funds were at risk
+  and whether any were lost. Post to the status page and the community
+  channels listed in [`docs/DEPLOYMENT-GUIDE.md`](../../docs/DEPLOYMENT-GUIDE.md).
+- **SEV2 affecting users** (e.g. submissions rejected, dashboard stale):
+  status post within 24h; a resolved note when fixed.
+- **SEV3:** no external communication unless a user asks.
+
+Template — SEV1, market stuck:
+
+> **[iPredict incident — investigating]** Market `<id>` has not finalized past
+> its end time and its staked balance is temporarily locked. Funds are
+> **safe** and remain on-chain; no positions can be lost. We are working with
+> the resolution council to finalize it. Next update by `<UTC time>`.
+
+Never publish an exploit path, a reproduction, or the vulnerable code before a
+fix is deployed and (for SEV1) users have had time to act.
+
+### Post-incident review
+
+Within **5 business days** of resolving a SEV1 or SEV2, the IC runs a
+**blameless** review and publishes it (redacting only live-exploit detail):
+
+1. **Timeline** — detection → containment → root cause → fix → all-clear,
+   with timestamps.
+2. **Impact** — funds at risk / lost (exact figures), users affected,
+   downtime.
+3. **Root cause** and the contributing factors — *why it wasn't caught
+   earlier* is the important question; if an audit would have found it, that
+   is a finding about the review/test process itself.
+4. **What worked / what didn't** in this runbook and the sub-procedures.
+5. **Action items** — each with an owner and a due date, tracked as GitHub
+   issues, labelled `production-readiness`. Anything that changes a
+   fund-safety invariant gets a regression test before the issue is closed.
+
+The review is not closed until every SEV1 action item is done.
+
+---
+
 ## Monitoring & Alerts
 
 ### Key Metrics

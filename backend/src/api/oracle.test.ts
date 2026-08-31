@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { registerOracleRoutes, oracleRoutes } from "./oracle.js";
+import { Keypair } from "@stellar/stellar-sdk";
+import {
+  registerOracleRoutes,
+  oracleRoutes,
+  compareSecretValues,
+  buildCanonicalOracleMessage,
+  verifyOracleSubmissionSignature,
+  signOracleMessage,
+} from "./oracle.js";
 import { registerErrorHandler } from "../lib/errors.js";
 import type { OracleSubmissionRow } from "../db/types.js";
 
@@ -9,6 +17,7 @@ const TEST_API_KEY = "test-oracle-secret-key-123";
 describe("POST /api/oracle/submit (legacy)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];
+  const provider = Keypair.random();
 
   const mockDb = {
     async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
@@ -83,17 +92,13 @@ describe("POST /api/oracle/submit (legacy)", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/oracle/submit",
-      payload: {
-        marketId: 1,
-        outcome: "YES",
-        signature: "0x123",
-        provider: "provider_1",
-      },
+      payload: signedSubmission(provider, 1, "YES"),
     });
 
     expect(res.statusCode).toBe(401);
     const body = res.json();
     expect(body.error.code).toBe("UNAUTHORIZED");
+    expect(submissions.length).toBe(0);
   });
 
   it("returns 401 when authorization token is invalid", async () => {
@@ -103,17 +108,13 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: "Bearer invalid-token",
       },
-      payload: {
-        marketId: 1,
-        outcome: "YES",
-        signature: "0x123",
-        provider: "provider_1",
-      },
+      payload: signedSubmission(provider, 1, "YES"),
     });
 
     expect(res.statusCode).toBe(401);
     const body = res.json();
     expect(body.error.code).toBe("UNAUTHORIZED");
+    expect(submissions.length).toBe(0);
   });
 
   it("returns 400 when body validation fails", async () => {
@@ -132,6 +133,51 @@ describe("POST /api/oracle/submit (legacy)", () => {
     expect(res.statusCode).toBe(400);
     const body = res.json();
     expect(body.error.code).toBe("BAD_REQUEST");
+    expect(submissions.length).toBe(0);
+  });
+
+  it("returns 401 and records nothing for an invalid signature", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 50,
+        outcome: "YES",
+        signature: "garbage-signature",
+        provider: provider.publicKey(),
+      },
+    });
+
+    expect(res.statusCode).toBe(401);
+    const body = res.json();
+    expect(body.error.code).toBe("UNAUTHORIZED");
+    expect(submissions.length).toBe(0);
+  });
+
+  it("returns 401 when signed by a key other than the claimed provider", async () => {
+    const other = Keypair.random();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: {
+        authorization: `Bearer ${TEST_API_KEY}`,
+      },
+      payload: {
+        marketId: 51,
+        outcome: "YES",
+        signature: signOracleMessage(
+          { marketId: 51, outcome: "YES", provider: other.publicKey() },
+          other,
+        ),
+        provider: provider.publicKey(), // claims a different provider
+      },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(submissions.length).toBe(0);
   });
 
   it("records submission and calculates remaining submissions to threshold", async () => {
@@ -140,14 +186,9 @@ describe("POST /api/oracle/submit (legacy)", () => {
       method: "POST",
       url: "/api/oracle/submit",
       headers: {
-        authorization: `Bearer ${TEST_API_KEY}`,
+        authorization: "Bearer test-oracle-api-key",
       },
-      payload: {
-        marketId: 42,
-        outcome: "YES",
-        signature: "sig1",
-        provider: "provider_alpha",
-      },
+      payload: signedSubmission(provider, 42, "YES"),
     });
 
     expect(res1.statusCode).toBe(200);
@@ -163,12 +204,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 42,
-        outcome: "YES",
-        signature: "sig2",
-        provider: "provider_beta",
-      },
+      payload: signedSubmission(provider, 42, "YES"),
     });
 
     expect(res2.statusCode).toBe(200);
@@ -184,12 +220,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 42,
-        outcome: "YES",
-        signature: "sig3",
-        provider: "provider_gamma",
-      },
+      payload: signedSubmission(provider, 42, "YES"),
     });
 
     expect(res3.statusCode).toBe(200);
@@ -206,12 +237,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: `API-Key ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 10,
-        outcome: "NO",
-        signature: "sig_key",
-        provider: "provider_delta",
-      },
+      payload: signedSubmission(provider, 10, "NO"),
     });
 
     expect(res.statusCode).toBe(200);
@@ -226,12 +252,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 99,
-        outcome: "YES",
-        signature: "sig1",
-        provider: "provider_test",
-      },
+      payload: signedSubmission(provider, 99, "YES"),
     });
 
     expect(res1.statusCode).toBe(200);
@@ -258,12 +279,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 99,
-        outcome: "NO",
-        signature: "sig2",
-        provider: "provider_test2",
-      },
+      payload: signedSubmission(provider, 99, "NO"),
     });
 
     expect(res2.statusCode).toBe(409);
@@ -273,9 +289,123 @@ describe("POST /api/oracle/submit (legacy)", () => {
   });
 });
 
+describe("POST /api/oracle/submit — outcome validation (issue #650)", () => {
+  let app: FastifyInstance;
+  let submissions: OracleSubmissionRow[];
+  const provider = Keypair.random();
+
+  const mockDb = {
+    async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
+      const t = text.replace(/\s+/g, " ").trim();
+      if (t.includes("INSERT INTO oracle_submissions")) {
+        const [market_id, submitter, outcome, bond_amount] = (values ?? []) as [
+          number,
+          string,
+          string,
+          string,
+        ];
+        const row: OracleSubmissionRow = {
+          id: submissions.length + 1,
+          market_id,
+          submitter,
+          outcome,
+          bond_amount,
+          submitted_at: new Date(),
+          status: "submitted",
+        };
+        submissions.push(row);
+        return { rows: [row as unknown as T] };
+      }
+      if (t.includes("SELECT COUNT(*)::text AS count FROM oracle_submissions")) {
+        return { rows: [{ count: "0" } as unknown as T] };
+      }
+      return { rows: [] };
+    },
+  };
+
+  /** Sign over the *canonical* outcome (what the handler verifies against). */
+  function submissionSignedCanonical(
+    marketId: number,
+    rawOutcome: unknown,
+    canonical: "YES" | "NO",
+  ): Record<string, unknown> {
+    return {
+      marketId,
+      outcome: rawOutcome,
+      provider: provider.publicKey(),
+      signature: signOracleMessage(
+        { marketId, outcome: canonical, provider: provider.publicKey() },
+        provider,
+      ),
+    };
+  }
+
+  beforeEach(() => {
+    submissions = [];
+    app = Fastify();
+    registerErrorHandler(app);
+    registerOracleRoutes(app, undefined, mockDb);
+  });
+
+  it("rejects an outcome outside the permitted set with 400", async () => {
+    for (const bad of ["maybe", "YES!", "yesno", "2", "  "]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/oracle/submit",
+        headers: { authorization: "Bearer test-oracle-api-key" },
+        payload: {
+          marketId: 7,
+          outcome: bad,
+          provider: provider.publicKey(),
+          signature: "irrelevant-rejected-before-verification",
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("BAD_REQUEST");
+    }
+    expect(submissions.length).toBe(0);
+  });
+
+  it("persists boolean and string spellings of the same outcome identically", async () => {
+    const a = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(11, true, "YES"),
+    });
+    const b = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(12, "yes", "YES"),
+    });
+    const c = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(13, "YES ", "YES"),
+    });
+
+    expect([a.statusCode, b.statusCode, c.statusCode]).toEqual([200, 200, 200]);
+    expect(submissions.map((s) => s.outcome)).toEqual(["YES", "YES", "YES"]);
+  });
+
+  it("normalises false / no to the canonical NO", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/oracle/submit",
+      headers: { authorization: "Bearer test-oracle-api-key" },
+      payload: submissionSignedCanonical(21, false, "NO"),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(submissions[0]?.outcome).toBe("NO");
+  });
+});
+
 describe("POST /api/v1/oracle/submit (versioned)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];
+  const provider = Keypair.random();
 
   const mockDb = {
     async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
@@ -348,18 +478,40 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 1,
-        outcome: "YES",
-        signature: "sig1",
-        provider: "provider_test",
+      payload: signedSubmission(provider, 1, "YES", {
         timestamp: expiredTimestamp,
-      },
+      }),
     });
 
     expect(res.statusCode).toBe(400);
     const body = res.json();
     expect(body.error.message).toContain("Timestamp outside acceptance window");
+    expect(submissions.length).toBe(0);
+  });
+
+  it("accepts a correctly signed submission even when signing a different market", async () => {
+    // A signature over a different market is invalid for the claimed payload.
+    const wrongMarketSig = signOracleMessage(
+      { marketId: 999, outcome: "YES", provider: provider.publicKey() },
+      provider,
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/oracle/submit",
+      headers: {
+        authorization: "Bearer test-oracle-api-key",
+      },
+      payload: {
+        marketId: 1,
+        outcome: "YES",
+        signature: wrongMarketSig,
+        provider: provider.publicKey(),
+      },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(submissions.length).toBe(0);
   });
 
   it("rejects submission with duplicate nonce", async () => {
@@ -373,14 +525,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 1,
-        outcome: "YES",
-        signature: "sig1",
-        provider: "provider_test",
-        nonce,
-        timestamp,
-      },
+      payload: signedSubmission(provider, 1, "YES", { nonce, timestamp }),
     });
 
     expect(res1.statusCode).toBe(200);
@@ -395,14 +540,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 2,
-        outcome: "NO",
-        signature: "sig2",
-        provider: "provider_test",
-        nonce,
-        timestamp,
-      },
+      payload: signedSubmission(provider, 2, "NO", { nonce, timestamp }),
     });
 
     expect(res2.statusCode).toBe(400);
@@ -420,14 +558,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       headers: {
         authorization: `Bearer ${TEST_API_KEY}`,
       },
-      payload: {
-        marketId: 5,
-        outcome: "YES",
-        signature: "sig1",
-        provider: "provider_test",
-        nonce,
-        timestamp,
-      },
+      payload: signedSubmission(provider, 5, "YES", { nonce, timestamp }),
     });
 
     expect(res.statusCode).toBe(200);

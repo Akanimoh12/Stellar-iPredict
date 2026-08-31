@@ -36,6 +36,10 @@ describe("market_cancelled handler", () => {
     await expect(handleMarketCancelledEvent(sampleEvent(), db, redis)).resolves.toEqual({ market_id: 42 });
 
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining("SET cancelled = TRUE"), [42]);
-    expect(redis.del).toHaveBeenCalledWith("market:42", "markets:all", "markets:active");
+    expect(redis.del).toHaveBeenCalledWith(
+      "ipredict:v1:market:42",
+      "ipredict:v1:markets:all",
+      "ipredict:v1:markets:active",
+    );
   });
 });

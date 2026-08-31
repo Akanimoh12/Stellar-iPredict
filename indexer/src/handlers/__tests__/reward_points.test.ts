@@ -91,7 +91,7 @@ describe("handleRewardPoints", () => {
       expect.stringContaining("INSERT INTO leaderboard"),
       [USER, POINTS, 1, 0],
     );
-    expect(context.redis?.del).toHaveBeenCalledWith("leaderboard:top20");
+    expect(context.redis?.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");
   });
 
   it("increments lost_bets when is_winner is false", async () => {

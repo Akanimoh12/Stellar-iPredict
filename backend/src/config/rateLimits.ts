@@ -12,8 +12,9 @@ export interface RateLimitConfig {
  * Values mirror the table in `docs/ORACLE_AND_BACKEND.md §Rate Limiting`.
  */
 export const RATE_LIMITS: Record<string, RateLimitConfig> = {
-  "GET /api/markets":     { requests: 60,  window: 60 },
+  "GET /api/markets": { requests: 60, window: 60 },
   "GET /api/markets/:id": { requests: 120, window: 60 },
-  "POST /api/oracle/*":   { requests: 10,  window: 60 },
-  default:                { requests: 30,  window: 60 },
+  "POST /api/oracle/*": { requests: 10, window: 60 },
+  "POST /api/v1/oracle/submit": { requests: 10, window: 60 },
+  default: { requests: 30, window: 60 },
 };

@@ -1,5 +1,6 @@
 import { schema, ZodValidationError } from "./zod.js";
 import type { infer as Infer } from "./zod.js";
+import { MARKET_CATEGORIES, type MarketCategory } from "@ipredict/shared";
 
 function parseMarketId(value: unknown): number {
   if (typeof value === "number") {
@@ -40,9 +41,6 @@ export const marketCancelledPayloadSchema = schema((value: unknown) => {
 });
 
 export type MarketCancelledPayload = Infer<typeof marketCancelledPayloadSchema>;
-
-const MARKET_CATEGORIES = ["Crypto", "Sports", "Politics", "Entertainment", "Science", "Other"] as const;
-type MarketCategory = (typeof MARKET_CATEGORIES)[number];
 
 function parseUnsignedInteger(value: unknown, field: string): number {
   if (typeof value === "number") {

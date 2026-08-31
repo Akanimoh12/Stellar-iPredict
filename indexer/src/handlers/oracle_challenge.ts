@@ -146,14 +146,16 @@ export async function handleOracleEscalatedEvent(
   });
   if (!inserted) return payload;
 
+  // `total_bond` is a GENERATED column (submitter_bond + challenger_bond,
+  // migration 0015) so it is not written here — the contract's emitted
+  // `total_bond` always equals the sum of the two stored bonds.
   await db.query(
     `UPDATE oracle_disputes
      SET status = 'escalated',
-         total_bond = $2,
-         escalated_at = $3,
-         council_deadline = $4
+         escalated_at = $2,
+         council_deadline = $3
      WHERE market_id = $1 AND status = 'challenged'`,
-    [payload.market_id, payload.total_bond, payload.escalated_at, payload.council_deadline],
+    [payload.market_id, payload.escalated_at, payload.council_deadline],
   );
 
   return payload;

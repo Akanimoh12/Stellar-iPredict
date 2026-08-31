@@ -5,13 +5,20 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
-import { getMarketById, getMarkets, type Queryable, type MarketCategory } from "../db/markets.js";
+import {
+  getMarketById,
+  getMarkets,
+  getResolutionDelayStatus,
+  type Queryable,
+  type MarketCategory,
+} from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import {
   marketKey,
   marketsListKey,
   betsKey,
+  oddsKey,
   CACHE_TTLS,
 } from "../cache/cacheKeys.js";
 
@@ -24,6 +31,7 @@ const MARKET_DETAIL_TTL = 30;
 const MARKETS_ACTIVE_TTL = 15;
 const MARKETS_DEFAULT_TTL = 30;
 const BETS_TTL = CACHE_TTLS.bets; // 30s
+const ODDS_TTL = CACHE_TTLS.odds; // 30s
 
 /**
  * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
@@ -148,6 +156,37 @@ const marketResponseSchema = {
   ],
 } as const;
 
+const oddsResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    market_id: { type: "number" },
+    total_yes: { type: "string" },
+    total_no: { type: "string" },
+    total_pool: { type: "string" },
+    yes_odds: { type: "number" },
+    no_odds: { type: "number" },
+    implied_probability: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        yes: { type: "number" },
+        no: { type: "number" },
+      },
+      required: ["yes", "no"],
+    },
+  },
+  required: [
+    "market_id",
+    "total_yes",
+    "total_no",
+    "total_pool",
+    "yes_odds",
+    "no_odds",
+    "implied_probability",
+  ],
+} as const;
+
 const errorResponseSchema = {
   type: "object",
   additionalProperties: false,
@@ -264,6 +303,125 @@ export function createMarketsRoutes(
       }
 
       return reply.status(200).send(body);
+    }
+  );
+
+  // ── GET /api/markets/resolution-status ────────────────────────────────────
+  // Issue #645: honest, user-facing signal that market resolution is running
+  // late (usually an oracle-aggregator outage). Static path — Fastify matches
+  // it ahead of `/api/markets/:id`.
+  app.get(
+    "/api/markets/resolution-status",
+    {
+      schema: {
+        summary: "Whether market resolution is currently delayed",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: {
+                type: "string",
+                enum: ["on_time", "delayed", "stalled"],
+                description:
+                  "on_time: resolutions current. delayed: some markets overdue. stalled: overdue for a long time — assume an outage.",
+              },
+              overdueMarkets: { type: "number" },
+              oldestOverdueSeconds: { type: ["number", "null"] },
+              delayedMarketIds: { type: "array", items: { type: "number" } },
+              graceSeconds: { type: "number" },
+              checkedAt: { type: "string" },
+            },
+            required: [
+              "status",
+              "overdueMarkets",
+              "oldestOverdueSeconds",
+              "delayedMarketIds",
+              "graceSeconds",
+              "checkedAt",
+            ],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const status = await getResolutionDelayStatus(db);
+      // Short cache — this is a coarse signal and the query hits `markets`.
+      reply.header("Cache-Control", "public, max-age=30");
+      return reply.status(200).send(status);
+    }
+  );
+
+  // ── GET /api/markets/:id/odds ─────────────────────────────────────────────
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id/odds",
+    {
+      schema: {
+        summary: "Get derived odds and implied probabilities for a market",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+        response: {
+          200: oddsResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const calculateOddsPayload = async () => {
+        const market = redis
+          ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, () => getMarketById(id, db))
+          : await getMarketById(id, db);
+
+        if (!market) {
+          throw notFound("Market not found");
+        }
+
+        const totalYes = Number(market.total_yes) || 0;
+        const totalNo = Number(market.total_no) || 0;
+        const totalPool = totalYes + totalNo;
+
+        let yesOdds: number;
+        let noOdds: number;
+
+        if (totalPool <= 0) {
+          yesOdds = 0.5;
+          noOdds = 0.5;
+        } else {
+          yesOdds = Number((totalYes / totalPool).toFixed(4));
+          noOdds = Number((totalNo / totalPool).toFixed(4));
+        }
+
+        return {
+          market_id: market.id,
+          total_yes: market.total_yes,
+          total_no: market.total_no,
+          total_pool: totalPool.toFixed(7),
+          yes_odds: yesOdds,
+          no_odds: noOdds,
+          implied_probability: {
+            yes: yesOdds,
+            no: noOdds,
+          },
+        };
+      };
+
+      return redis
+        ? getOrSet(redis, oddsKey(id), ODDS_TTL, calculateOddsPayload)
+        : calculateOddsPayload();
     }
   );
 

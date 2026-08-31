@@ -19,6 +19,7 @@
     "backfill:bet-count": "tsx src/backfill-bet-count.ts"
   },
   "dependencies": {
+    "@ipredict/shared": "*",
     "@stellar/stellar-sdk": "^14.5.0",
     "ioredis": "^5.4.1",
     "pg": "^8.13.3",

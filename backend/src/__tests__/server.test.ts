@@ -25,6 +25,72 @@ describe("registerGracefulShutdown", () => {
     process.emit("SIGUSR2", "SIGUSR2");
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
+
+  it("closes the database pool exactly once on graceful shutdown", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const shutdownDatabaseFn = vi.fn().mockResolvedValue(undefined);
+    const server = {
+      close,
+      log: {
+        info: vi.fn(),
+        error: vi.fn(),
+      },
+    } as unknown as FastifyInstance;
+
+    registerGracefulShutdown(server, {
+      signals: ["SIGUSR1"],
+      exitProcess: false,
+      shutdownDatabase: true,
+      shutdownDatabaseFn,
+    });
+
+    process.emit("SIGUSR1", "SIGUSR1");
+    process.emit("SIGUSR1", "SIGUSR1");
+
+    await vi.waitFor(() => {
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(shutdownDatabaseFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("closes the database pool even when server.close() fails partway through", async () => {
+    const close = vi.fn().mockRejectedValue(new Error("Failed to drain HTTP connections"));
+    const shutdownDatabaseFn = vi.fn().mockResolvedValue(undefined);
+    const server = {
+      close,
+      log: {
+        info: vi.fn(),
+        error: vi.fn(),
+      },
+    } as unknown as FastifyInstance;
+
+    registerGracefulShutdown(server, {
+      signals: ["SIGUSR2"],
+      exitProcess: false,
+      shutdownDatabase: true,
+      shutdownDatabaseFn,
+    });
+
+    process.emit("SIGUSR2", "SIGUSR2");
+
+    await vi.waitFor(() => {
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(shutdownDatabaseFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("importing db/pool.ts does not register any process-level signal listeners", async () => {
+    const sigtermListenersBefore = process.listeners("SIGTERM").length;
+    const sigintListenersBefore = process.listeners("SIGINT").length;
+
+    await import("../db/pool.js");
+
+    const sigtermListenersAfter = process.listeners("SIGTERM").length;
+    const sigintListenersAfter = process.listeners("SIGINT").length;
+
+    expect(sigtermListenersAfter).toBe(sigtermListenersBefore);
+    expect(sigintListenersAfter).toBe(sigintListenersBefore);
+  });
 });
 
 const ALLOWED = "https://ipredict.app";

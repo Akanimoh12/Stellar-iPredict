@@ -11,6 +11,14 @@ const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
   process.env.DB_SLOW_QUERY_THRESHOLD_MS ?? "200",
   10,
 );
+const STATEMENT_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_STATEMENT_TIMEOUT_MS ?? "30000",
+  10,
+);
+const IDLE_IN_TRANSACTION_TIMEOUT_MS = Number.parseInt(
+  process.env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS ?? "60000",
+  10,
+);
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable is required");
@@ -21,6 +29,11 @@ const pool = new Pool({
   max: DEFAULT_POOL_SIZE,
   idleTimeoutMillis: IDLE_TIMEOUT_MS,
   connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+});
+
+pool.on("connect", async (client) => {
+  await client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+  await client.query(`SET idle_in_transaction_session_timeout = ${IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
 });
 
 pool.on("error", (err) => {

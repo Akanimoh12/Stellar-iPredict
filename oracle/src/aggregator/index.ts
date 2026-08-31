@@ -7,6 +7,7 @@ import {
   startOracleMetrics,
   type OracleMetricsRuntime,
 } from "../metrics/index.js";
+import { createWebhookAlertSender } from "./alert.js";
 import { createPostgresSubmissionStore, computeTally } from "./tally.js";
 import { selectThresholdOutcome } from "./threshold.js";
 import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
@@ -342,6 +343,7 @@ export function createProductionDependencies(
 
 export async function runAggregator(
   dependencies: AggregatorDependencies,
+  options: { signal: AbortSignal; pollIntervalMs: number; logger?: Logger; alertSender?: (alert: any) => Promise<void> },
   options: {
     signal: AbortSignal;
     pollIntervalMs: number;
@@ -351,10 +353,88 @@ export async function runAggregator(
   },
 ): Promise<void> {
   const logger = options.logger;
+  const alertSender = options.alertSender;
+  const marketFailureMap = new Map<string, number>(); // Track consecutive failures per market
+  const FAILURE_THRESHOLD = 5; // Escalate after 5 consecutive failures
+
   await dependencies.connect();
   try {
     while (!options.signal.aborted) {
       const startedAt = Date.now();
+      const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
+      let marketsProcessed = 0;
+
+      for (const market of markets) {
+        if (options.signal.aborted) break;
+
+        try {
+          await dependencies.processMarket(market);
+          // Reset failure count on success
+          marketFailureMap.delete(market.id);
+          marketsProcessed++;
+        } catch (error) {
+          const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
+          marketFailureMap.set(market.id, failureCount);
+
+          logger?.error("market processing failed", {
+            marketId: market.id,
+            error,
+            consecutiveFailures: failureCount,
+          });
+
+          // Escalate after threshold
+          if (failureCount >= FAILURE_THRESHOLD && alertSender) {
+            try {
+              await alertSender({
+                marketId: market.id,
+                attempts: failureCount,
+                error,
+              });
+            } catch (alertError) {
+              logger?.error("failed to send failure alert", {
+                marketId: market.id,
+                alertError,
+              });
+            }
+          }
+
+          // Continue to next market instead of failing the entire loop
+        }
+      }
+
+      const iterationDurationMs = Date.now() - startedAt;
+      logger?.info("poll iteration complete", {
+        marketsChecked: markets.length,
+        marketsProcessed,
+        durationMs: iterationDurationMs,
+      });
+
+      if (!options.signal.aborted) {
+        // Calculate adjusted sleep to maintain consistent poll interval
+        // Issue #448: Prevent interval drift by subtracting iteration duration
+        const adjustedSleepMs = Math.max(0, options.pollIntervalMs - iterationDurationMs);
+
+        if (adjustedSleepMs < options.pollIntervalMs && iterationDurationMs > options.pollIntervalMs) {
+          logger?.warn("poll iteration overran configured interval", {
+            configuredIntervalMs: options.pollIntervalMs,
+            iterationDurationMs,
+            nextPollImmediately: true,
+          });
+        }
+
+        if (adjustedSleepMs > 0) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, adjustedSleepMs);
+            options.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
       const now = new Date();
       const backlogDepth = dependencies.getBacklogDepth ? await dependencies.getBacklogDepth(now) : undefined;
       

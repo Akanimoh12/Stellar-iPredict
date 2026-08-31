@@ -113,7 +113,7 @@ export function verifyOracleSubmissionSignature(
   try {
     return Keypair.fromPublicKey(input.provider).verify(
       Buffer.from(message, "utf8"),
-      signature,
+      Buffer.from(signature, "base64"),
     );
   } catch {
     return false;

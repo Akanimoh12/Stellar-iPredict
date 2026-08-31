@@ -32,7 +32,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
         ];
         const newRow: OracleSubmissionRow = {
           id: submissions.length + 1,
-          market_id,
+          market_id: String(market_id),
           submitter,
           outcome,
           bond_amount,
@@ -50,7 +50,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
       ) {
         const [market_id] = (values ?? []) as [number];
         const count = submissions.filter(
-          (s) => s.market_id === market_id && s.status === "submitted",
+          (s) => s.market_id === String(market_id) && s.status === "submitted",
         ).length;
         return { rows: [{ count: String(count) } as unknown as T] };
       }
@@ -306,7 +306,7 @@ describe("POST /api/oracle/submit — outcome validation (issue #650)", () => {
         ];
         const row: OracleSubmissionRow = {
           id: submissions.length + 1,
-          market_id,
+          market_id: String(market_id),
           submitter,
           outcome,
           bond_amount,
@@ -420,7 +420,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
         ];
         const newRow: OracleSubmissionRow = {
           id: submissions.length + 1,
-          market_id,
+          market_id: String(market_id),
           submitter,
           outcome,
           bond_amount,
@@ -438,7 +438,7 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
       ) {
         const [market_id] = (values ?? []) as [number];
         const count = submissions.filter(
-          (s) => s.market_id === market_id && s.status === "submitted",
+          (s) => s.market_id === String(market_id) && s.status === "submitted",
         ).length;
         return { rows: [{ count: String(count) } as unknown as T] };
       }

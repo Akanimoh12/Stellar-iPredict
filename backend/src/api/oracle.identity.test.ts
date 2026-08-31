@@ -73,7 +73,7 @@ function makeDb(registered: string[]) {
         ];
         const row: OracleSubmissionRow = {
           id: submissions.length + 1,
-          market_id,
+          market_id: String(market_id),
           submitter,
           outcome,
           bond_amount,

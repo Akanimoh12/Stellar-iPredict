@@ -302,6 +302,19 @@ export function buildLeaderboardSnapshot(events: EventLogRow[]): LeaderboardSnap
   };
 }
 
+/**
+ * Calculate the maximum number of rows per batch, accounting for Postgres's
+ * 65535 parameter limit and the number of columns per row.
+ *
+ * @param columnsPerRow Number of columns in each row
+ * @param safetyMargin Number of parameters to reserve as buffer (default 10)
+ * @returns Maximum rows that can be inserted in a single statement
+ */
+function calculateRowsPerBatch(columnsPerRow: number, safetyMargin = 10): number {
+  const MAX_PARAMS = 65535;
+  return Math.floor((MAX_PARAMS - safetyMargin) / columnsPerRow);
+}
+
 export async function rebuildLeaderboardTable(
   db: Queryable,
   options: RebuildOptions = {}
@@ -341,32 +354,50 @@ export async function rebuildLeaderboardTable(
     return snapshot;
   }
 
-  const values: unknown[] = [];
-  const placeholders = snapshot.players.map((player, index) => {
-    const offset = index * 5;
-    values.push(
-      player.address,
-      player.displayName || null,
-      player.points,
-      player.wonBets,
-      player.lostBets
-    );
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
-  });
+  // Start transaction for atomic rebuild
+  await db.query("BEGIN");
 
-  await db.query(
-    [
-      "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
-      `VALUES ${placeholders.join(", ")}`,
-      "ON CONFLICT (address) DO UPDATE SET",
-      "  display_name = EXCLUDED.display_name,",
-      "  points = EXCLUDED.points,",
-      "  won_bets = EXCLUDED.won_bets,",
-      "  lost_bets = EXCLUDED.lost_bets,",
-      "  updated_at = NOW()",
-    ].join(" "),
-    values
-  );
+  try {
+    const COLUMNS_PER_ROW = 5; // address, display_name, points, won_bets, lost_bets
+    const rowsPerBatch = calculateRowsPerBatch(COLUMNS_PER_ROW);
+
+    // Process players in batches
+    for (let i = 0; i < snapshot.players.length; i += rowsPerBatch) {
+      const batch = snapshot.players.slice(i, Math.min(i + rowsPerBatch, snapshot.players.length));
+
+      const values: unknown[] = [];
+      const placeholders = batch.map((player, index) => {
+        const offset = index * COLUMNS_PER_ROW;
+        values.push(
+          player.address,
+          player.displayName || null,
+          player.points,
+          player.wonBets,
+          player.lostBets
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
+      });
+
+      await db.query(
+        [
+          "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
+          `VALUES ${placeholders.join(", ")}`,
+          "ON CONFLICT (address) DO UPDATE SET",
+          "  display_name = EXCLUDED.display_name,",
+          "  points = EXCLUDED.points,",
+          "  won_bets = EXCLUDED.won_bets,",
+          "  lost_bets = EXCLUDED.lost_bets,",
+          "  updated_at = NOW()",
+        ].join(" "),
+        values
+      );
+    }
+
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  }
 
   return snapshot;
 }

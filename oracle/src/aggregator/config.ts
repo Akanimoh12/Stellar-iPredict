@@ -17,6 +17,15 @@ const schema = z.object({
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
   LOG_LEVEL: z.string().min(1).default("info"),
 
+  /** Configurable batch limit for expired market queries (Issue #447). */
+  AGGREGATOR_BATCH_SIZE: positiveInteger.default(50),
+
+  /** Health server options (Issue #449). */
+  HEALTH_ENABLED: z.coerce.boolean().default(true),
+  HEALTH_PORT: positiveInteger.default(9102),
+  HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
+  MAX_POLL_STALE_MS: positiveInteger.default(30_000),
+
   /** Fraction (0–1) of dissenting votes that triggers a conflict flag. */
   CONFLICT_THRESHOLD: unitFraction.default(0.3),
 

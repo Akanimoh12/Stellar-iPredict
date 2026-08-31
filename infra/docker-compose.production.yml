@@ -1,68 +1,3 @@
-version: "3.8"
-
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: ipredict
-      POSTGRES_USER: ipredict
-      POSTGRES_PASSWORD: securepassword
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    command: redis-server --appendonly yes
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  indexer:
-    build:
-      context: ../indexer
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  api:
-    build:
-      context: ../backend
-    ports:
-      - 3000:3000
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      replicas: 3
-      restart_policy:
-        condition: on-failure
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  db-data:
-  redis-data:
 # ─────────────────────────────────────────────────────────────────────────────
 # iPredict — production stack.
 #
@@ -84,6 +19,7 @@ volumes:
 #   migrate           opt-in one-shot migration runner (--profile migrate)
 #   api               REST API, replicated
 #   indexer           Soroban event indexer, exactly one replica
+#   proxy             Caddy reverse proxy / TLS termination in front of api
 #   oracle-aggregator council tally + on-chain finalization
 #   oracle-monitor    read-only oracle watchdog and alerting
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,8 +140,6 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
     restart: always
-    cpus: "1.00"
-    mem_limit: 512m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -223,15 +157,18 @@ services:
       # here rather than optional.
       ORACLE_API_KEY: ${ORACLE_API_KEY:?set ORACLE_API_KEY in infra/.env}
       ORACLE_THRESHOLD: ${ORACLE_THRESHOLD:-3}
-    # A host port per replica, drawn from the range. Put a load balancer in
-    # front of these in a real deployment; the range is what makes rolling one
-    # replica at a time possible on a single host.
+    # A host port per replica, drawn from the range. The range is what makes
+    # rolling one replica at a time possible on a single host. Bound to the
+    # loopback interface on purpose: the Caddy proxy (service `proxy`) is the
+    # only public entry point, so nothing can bypass TLS. Override
+    # API_PORT_BIND only if you really need the API reachable directly.
     ports:
-      - "${API_PORT_RANGE:-4000-4002}:4000"
+      - "${API_PORT_BIND:-127.0.0.1}:${API_PORT_RANGE:-4000-4002}:4000"
     deploy:
       replicas: ${API_REPLICAS:-3}
       resources:
         limits:
+          cpus: "1.00"
           memory: ${API_MEMORY_LIMIT:-512m}
     depends_on:
       postgres:
@@ -259,8 +196,6 @@ services:
       dockerfile: src/Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
     restart: always
-    cpus: "0.75"
-    mem_limit: 384m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -280,12 +215,66 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.75"
           memory: ${INDEXER_MEMORY_LIMIT:-512m}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    stop_grace_period: 20s
+    logging: *logging
+
+  # ── Reverse proxy / TLS ────────────────────────────────────────────────────
+  # Caddy terminates TLS in front of the replicated API. Clients reach the
+  # stack only over HTTPS (ports 80/443); the API's own host ports stay bound
+  # to 127.0.0.1 so nothing bypasses the proxy. Docker's DNS resolves `api`
+  # round-robin across all replicas, so Caddy needs no upstream list of its
+  # own. Config lives in infra/proxy/ (Caddyfile + Dockerfile).
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-proxy:${PROXY_IMAGE_TAG:-local}"
+    restart: always
+    environment:
+      # Public hostname served with automatic HTTPS. Defaults to localhost,
+      # which Caddy serves with an internally-trusted certificate.
+      PROXY_DOMAIN: ${PROXY_DOMAIN:-localhost}
+      # Let's Encrypt account email for expiry notices. The placeholder keeps
+      # the Caddyfile parseable when the operator leaves ACME_EMAIL unset;
+      # Let's Encrypt issues certificates regardless of the contact address.
+      ACME_EMAIL: ${ACME_EMAIL:-admin@localhost}
+      # Upstream inside the compose network; Docker DNS load-balances `api`
+      # across its replicas, so this stays a single hostname.
+      API_UPSTREAM: ${API_UPSTREAM:-api:4000}
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+      - "${PROXY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      # Caddy's data dir: ACME account + issued certificates. Persistent so
+      # certificates are not re-issued on every restart (and so Let's Encrypt
+      # rate limits are not hit).
+      - caddy-data:/data
+      # Runtime config storage (cert metadata etc.).
+      - caddy-config:/config
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: ${PROXY_MEMORY_LIMIT:-128m}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # wget ships in the caddy image. Hits the container-internal :8080
+      # liveness endpoint, which is domain- and TLS-independent.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     stop_grace_period: 20s
     logging: *logging
 
@@ -297,8 +286,6 @@ services:
   oracle-aggregator:
     <<: *oracle-image
     restart: always
-    cpus: "0.50"
-    mem_limit: 384m
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -332,6 +319,7 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.50"
           memory: ${ORACLE_MEMORY_LIMIT:-384m}
     depends_on:
       postgres:
@@ -342,8 +330,6 @@ services:
   oracle-monitor:
     <<: *oracle-image
     restart: always
-    cpus: "0.25"
-    mem_limit: 256m
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:
@@ -360,6 +346,7 @@ services:
       replicas: 1
       resources:
         limits:
+          cpus: "0.25"
           memory: ${ORACLE_MEMORY_LIMIT:-384m}
     depends_on:
       postgres:
@@ -388,3 +375,5 @@ volumes:
   pgdata:
   redisdata:
   aggregated-logs:
+  caddy-data:
+  caddy-config:

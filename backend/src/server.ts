@@ -20,6 +20,7 @@ import {
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
+import { registerStatusRoutes } from "./api/status.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
@@ -53,7 +54,7 @@ export interface GracefulShutdownOptions {
 }
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
-  const databasePool = options.pool as any;
+  const databasePool = options.pool;
   const redis = options.redis;
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
@@ -175,6 +176,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // Readiness probe: verifies DB and Redis are reachable.
   server.register(healthRoutes);
 
+  // Public status feed for an external status page. Unversioned alongside the
+  // probes: it publishes operational signals, not the client API contract.
+  registerStatusRoutes(server, databasePool, redis);
+
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:
   // they are infrastructure, not part of the contract clients code against.
   registerApiRoutes(server);
@@ -201,20 +206,34 @@ export function registerGracefulShutdown(
     isShuttingDown = true;
     server.log.info({ signal }, "Graceful shutdown started");
 
+    let failure: unknown;
+
     try {
       await server.close();
-      if (shutdownDatabase) {
+    } catch (error) {
+      failure = error;
+      server.log.error({ err: error, signal }, "Error closing HTTP server during shutdown");
+    }
+
+    if (shutdownDatabase) {
+      try {
         const shutdownFn = options.shutdownDatabaseFn ?? (await import("./db/pool.js")).shutdown;
         await shutdownFn();
+      } catch (error) {
+        failure ??= error;
+        server.log.error({ err: error, signal }, "Error closing database pool during shutdown");
       }
+    }
+
+    if (failure) {
+      server.log.error({ err: failure, signal }, "Graceful shutdown failed");
+      if (exitProcess) {
+        process.exit(1);
+      }
+    } else {
       server.log.info({ signal }, "Graceful shutdown complete");
       if (exitProcess) {
         process.exit(0);
-      }
-    } catch (error) {
-      server.log.error({ err: error, signal }, "Graceful shutdown failed");
-      if (exitProcess) {
-        process.exit(1);
       }
     }
   };

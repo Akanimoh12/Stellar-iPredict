@@ -5,7 +5,13 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
-import { getMarketById, getMarkets, type Queryable, type MarketCategory } from "../db/markets.js";
+import {
+  getMarketById,
+  getMarkets,
+  getResolutionDelayStatus,
+  type Queryable,
+  type MarketCategory,
+} from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import {
@@ -297,6 +303,53 @@ export function createMarketsRoutes(
       }
 
       return reply.status(200).send(body);
+    }
+  );
+
+  // ── GET /api/markets/resolution-status ────────────────────────────────────
+  // Issue #645: honest, user-facing signal that market resolution is running
+  // late (usually an oracle-aggregator outage). Static path — Fastify matches
+  // it ahead of `/api/markets/:id`.
+  app.get(
+    "/api/markets/resolution-status",
+    {
+      schema: {
+        summary: "Whether market resolution is currently delayed",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: {
+                type: "string",
+                enum: ["on_time", "delayed", "stalled"],
+                description:
+                  "on_time: resolutions current. delayed: some markets overdue. stalled: overdue for a long time — assume an outage.",
+              },
+              overdueMarkets: { type: "number" },
+              oldestOverdueSeconds: { type: ["number", "null"] },
+              delayedMarketIds: { type: "array", items: { type: "number" } },
+              graceSeconds: { type: "number" },
+              checkedAt: { type: "string" },
+            },
+            required: [
+              "status",
+              "overdueMarkets",
+              "oldestOverdueSeconds",
+              "delayedMarketIds",
+              "graceSeconds",
+              "checkedAt",
+            ],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const status = await getResolutionDelayStatus(db);
+      // Short cache — this is a coarse signal and the query hits `markets`.
+      reply.header("Cache-Control", "public, max-age=30");
+      return reply.status(200).send(status);
     }
   );
 

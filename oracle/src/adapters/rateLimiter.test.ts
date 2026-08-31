@@ -49,6 +49,7 @@ describe("ProviderRateLimiter", () => {
       await limiter.acquire("binance");
 
       expect(waits).toEqual([100]);
+      now += 100;
       expect(limiter.tryAcquire("binance")).toBe(true);
     } finally {
       Date.now = originalDateNow;

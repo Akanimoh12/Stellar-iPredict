@@ -108,3 +108,80 @@ export function registerRequestLogging(app: FastifyInstance): void {
     );
   });
 }
+
+/**
+ * Structured slow-query entry emitted by the database layer.
+ *
+ * Only the parameterised SQL text is logged — never the bound values, which
+ * may carry user data and must not reach log aggregators.
+ */
+export interface SlowQueryLogEntry {
+  /** Parameterised SQL text (with `$1`/`$2` placeholders, never bound values). */
+  query: string;
+  /** Measured duration of the query in milliseconds. */
+  durationMs: number;
+  /** Configured threshold in milliseconds that the query exceeded. */
+  thresholdMs: number;
+}
+
+/**
+ * Emit a single-line log entry for a slow database query.
+ *
+ * Lives here so the db layer shares the project's logging conventions without
+ * depending on a Fastify request context (queries can run outside a request —
+ * e.g. indexer backfills). Uses `console.warn` to guarantee exactly one line.
+ */
+export function logSlowQuery(entry: SlowQueryLogEntry): void {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      msg: "slow db query",
+      durationMs: Math.round(entry.durationMs * 10) / 10,
+      thresholdMs: entry.thresholdMs,
+      query: entry.query,
+    }),
+  );
+}
+
+/**
+ * Structured oracle submission audit log entry.
+ *
+ * Every oracle submission attempt (accepted or rejected) produces exactly one
+ * audit line. Rejections carry a reason code so disputes can be investigated.
+ * The API key and raw signature are never logged.
+ */
+export interface OracleAuditLogEntry {
+  /** Correlation id from the request for tracing. */
+  requestId: string;
+  /** Provider address — the identity making the submission. */
+  provider: string;
+  /** Market id being submitted for. */
+  marketId: number;
+  /** Submission outcome: "accepted" or a rejection reason code. */
+  outcome: "accepted" | "bad_key" | "bad_signature" | "duplicate_market" | "bad_request" | "internal_error";
+  /** Optional detailed message explaining the rejection. */
+  message?: string;
+}
+
+/**
+ * Emit a structured audit log entry for an oracle submission attempt.
+ *
+ * Logs at info level for accepted submissions and warn level for rejections.
+ * Never logs the API key, signature, or other secrets. Rejections are logged
+ * at a level that survives production filtering so they can be investigated.
+ */
+export function logOracleSubmissionAttempt(entry: OracleAuditLogEntry, logger: any): void {
+  const level = entry.outcome === "accepted" ? "info" : "warn";
+  const logFn = logger[level] || logger.info;
+
+  logFn(
+    {
+      requestId: entry.requestId,
+      provider: entry.provider,
+      marketId: entry.marketId,
+      outcome: entry.outcome,
+      ...(entry.message && { message: entry.message }),
+    },
+    `oracle submission ${entry.outcome}`,
+  );
+}

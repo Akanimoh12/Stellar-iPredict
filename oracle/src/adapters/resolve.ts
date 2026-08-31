@@ -1,4 +1,4 @@
-import type { DataAdapter, Market, MarketCategory } from "./index.js";
+import { selectAdaptersForMarket, type DataAdapter, type Market, type MarketCategory } from "./index.js";
 import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
 import { createProvenanceRecord, sanitizeProvenanceValue, type ProvenanceStore } from "./provenance.js";
 
@@ -149,7 +149,7 @@ export async function resolveMarket(
     return result;
   };
 
-  const supported = adapters.filter((adapter) => adapter.supports(market));
+  const supported = selectAdaptersForMarket(market, adapters);
   const limited = supported.slice(0, opts.maxSources);
 
   const sources: SourceResult[] = [];

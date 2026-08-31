@@ -19,8 +19,12 @@ import {
 } from "../db/oracle.js";
 import { getMarketById } from "../db/markets.js";
 import { config } from "../config/index.js";
-
-const DEFAULT_DEV_API_KEY = "test-oracle-api-key";
+import {
+  credentialCanSubmitFor,
+  credentialIdentity,
+  resolveOracleCredential,
+  type OracleCredential,
+} from "../config/oracleApiKeys.js";
 
 export function compareSecretValues(
   candidate: string | undefined,
@@ -40,6 +44,86 @@ export function compareSecretValues(
     .digest();
 
   return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
+
+/**
+ * Strip the scheme from an `Authorization` / `x-api-key` value.
+ *
+ * `x-api-key` carries a bare key; `Authorization` may use either scheme this
+ * API has historically accepted.
+ */
+export function extractApiKeyToken(headerValue: string): string {
+  const token = headerValue.trim();
+  if (token.startsWith("Bearer ")) {
+    return token.slice(7).trim();
+  }
+  if (token.startsWith("API-Key ")) {
+    return token.slice(8).trim();
+  }
+  return token;
+}
+
+/**
+ * Authenticate a request against the per-provider credential set (#429).
+ *
+ * Returns the credential the presented key resolves to. The caller must then
+ * check that the body's `provider` matches it — see
+ * `assertCredentialMayActFor`. Authentication and identity binding are
+ * deliberately two steps: the body cannot be parsed until after the key is
+ * accepted, and a valid key naming someone else's provider is a different
+ * failure (403) from an unrecognised key (401).
+ */
+export function authenticateOracleRequest(
+  headers: {
+    authorization?: string;
+    "x-api-key"?: string | string[];
+  },
+  credentials: readonly OracleCredential[] = config.oracleApiKeys,
+): OracleCredential {
+  const rawHeader =
+    headers.authorization ??
+    (Array.isArray(headers["x-api-key"])
+      ? headers["x-api-key"][0]
+      : headers["x-api-key"]);
+
+  if (!rawHeader) {
+    throw unauthorized("Missing authorization header");
+  }
+
+  const credential = resolveOracleCredential(
+    extractApiKeyToken(rawHeader),
+    credentials,
+  );
+
+  if (!credential) {
+    // Deliberately identical to the pre-existing message and status: an
+    // unrecognised key learns nothing about which providers are configured.
+    throw unauthorized("Invalid API key");
+  }
+
+  return credential;
+}
+
+/**
+ * Reject a submission whose body names a provider the key is not bound to.
+ *
+ * This is the half that matters. Without it a provider's key still
+ * authenticates every submission, so a single compromised or careless key can
+ * post an outcome attributed to any other provider — which, for an oracle
+ * feeding market resolution, is the whole attack.
+ *
+ * 403 rather than 401: the caller is authenticated, just not authorised for
+ * this identity, and retrying with the same key will never help.
+ */
+export function assertCredentialMayActFor(
+  credential: OracleCredential,
+  provider: string,
+): void {
+  if (!credentialCanSubmitFor(credential, provider)) {
+    throw forbidden(
+      `API key is bound to provider "${credentialIdentity(credential)}" and cannot submit on behalf of "${provider}"`,
+    );
+  }
 }
 
 /**
@@ -111,9 +195,12 @@ export function verifyOracleSubmissionSignature(
   }
   const message = buildCanonicalOracleMessage(input);
   try {
+    // `verify` takes signature *bytes*. Passing the base64 string straight
+    // through — as this did — makes every verification fail, so every
+    // otherwise-valid submission was rejected with 401.
     return Keypair.fromPublicKey(input.provider).verify(
       Buffer.from(message, "utf8"),
-      signature,
+      Buffer.from(signature, "base64"),
     );
   } catch {
     return false;
@@ -276,25 +363,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       },
     },
     async (request, reply) => {
-      const authHeader =
-        request.headers.authorization ||
-        (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
-
-      if (!authHeader) {
-        throw unauthorized("Missing authorization header");
-      }
-
-      let token = authHeader.trim();
-      if (token.startsWith("Bearer ")) {
-        token = token.slice(7).trim();
-      } else if (token.startsWith("API-Key ")) {
-        token = token.slice(8).trim();
-      }
-
-      if (!compareSecretValues(token, expectedApiKey)) {
-        throw unauthorized("Invalid API key");
-      }
+      const credential = authenticateOracleRequest(request.headers);
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -309,6 +378,17 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
 
       const { marketId, outcome, provider, signature, nonce, timestamp } =
         parsed.data;
+
+      // Identity binding (#429): the key decides which provider this request
+      // may speak for. Checked before signature verification and before any
+      // database read, so a key that is not entitled to this provider never
+      // reaches the rest of the pipeline.
+      assertCredentialMayActFor(credential, provider);
+
+      request.log.info(
+        { provider, keyIdentity: credentialIdentity(credential), marketId },
+        "oracle submission authenticated",
+      );
 
       // Signature verification: the payload must be signed by the claimed
       // provider keypair before it is trusted or written. Never record a
@@ -587,25 +667,7 @@ export function registerOracleRoutes(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
       );
 
-      const authHeader =
-        request.headers.authorization ||
-        (request.headers["x-api-key"] as string | undefined);
-      const expectedApiKey = process.env.ORACLE_API_KEY || DEFAULT_DEV_API_KEY;
-
-      if (!authHeader) {
-        throw unauthorized("Missing authorization header");
-      }
-
-      let token = authHeader.trim();
-      if (token.startsWith("Bearer ")) {
-        token = token.slice(7).trim();
-      } else if (token.startsWith("API-Key ")) {
-        token = token.slice(8).trim();
-      }
-
-      if (!compareSecretValues(token, expectedApiKey)) {
-        throw unauthorized("Invalid API key");
-      }
+      const credential = authenticateOracleRequest(request.headers);
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -620,6 +682,17 @@ export function registerOracleRoutes(
 
       const { marketId, outcome, provider, signature, nonce, timestamp } =
         parsed.data;
+
+      // Identity binding (#429): the key decides which provider this request
+      // may speak for. Checked before signature verification and before any
+      // database read, so a key that is not entitled to this provider never
+      // reaches the rest of the pipeline.
+      assertCredentialMayActFor(credential, provider);
+
+      request.log.info(
+        { provider, keyIdentity: credentialIdentity(credential), marketId },
+        "oracle submission authenticated",
+      );
 
       // Signature verification: the payload must be signed by the claimed
       // provider keypair before it is trusted or written. Never record a

@@ -146,6 +146,24 @@ ON CONFLICT (tx_hash, event_index) DO NOTHING;
 
 This restores only the required date range and keeps the hot table free from stale data.
 
+### Full retention policy
+
+`events` archival is one part of a platform-wide policy covering every
+unbounded table — `dead_letter_events`, `idempotency_keys`, stale
+`oracle_submissions`, and the audit tables. See
+[`docs/DATA-RETENTION.md`](../../docs/DATA-RETENTION.md). Migration
+`0018_data_retention.sql` adds the `data_retention_policies` registry and
+`enforce_data_retention()`, which applies every **operational** policy in
+bounded batches:
+
+```sql
+SELECT * FROM enforce_data_retention();
+```
+
+Audit-class data (finalized `oracle_submissions`, `council_votes`,
+`oracle_disputes`) is retained for 7 years and is never removed by this
+function — deletion there is a manual, reviewed operation.
+
 ### `oracle_submissions`
 
 Tracks oracle submissions for dispute and resolution workflows.

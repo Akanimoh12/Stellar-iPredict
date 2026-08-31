@@ -63,6 +63,46 @@ describe("parsePositiveInteger", () => {
   });
 });
 
+describe("GET /api/markets/resolution-status (issue #645)", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  it("reports on_time when nothing is overdue", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/resolution-status" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.status).toBe("on_time");
+    expect(body.overdueMarkets).toBe(0);
+    expect(body.oldestOverdueSeconds).toBeNull();
+    // static route must not be swallowed by /api/markets/:id
+    expect(queryMock.mock.calls[0][0]).toContain("resolved = false");
+  });
+
+  it("reports delayed with the overdue market ids", async () => {
+    const rows = [{ id: 7, end_time: String(nowSec - 3 * 60 * 60) }];
+    const queryMock = vi.fn().mockResolvedValue({ rows });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/resolution-status" })).json();
+    expect(body.status).toBe("delayed");
+    expect(body.overdueMarkets).toBe(1);
+    expect(body.delayedMarketIds).toEqual([7]);
+    expect(body.oldestOverdueSeconds).toBeGreaterThanOrEqual(3 * 60 * 60 - 5);
+  });
+
+  it("escalates to stalled when the oldest overdue market is very old", async () => {
+    const rows = [{ id: 1, end_time: String(nowSec - 20 * 60 * 60) }];
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows }) as Queryable["query"],
+    });
+    const body = (await server.inject({ method: "GET", url: "/api/markets/resolution-status" })).json();
+    expect(body.status).toBe("stalled");
+  });
+});
+
 describe("GET /api/markets/:id", () => {
   it("returns the market", async () => {
     const market = createMarket();

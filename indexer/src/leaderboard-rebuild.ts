@@ -16,6 +16,21 @@
  * - Truncates the leaderboard table (or upserts on conflict)
  * - Logs progress and completion with structured JSON
  * - Handles errors gracefully — logs and continues per user, never crashes indexer
+ *
+ * ## Role in disaster recovery (issue #648)
+ *
+ * The `leaderboard` table is **fully reconstructible** from the `events` table:
+ * it is a pure fold over events and holds no independent state. Recovery order
+ * after a total loss:
+ *
+ *   1. `indexer … --backfill`  — repopulate `events` (+ markets/bets) from chain,
+ *      bounded by RPC event retention (`getBackfillCoverage()` in backfill.ts).
+ *   2. `npm run rebuild:leaderboard`  — this job, folding `events` → `leaderboard`.
+ *
+ * `rebuildLeaderboardTable()` returns `durationMs` so a DR drill can record how
+ * long step 2 takes. The full reconstructible/not-reconstructible inventory and
+ * the end-to-end procedure live in `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+ * recovery".
  */
 
 export interface EventLogRow {
@@ -39,6 +54,13 @@ export interface LeaderboardSnapshot {
   players: LeaderboardRow[];
   eventCount: number;
   lastLedgerSeq: number | null;
+  /**
+   * Wall-clock ms for the rebuild. Set by `rebuildLeaderboardTable()` (not by
+   * the pure `buildLeaderboardSnapshot()`). Feeds the measured rebuild time in
+   * the disaster-recovery plan — see `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+   * recovery".
+   */
+  durationMs?: number;
 }
 
 export interface Queryable {
@@ -306,6 +328,7 @@ export async function rebuildLeaderboardTable(
   db: Queryable,
   options: RebuildOptions = {}
 ): Promise<LeaderboardSnapshot> {
+  const startedAt = Date.now();
   const queryParts = [
     "SELECT id, ledger_seq, event_type, market_id, actor, payload",
     "FROM events",
@@ -332,13 +355,13 @@ export async function rebuildLeaderboardTable(
 
   const snapshot = buildLeaderboardSnapshot(events);
   if (options.dryRun) {
-    return snapshot;
+    return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
   await db.query("DELETE FROM leaderboard");
 
   if (snapshot.players.length === 0) {
-    return snapshot;
+    return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
   const values: unknown[] = [];
@@ -368,5 +391,5 @@ export async function rebuildLeaderboardTable(
     values
   );
 
-  return snapshot;
+  return { ...snapshot, durationMs: Date.now() - startedAt };
 }

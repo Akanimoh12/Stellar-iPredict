@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildAuditRecord,
   collectCouncilAudit,
+  COUNCIL_AUDIT_RETENTION,
   exportCouncilAudit,
+  isCouncilAuditRecordPurgeable,
   toAuditCsv,
   toAuditJson,
   type CouncilAuditRecord,
@@ -115,5 +117,26 @@ describe("exportCouncilAudit", () => {
 
     expect(await exportCouncilAudit(pool, "csv")).toContain("market_id,decision");
     expect(JSON.parse(await exportCouncilAudit(pool, "json"))[0].marketId).toBe("42");
+  });
+});
+
+// ── Retention (issue #646) ─────────────────────────────────────────────────
+describe("council audit retention", () => {
+  it("is audit-class with no automatic enforcement", () => {
+    expect(COUNCIL_AUDIT_RETENTION.class).toBe("audit");
+    expect(COUNCIL_AUDIT_RETENTION.automaticEnforcement).toBe(false);
+    expect(COUNCIL_AUDIT_RETENTION.retentionYears).toBeGreaterThanOrEqual(5);
+  });
+
+  it("treats a missing or invalid finalized_at as not purgeable", () => {
+    expect(isCouncilAuditRecordPurgeable(null)).toBe(false);
+    expect(isCouncilAuditRecordPurgeable(undefined)).toBe(false);
+    expect(isCouncilAuditRecordPurgeable("not-a-date")).toBe(false);
+  });
+
+  it("only allows purge past the retention window", () => {
+    const now = new Date("2030-01-01T00:00:00Z");
+    expect(isCouncilAuditRecordPurgeable("2029-01-01T00:00:00Z", now)).toBe(false); // 1y old
+    expect(isCouncilAuditRecordPurgeable("2020-01-01T00:00:00Z", now)).toBe(true); // 10y old
   });
 });

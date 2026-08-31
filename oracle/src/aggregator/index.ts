@@ -1,4 +1,4 @@
-import { rpc } from "@stellar/stellar-sdk";
+import { Networks, rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
 import { createLogger, type Logger } from "../log.js";
@@ -7,6 +7,11 @@ import {
   startOracleMetrics,
   type OracleMetricsRuntime,
 } from "../metrics/index.js";
+import { createPostgresSubmissionStore, computeTally } from "./tally.js";
+import { selectThresholdOutcome } from "./threshold.js";
+import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
+import { finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+
 
 export {
   OracleMetricsCollector,
@@ -175,9 +180,12 @@ export interface AggregatorDependencies {
 export function createProductionDependencies(
   config: AggregatorConfig,
   logger: Logger = createLogger({ level: config.LOG_LEVEL }),
+  overrides: { database?: Pool; server?: rpc.Server } = {},
 ): AggregatorDependencies {
-  const database = new Pool({ connectionString: config.DATABASE_URL });
-  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  const database = overrides.database ?? new Pool({ connectionString: config.DATABASE_URL });
+  const server = overrides.server ?? new rpc.Server(config.SOROBAN_RPC_URL);
+  const submissionStore = createPostgresSubmissionStore(database);
+  const networkPassphrase = config.NETWORK_PASSPHRASE ?? Networks.TESTNET;
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
@@ -230,9 +238,99 @@ export function createProductionDependencies(
       }
 
       return { db: dbRes, rpc: rpcRes };
-    },
-    async processMarket() {
-      // Threshold evaluation and finalization are composed by follow-up modules.
+        },
+      async processMarket(market) {
+      // Handles exactly one market so a failure here cannot stop the poll loop
+      // from moving on to the remaining expired markets.
+      const marketId = market.id.trim();
+      try {
+        // Defensive: the expiry query already filters these out, but a market
+        // can be cancelled or resolved between the query and this call.
+        if (market.cancelled) {
+          logger.info("market is cancelled, skipping", { marketId });
+          return;
+        }
+
+        // The on-chain and finalizer APIs take a numeric market id.
+        const onChainMarketId = Number(marketId);
+        if (!Number.isSafeInteger(onChainMarketId) || onChainMarketId < 0) {
+          logger.error("market id is not a non-negative integer, skipping", { marketId });
+          return;
+        }
+
+        if (!config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
+          logger.error("aggregator is not configured for finalization, skipping", {
+            marketId,
+            hasMarketContractId: Boolean(config.MARKET_CONTRACT_ID),
+            hasResolverKey: Boolean(config.RESOLVER_KEY),
+          });
+          return;
+        }
+
+        // 1. On-chain state — never finalize a market that is already resolved
+        //    or cancelled on the contract, regardless of the DB view.
+        const state = await queryMarketState(
+          server,
+          config.MARKET_CONTRACT_ID,
+          onChainMarketId,
+          config.RESOLVER_KEY,
+          networkPassphrase,
+        );
+        if (state.cancelled) {
+          logger.info("market is cancelled on-chain, skipping", { marketId });
+          return;
+        }
+        if (state.resolved) {
+          logger.info("market is already resolved on-chain, skipping", { marketId });
+          return;
+        }
+
+        // 2. Load the council's current submissions and compute the tally.
+        const votes = await submissionStore.getSubmissions(marketId);
+        const tally = computeTally(marketId, votes);
+        logger.info("computed tally", {
+          marketId,
+          yesVotes: tally.yesVotes,
+          noVotes: tally.noVotes,
+          totalVoters: tally.totalVoters,
+        });
+
+        // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
+        //    both-outcomes) majority — the market stays untouched this poll.
+        const outcome = selectThresholdOutcome(votes, config.COUNCIL_THRESHOLD, logger, marketId);
+        if (outcome === null) {
+          logger.warn("threshold not met, market left unresolved", {
+            marketId,
+            yesVotes: tally.yesVotes,
+            noVotes: tally.noVotes,
+            threshold: config.COUNCIL_THRESHOLD,
+          });
+          return;
+        }
+
+        // 4. Safety gate — assertCanFinalize throws with a descriptive reason
+        //    if submissions are insufficient or the tally is ambiguous.
+        assertCanFinalize(marketId, tally, createBalancedValidationConfig(config.COUNCIL_THRESHOLD));
+
+        // 5. Finalize on-chain and persist the decision.
+        logger.info("threshold met, finalizing market", { marketId, decision: outcome });
+        const txHash = await finalizeMarketDecision(
+          database,
+          server,
+          config.MARKET_CONTRACT_ID,
+          config.RESOLVER_KEY,
+          onChainMarketId,
+          outcome,
+          [...tally.votes],
+          networkPassphrase,
+        );
+        logger.info("market finalized", { marketId, decision: outcome, txHash });
+      } catch (error) {
+        logger.error("failed to process market", {
+          marketId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
     async close() {
       await database.end();

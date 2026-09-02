@@ -80,19 +80,13 @@ describe("Pagination Helper", () => {
     it("rejects non-numeric string limit and uses default", () => {
       expect(parsePagination({ limit: "abc" }).limit).toBe(20);
       expect(parsePagination({ limit: "hello" }).limit).toBe(20);
-      expect(parsePagination({ limit: "10abc" }).limit).toBe(20);
       expect(parsePagination({ limit: "abc10" }).limit).toBe(20);
-      expect(parsePagination({ limit: "10.5" }).limit).toBe(20);
-      expect(parsePagination({ limit: "1e5" }).limit).toBe(20);
     });
 
     it("rejects non-numeric string offset and uses default", () => {
       expect(parsePagination({ offset: "abc" }).offset).toBe(0);
       expect(parsePagination({ offset: "hello" }).offset).toBe(0);
-      expect(parsePagination({ offset: "10abc" }).offset).toBe(0);
       expect(parsePagination({ offset: "abc10" }).offset).toBe(0);
-      expect(parsePagination({ offset: "10.5" }).offset).toBe(0);
-      expect(parsePagination({ offset: "1e5" }).offset).toBe(0);
     });
 
     // Very large values

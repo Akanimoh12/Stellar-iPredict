@@ -63,6 +63,7 @@ backend stack. It follows the design in
 | `redis` | Cache + rate-limiter store, persisted per [`redis.conf`](redis.conf) | 1 |
 | `api` | REST API (`backend/`) | `API_REPLICAS`, default 3 |
 | `indexer` | Soroban event indexer (`indexer/`) | 1, always |
+| `proxy` | Caddy reverse proxy / TLS termination in front of `api` | 1 |
 | `oracle-aggregator` | Council tally and on-chain finalization (`oracle/`) | 1 |
 | `oracle-monitor` | Read-only oracle watchdog and alerting (`oracle/`) | 1 |
 | `log-collector` | Aggregates container logs with Fluent Bit | 1 |
@@ -71,14 +72,28 @@ backend stack. It follows the design in
 ```bash
 cd infra
 cp .env.example .env          # then fill in every CHANGE_ME value
+./scripts/deploy.sh           # migrate, then bring up the whole stack
+```
+
+[`scripts/deploy.sh`](scripts/deploy.sh) runs DB migrations **before** any
+application service starts, then brings up the stack — see
+[Deploy flow](#deploy-flow). For a plain compose bring-up without the explicit
+migration step (e.g. first boot, where the postgres container already applies
+`db/migrations`), the equivalent is:
+
+```bash
 docker compose -f docker-compose.production.yml up -d --build
 docker compose -f docker-compose.production.yml ps
 ```
 
-The API replicas take one host port each from `API_PORT_RANGE` (4000–4002 by
-default) so a load balancer can address them individually and you can roll one
-replica at a time. Postgres and Redis publish no host port at all: they are
-reachable only from inside the compose network.
+The **only public entry point is the `proxy`** service: Caddy terminates TLS
+on ports 80/443 and forwards to the API — see
+[Reverse proxy and TLS](#reverse-proxy-and-tls). The API replicas each bind
+one loopback-only host port from `API_PORT_RANGE` (4000–4002 by default) so
+you can address one replica at a time for debugging and rolling updates
+without exposing anything unencrypted to the world. Postgres and Redis
+publish no host port at all: they are reachable only from inside the compose
+network.
 
 ### Single indexer instance
 
@@ -102,6 +117,7 @@ restarts, database working-set size, and indexer lag before changing them.
 |---|---:|---:|
 | API | 1.00 | 512 MiB |
 | Indexer | 0.75 | 384 MiB |
+| Proxy (Caddy) | 0.25 | 128 MiB |
 | Postgres | 1.00 | 1 GiB |
 | Redis | 0.50 | 256 MiB |
 | Oracle aggregator | 0.50 | 384 MiB |
@@ -134,22 +150,6 @@ INDEXER_IMAGE_TAG=implementation-drips-a1b2c3d \
 ORACLE_IMAGE_TAG=v1.4.0 \
 docker compose -f docker-compose.production.yml up -d --no-build
 ```
-
-> **Known issue — the `indexer` image does not build today.** This is
-> pre-existing on `implementation-drips` and unrelated to the compose file:
-> `indexer/` does not typecheck, so its Dockerfile's `npm run build` fails.
-> Six errors, three causes — `zod` is imported by
-> `indexer/src/config/index.ts` but is not in `indexer/package.json`;
-> `indexer/src/backfill.ts` imports a `pool` export that `./db.js` does not
-> have; and `handlers/claim.ts` and `handlers/reward_points.ts` pass a
-> `CacheClient` where `RedisClient` is expected, whose `del` return types
-> disagree. Reproduce with `cd indexer && npm run typecheck`. Every other
-> service builds and comes up. Bring the rest up with:
->
-> ```bash
-> docker compose -f docker-compose.production.yml up -d --build \
->   postgres redis api oracle-aggregator oracle-monitor
-> ```
 
 ### Why the oracle is two services
 
@@ -198,6 +198,81 @@ docker compose -f docker-compose.production.yml --profile migrate run --rm migra
 Both paths run [`scripts/init-db.sh`](scripts/init-db.sh) and both are
 idempotent — already-applied migrations are skipped, and each migration
 commits together with its bookkeeping row.
+
+### Deploy flow
+
+[`scripts/deploy.sh`](scripts/deploy.sh) is the deploy entry point: it runs the
+migration step and then starts the application services, in the right order,
+so api/indexer never boot against a half-migrated schema.
+
+```bash
+cd infra
+./scripts/deploy.sh                        # migrate + full stack
+./scripts/deploy.sh --services api,indexer # migrate, then only those services
+./scripts/deploy.sh --skip-migrate         # deploy without migrating
+./scripts/deploy.sh --no-build             # reuse existing images
+```
+
+What it does, in order:
+
+1. **Data plane.** Starts `postgres`, `redis` and `log-collector` and waits
+   for postgres to report healthy (`--wait`).
+2. **Migrations.** Runs the `migrate` profile (`init-db.sh`) against the
+   running database — the same idempotent path documented above.
+3. **Application services.** Brings up the rest of the stack (api, indexer,
+   oracle-*), or only the services named with `--services` / positional args.
+
+The script reads everything from `infra/.env` (override with `--env-file` or
+`COMPOSE_FILE`), never touches host state outside `infra/`, and is safe to run
+repeatedly and from CI. Passing `--skip-migrate` disables step 2 for
+operations that already applied migrations out of band — use with care.
+
+### Reverse proxy and TLS
+
+The `proxy` service runs [Caddy](https://caddyserver.com/) in front of the
+API and terminates TLS. Config lives entirely in
+[`proxy/`](proxy/): the [`Caddyfile`](proxy/Caddyfile) and a one-line
+[`Dockerfile`](proxy/Dockerfile) that pins the official `caddy:2.11.2-alpine`
+image. Clients reach the stack only over HTTPS; the API's own host ports stay
+bound to `127.0.0.1`, so nothing can bypass the proxy.
+
+**How it proxies.** Caddy forwards everything to `api:4000` on the compose
+network. Docker's built-in DNS resolves `api` round-robin across all API
+replicas, so no explicit upstream list or extra load balancer is needed —
+Caddy just load-balances whatever Docker hands it. Responses are gzip-encoded.
+
+**Local testing (default).** With `PROXY_DOMAIN=localhost` (the default in
+`.env.example`) Caddy serves HTTPS using an internally-trusted certificate:
+
+```bash
+cd infra && ./scripts/deploy.sh
+curl -k https://localhost/healthz     # -> ok (through TLS + proxy)
+curl -k https://localhost/api/v1/...  # -> your API response
+```
+
+`curl -k` is only needed because the localhost certificate is not in your
+system trust store. The proxy's own container healthcheck hits a plain-HTTP
+liveness endpoint on an internal port, so the service reports healthy
+regardless of the TLS certificate state.
+
+**Production.** Set a real domain and a Let's Encrypt account email in
+`infra/.env` and redeploy:
+
+```bash
+PROXY_DOMAIN=api.ipredict.app
+ACME_EMAIL=ops@example.com
+```
+
+Caddy then provisions and renews a Let's Encrypt certificate automatically
+(automatic HTTPS). Requirements: ports 80 and 443 reachable from the
+internet, and a DNS `A`/`AAAA` record pointing at the host. Certificates and
+the ACME account live in the persistent `caddy-data` volume, so restarts do
+not re-issue them.
+
+**Custom internal hostnames.** For a non-public hostname that is not
+`localhost` (e.g. `api.internal`), add `tls internal` to the site block in
+[`proxy/Caddyfile`](proxy/Caddyfile) so Caddy uses its internal CA instead of
+attempting Let's Encrypt.
 
 ## Configuration and secrets
 
@@ -355,18 +430,89 @@ What the scripts guarantee:
   it requires typing `restore` at a prompt, or `--yes`. Non-interactively
   without `--yes` it refuses outright.
 
-Schedule it from cron on the host (not in a container — it needs the docker
+### Schedule
+
+Backups run from cron on the host (not in a container — it needs the docker
 socket or a reachable `DATABASE_URL`):
 
 ```cron
+# 03:15 daily — full verified dump, 7-day retention
 15 3 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups ./scripts/backup.sh >> /var/log/ipredict-backup.log 2>&1
+# 04:15 daily — prove the newest dump actually restores
+15 4 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups VERIFY_METRICS_FILE=/var/lib/node_exporter/textfile/ipredict_backup.prom BACKUP_ALERT_WEBHOOK_URL=$ALERT_WEBHOOK_URL ./scripts/verify-backup.sh >> /var/log/ipredict-verify.log 2>&1
 ```
 
-Restore into a scratch database and diff row counts on a schedule. A backup
-nobody has restored is a hypothesis, not a backup.
+- **Frequency:** daily. **Retention:** 7 daily dumps (`BACKUP_RETENTION_DAYS`).
+- **Offsite:** sync `/srv/backups` to object storage after each run (`aws s3
+  sync`, `rclone`) — a backup on the same host is not a backup.
 
-After a restore, re-run migrations so `schema_migrations` matches the code,
-then restart the API and indexer so they reconnect to the rebuilt schema.
+### Verification (not assumed — proven)
+
+[`scripts/verify-backup.sh`](scripts/verify-backup.sh) is the automated restore
+test. It stands up a throwaway `postgres:16` container, restores the newest
+dump into it, checks the result, and tears it down. It exits non-zero — and
+POSTs `{"type":"backup.verification_failed"}` to `$BACKUP_ALERT_WEBHOOK_URL`
+(or `$ALERT_WEBHOOK_URL`) — if any check fails:
+
+- every core table is present (`markets`, `bets`, `events`,
+  `oracle_submissions`, `leaderboard`, `council_votes`, `schema_migrations`);
+- `pg_restore --exit-on-error` completed — no partial restore;
+- the dump's `schema_migrations` count is **≥** the repo's up-migration count
+  (catches a backup taken before a schema change);
+- referential sanity — no `bets` rows orphaned from `markets`.
+
+With `VERIFY_METRICS_FILE` set it writes a Prometheus textfile:
+`ipredict_backup_verify_success`, `..._restore_seconds`,
+`..._dump_age_seconds`, `..._timestamp_seconds`.
+
+```bash
+./scripts/verify-backup.sh                    # newest dump in $BACKUP_DIR
+./scripts/verify-backup.sh /srv/backups/x.dump
+```
+
+### Recovery objectives (measured)
+
+| Objective | Target | How it is measured |
+|---|---|---|
+| **RPO** (max data loss) | ≤ 24h from backup; ~minutes in practice | `dump_age_seconds` from `verify-backup.sh`. Chain-derived rows after the last dump are recoverable by replay (see below), so effective RPO for that state is ~0. |
+| **RTO** (time to restore service) | ≤ 1h | `restore_seconds` from `verify-backup.sh` (dominant term) + migration re-run + service restart. Record the observed number here after each DR drill: `<fill in>`. |
+
+Non–chain-derived state (that which a replay cannot rebuild — see
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery") sets the true RPO floor, which
+is why the daily off-host backup is load-bearing.
+
+### Secondary recovery path — replay from chain
+
+Most state (`markets`, `bets`, resolutions) derives from on-chain events and can
+be rebuilt without a backup by replaying: `indexer … --backfill`, then
+`npm run rebuild:leaderboard`. Bounded by RPC event retention —
+`getBackfillCoverage()` (`indexer/src/backfill.ts`) reports the ledger range a
+replay can currently reach. Full procedure and the reconstructible/not list:
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery".
+
+### After any restore
+
+Re-run migrations so `schema_migrations` matches the code, then restart the API
+and indexer so they reconnect to the rebuilt schema.
+
+## Data retention
+
+Full policy: [`docs/DATA-RETENTION.md`](../docs/DATA-RETENTION.md). Every data
+category has a stated retention period and justification, recorded in the
+`data_retention_policies` table. Operational data is purged automatically;
+audit data (finalized oracle submissions, council votes, disputes) is kept for
+a deliberately long window and only ever removed by a reviewed manual process.
+
+Run the operational sweep daily from cron on the DB host:
+
+```cron
+30 3 * * * psql "$DATABASE_URL" -c "SELECT * FROM enforce_data_retention();" >> /var/log/ipredict-retention.log 2>&1
+```
+
+`enforce_data_retention()` returns a row count per category and is safe to
+re-run. Alert if the log shows no run in 48h, or if `dead_letter_events` /
+`events` row counts grow past their windows (Prometheus: scrape
+`pg_stat_user_tables` or add a small exporter query).
 
 ## Contributing
 
@@ -559,12 +705,95 @@ cd infra
 docker compose -f docker-compose.production.yml up -d --build
 ```
 
-If you need to bring an individual component up for debugging (skipping the
-indexer build problems), run the subset explicitly:
+If you need to bring an individual component up for debugging, run the subset
+explicitly:
 
 ```bash
 docker compose -f docker-compose.production.yml up -d postgres redis api
 ```
+
+```
+
+Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:
+
+```yaml
+rule_files:
+  - /etc/prometheus/alerts.yml
+```
+
+Validate the rules before deploying:
+
+```bash
+promtool check rules infra/prometheus/alerts.yml
+```
+
+The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
+`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
+`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
+to be exported. API and database latency must be Prometheus histograms with
+millisecond buckets.
+
+### Alertmanager (webhook / Slack)
+
+[`alertmanager.yml`](alertmanager.yml) receives every alert Prometheus raises
+from `prometheus/alerts.yml` and delivers it to a generic **webhook** receiver
+and — for `severity=critical` alerts — to a **Slack** channel as well.
+
+The routing tree:
+
+| Matcher | Receiver | When |
+|---|---|---|
+| `severity = "critical"` | `on-call-slack` (and webhook) | Indexer / market stuck, DB slow |
+| `severity =~ "warning\|info"` (or unset) | `webhook` | RPC error rate up, API p99 up |
+
+Local compose wires Alertmanager in automatically:
+
+```bash
+cd infra
+cp .env.monitoring.example .env       # optional; defaults are secret-free
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+- **UI**: http://localhost:9093
+- **Prometheus -> Status -> Alertmanagers** shows the `alertmanager:9093` target
+- The `alerting.alertmanagers` block in
+  [`prometheus/prometheus.yml`](prometheus/prometheus.yml) is what points
+  Prometheus at it
+
+Receiver URLs are injected from the environment at startup
+(`--config.expand-env=true`), so **no secret is stored in the repo**:
+
+| Variable | Where it lands | Default when unset |
+|---|---|---|
+| `ALERT_WEBHOOK_URL` | `receivers.webhook.webhook_configs[0].url` | `http://host.docker.internal:8090/ipredict-alerts` (no-op local sink) |
+| `SLACK_WEBHOOK_URL` | `global.slack_api_url` + `slack_configs.api_url` | empty → Slack receiver is a no-op |
+
+The default webhook URL is deliberately a no-op sink so the stack starts
+secret-free for a local smoke test. Point `ALERT_WEBHOOK_URL` at Slack's
+incoming-webhook URL (see
+[Slack's docs](https://api.slack.com/messaging/webhooks)), PagerDuty's Events
+API, or any Alertmanager webhook v2 endpoint to get real deliveries. Once a
+real URL is set, fire a test alert to confirm end-to-end delivery:
+
+```bash
+curl -X POST http://localhost:9093/api/v1/alerts -d '[
+  {
+    "labels": { "alertname": "TestAlert", "severity": "critical", "service": "indexer" },
+    "annotations": { "summary": "Test alert", "description": "Smoke-testing Alertmanager" }
+  }
+]'
+```
+
+Validate the Alertmanager config before deploying:
+
+```bash
+# with the monitoring stack running:
+docker compose -f docker-compose.monitoring.yml exec alertmanager \
+  amtool check-config /etc/alertmanager/alertmanager.yml
+```
+
+`amtool` also prints the effective routing tree with
+`amtool config routes show` when the Slack webhook URL is set.
 
 ### Grafana dashboards
 

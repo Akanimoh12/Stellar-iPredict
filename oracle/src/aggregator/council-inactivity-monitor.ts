@@ -84,9 +84,10 @@ export async function checkCouncilWindowExceeded(
   return alerts;
 }
 
-// The join is on the raw ids: council_votes.market_id is BIGINT and
-// oracle_submissions.market_id is INTEGER, which Postgres compares directly.
-// Casting the right side to text instead raised "operator does not exist:
+// The join is on the raw ids: council_votes.market_id and
+// oracle_submissions.market_id are both BIGINT (widened from INTEGER in
+// migration 0021, issue #407) so Postgres compares them directly. Casting
+// the right side to text instead raised "operator does not exist:
 // bigint = text" on every call.
 //
 // Both queries below compare `s.status` as text. `oracle_submission_status`

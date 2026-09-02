@@ -347,6 +347,26 @@ export function serializeMetrics(): string {
   return lines.join("\n") + "\n" + serializeCacheMetrics();
 }
 
+/**
+ * Serialise the database connection-pool gauges (issue #417).
+ *
+ * The pool module is imported lazily so that loading the metrics serialiser
+ * never forces a `DATABASE_URL`/pool to be created in tests or other contexts
+ * that never touch the metrics endpoint.
+ */
+export async function serializePoolMetrics(): Promise<string> {
+  const { getPoolMetrics } = await import("./db/pool.js");
+  const { total, idle, waiting } = getPoolMetrics();
+
+  return [
+    "# HELP db_pool_connections Database connection pool occupancy",
+    "# TYPE db_pool_connections gauge",
+    `db_pool_connections_total ${total}`,
+    `db_pool_connections_idle ${idle}`,
+    `db_pool_connections_waiting ${waiting}`,
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Fastify integration
 // ---------------------------------------------------------------------------
@@ -398,7 +418,10 @@ export function registerMetricsEndpoint(app: FastifyInstance): void {
       },
     },
     async (_req, reply) => {
-      reply.type("text/plain; version=0.0.4; charset=utf-8").send(serializeMetrics());
+      const pool = await serializePoolMetrics();
+      reply
+        .type("text/plain; version=0.0.4; charset=utf-8")
+        .send(`${serializeMetrics()}\n${pool}`);
     }
   );
 }

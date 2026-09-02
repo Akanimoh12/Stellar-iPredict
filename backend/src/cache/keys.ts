@@ -68,6 +68,10 @@ export function statsKey(): CacheKey {
   return cacheKey("stats", "global");
 }
 
+export function statusKey(): CacheKey {
+  return cacheKey("status", "feed");
+}
+
 export function betsKey(marketId: MarketId): CacheKey {
   return cacheKey("bets", marketId);
 }
@@ -84,6 +88,9 @@ export const CACHE_TTLS = {
   statsGlobal: 60,
   bets: 30,
   odds: 30,
+  // Short: a status page polls often, and a stale health signal is worse than
+  // an extra query. Long enough to absorb a burst of pollers.
+  statusFeed: 15,
 } as const;
 
 export const CACHE_TTL_MS = {
@@ -94,6 +101,7 @@ export const CACHE_TTL_MS = {
   statsGlobal: CACHE_TTLS.statsGlobal * 1_000,
   bets: CACHE_TTLS.bets * 1_000,
   odds: CACHE_TTLS.odds * 1_000,
+  statusFeed: CACHE_TTLS.statusFeed * 1_000,
 } as const;
 
 export const CACHE_KEYS = {
@@ -104,6 +112,7 @@ export const CACHE_KEYS = {
   statsGlobal: statsKey,
   bets: betsKey,
   odds: oddsKey,
+  statusFeed: statusKey,
 } as const;
 
 export const CACHE_REGISTRY = {

@@ -135,11 +135,26 @@ export type RecordOracleSubmissionInput = {
   marketId: number;
   provider: string;
   outcome: string;
+  bondAmount: string | number;
+  nonce?: string;
+  requestTimestamp?: Date;
+};
+export type RecordOracleSubmissionInput = {
+  marketId: number;
+  provider: string;
+  outcome: string;
   bondAmount?: string | number;
   nonce?: string;
   requestTimestamp?: Date;
 };
 
+let pool: Pool | undefined;
+
+export function setOracleDbPool(p: Pool): void {
+  pool = p;
+}
+
+  const bondAmountStr = String(input.bondAmount);
 export async function recordOracleSubmission(
   input: RecordOracleSubmissionInput,
   db: Queryable,

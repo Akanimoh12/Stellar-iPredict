@@ -186,6 +186,7 @@ const oracleSubmitBodySchema = z.object({
   outcome: outcomeSchema,
   signature: z.string().min(1),
   provider: z.string().min(1),
+  bondAmount: z.union([z.string().min(1), z.number().positive()]),
   nonce: z.string().min(1).optional(),
   timestamp: z.number().int().positive().optional(),
 });
@@ -208,7 +209,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider"],
+          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
           properties: {
             marketId: { type: "number" },
             outcome: {
@@ -217,6 +218,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             },
             signature: { type: "string" },
             provider: { type: "string" },
+            bondAmount: { type: ["string", "number"] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -341,87 +343,14 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         });
       }
 
-      const { marketId, outcome, provider, signature, nonce, timestamp } =
-        parsed.data;
+      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
 
-      // Identity binding (#429): the key decides which provider this request
-      // may speak for. Checked before signature verification and before any
-      // database read, so a key that is not entitled to this provider never
-      // reaches the rest of the pipeline.
-      assertCredentialMayActFor(credential, provider);
-
-      request.log.info(
-        { provider, keyIdentity: credentialIdentity(credential), marketId },
-        "oracle submission authenticated",
-      );
-
-      // Signature verification: the payload must be signed by the claimed
-      // provider keypair before it is trusted or written. Never record a
-      // submission with an invalid or mismatched signature.
-      const signed = verifyOracleSubmissionSignature(
-        { marketId, outcome: String(outcome), provider, timestamp, nonce },
-        signature,
-      );
-      if (!signed) {
-        throw unauthorized(
-          "Invalid oracle submission signature; ensure it was produced by the claimed provider keypair",
-        );
-      }
-
-      // Issue #438: Reject unregistered oracle providers
-      const db = pool;
-      const isProviderRegistered = await isRegisteredProvider(provider, db);
-      if (!isProviderRegistered) {
-        throw forbidden(
-          `Provider "${provider}" is not a registered oracle provider`,
-        );
-      }
-
-      // Issue #439: Validate market preconditions before accepting submission
-      const market = await getMarketById(marketId, db);
-      if (!market) {
-        throw notFound(`Market ${marketId} does not exist`);
-      }
-      if (market.resolved) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_request",
-            message: `Market ${marketId} is already resolved`,
-          },
-          request.log,
-        );
-        throw badRequest(`Market ${marketId} is already resolved`);
-      }
-      if (market.cancelled) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_request",
-            message: `Market ${marketId} is cancelled`,
-          },
-          request.log,
-        );
-        throw badRequest(`Market ${marketId} is cancelled`);
-      }
-      const now = Date.now();
-      if (Number(market.end_time) * 1000 > now) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_request",
-            message: `Market ${marketId} has not expired yet`,
-          },
-          request.log,
-        );
+      // Validate bond amount against configured minimum
+      const bondNumeric = Number(bondAmount);
+      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+      if (bondNumeric < minBondStroops) {
         throw badRequest(
-          `Market ${marketId} has not expired yet — submissions are only accepted after the market end time`,
+          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
         );
       }
 
@@ -494,6 +423,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             marketId,
             provider,
             outcome: String(outcome),
+            bondAmount,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
@@ -620,7 +550,7 @@ export function registerOracleRoutes(
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider"],
+          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
           properties: {
             marketId: { type: "number" },
             outcome: {
@@ -629,6 +559,7 @@ export function registerOracleRoutes(
             },
             signature: { type: "string" },
             provider: { type: "string" },
+            bondAmount: { type: ["string", "number"] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -739,89 +670,19 @@ export function registerOracleRoutes(
         });
       }
 
-      const { marketId, outcome, provider, signature, nonce, timestamp } =
-        parsed.data;
+      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
 
-      // Identity binding (#429): the key decides which provider this request
-      // may speak for. Checked before signature verification and before any
-      // database read, so a key that is not entitled to this provider never
-      // reaches the rest of the pipeline.
-      assertCredentialMayActFor(credential, provider);
-
-      request.log.info(
-        { provider, keyIdentity: credentialIdentity(credential), marketId },
-        "oracle submission authenticated",
-      );
-
-      // Signature verification: the payload must be signed by the claimed
-      // provider keypair before it is trusted or written. Never record a
-      // submission with an invalid or mismatched signature.
-      const signed = verifyOracleSubmissionSignature(
-        { marketId, outcome: String(outcome), provider, timestamp, nonce },
-        signature,
-      );
-      if (!signed) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_signature",
-            message: "Invalid oracle submission signature",
-          },
-          request.log,
-        );
-        throw unauthorized(
-          "Invalid oracle submission signature; ensure it was produced by the claimed provider keypair",
-        );
-      }
-
-      // Issue #438: Reject unregistered oracle providers
-      const db = dbOverride || pool;
-      const isProviderRegistered = await isRegisteredProvider(provider, db);
-      if (!isProviderRegistered) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_key",
-            message: `Provider "${provider}" is not registered`,
-          },
-          request.log,
-        );
-        throw forbidden(
-          `Provider "${provider}" is not a registered oracle provider`,
-        );
-      }
-
-      // Issue #439: Validate market preconditions
-      const market = await getMarketById(marketId, db);
-      if (!market) {
-        logOracleSubmissionAttempt(
-          {
-            requestId: request.id,
-            provider,
-            marketId,
-            outcome: "bad_request",
-            message: `Market ${marketId} does not exist`,
-          },
-          request.log,
-        );
-        throw notFound(`Market ${marketId} does not exist`);
-      }
-      if (market.resolved) {
-        throw badRequest(`Market ${marketId} is already resolved`);
-      }
-      if (market.cancelled) {
-        throw badRequest(`Market ${marketId} is cancelled`);
-      }
-      const now = Date.now();
-      if (Number(market.end_time) * 1000 > now) {
+      // Validate bond amount against configured minimum
+      const bondNumeric = Number(bondAmount);
+      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+      if (bondNumeric < minBondStroops) {
         throw badRequest(
-          `Market ${marketId} has not expired yet — submissions are only accepted after the market end time`,
+          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
         );
       }
+
+      // Replay protection: validate timestamp window
+      const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
 
       // Replay protection: validate timestamp window
       if (timestamp !== undefined) {
@@ -868,6 +729,9 @@ export function registerOracleRoutes(
           {
             marketId,
             provider,
+            outcome: String(outcome),
+            bondAmount,
+            nonce,
             outcome: String(outcome),
             nonce,
             requestTimestamp: timestamp

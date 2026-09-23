@@ -76,6 +76,7 @@ as the aggregator — see
 
 ## Documentation
 
+- **[Oracle Provider Integration Contract](../docs/ORACLE_AND_BACKEND.md#part-5--oracle-provider-integration-contract)** — integration guide for oracle providers: authentication, canonical signing, error codes, and client example
 - **[Council Runbook](./docs/COUNCIL_RUNBOOK.md)** — operational guide for council members and aggregator operators
 - **[Architecture Overview](../docs/ORACLE_AND_BACKEND.md)** — design document for oracle and backend systems
 

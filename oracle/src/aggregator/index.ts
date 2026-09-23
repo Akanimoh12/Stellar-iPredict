@@ -48,7 +48,10 @@ export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type Stuc
 export { ResolverKeyManager } from "./key-rotation.js";
 export {
   AggregatorMetrics,
+  AggregatorMetricsServer,
+  DEFAULT_LAG_BUCKETS_HOURS,
   ORACLE_RESOLUTION_LAG_H_METRIC,
+  type AggregatorMetricsServerOptions,
   type AggregatorMetricsSnapshot,
   type NamedMetric,
   type ResolutionLagEntry,
@@ -341,16 +344,19 @@ export function createProductionDependencies(
   };
 }
 
+export interface RunAggregatorOptions {
+  signal: AbortSignal;
+  pollIntervalMs: number;
+  batchSize?: number;
+  logger?: Logger;
+  alertSender?: (alert: any) => Promise<void>;
+  onIterationComplete?: (timestamp: number) => void;
+  metrics?: AggregatorMetrics;
+}
+
 export async function runAggregator(
   dependencies: AggregatorDependencies,
-  options: { signal: AbortSignal; pollIntervalMs: number; logger?: Logger; alertSender?: (alert: any) => Promise<void> },
-  options: {
-    signal: AbortSignal;
-    pollIntervalMs: number;
-    batchSize?: number;
-    logger?: Logger;
-    onIterationComplete?: (timestamp: number) => void;
-  },
+  options: RunAggregatorOptions,
 ): Promise<void> {
   const logger = options.logger;
   const alertSender = options.alertSender;
@@ -361,57 +367,79 @@ export async function runAggregator(
   try {
     while (!options.signal.aborted) {
       const startedAt = Date.now();
-      const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
-      let marketsProcessed = 0;
+      const now = new Date();
+      const backlogDepth = dependencies.getBacklogDepth
+        ? await dependencies.getBacklogDepth(now)
+        : undefined;
 
-      for (const market of markets) {
+      let marketsChecked = 0;
+      let marketsProcessed = 0;
+      let offset = 0;
+      const batchSize = options.batchSize;
+
+      for (;;) {
         if (options.signal.aborted) break;
 
-        try {
-          await dependencies.processMarket(market);
-          // Reset failure count on success
-          marketFailureMap.delete(market.id);
-          marketsProcessed++;
-        } catch (error) {
-          const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
-          marketFailureMap.set(market.id, failureCount);
+        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, offset);
+        if (batch.length === 0) break;
 
-          logger?.error("market processing failed", {
-            marketId: market.id,
-            error,
-            consecutiveFailures: failureCount,
-          });
+        for (const market of batch) {
+          if (options.signal.aborted) break;
+          options.metrics?.recordMarketProcessed();
 
-          // Escalate after threshold
-          if (failureCount >= FAILURE_THRESHOLD && alertSender) {
-            try {
-              await alertSender({
-                marketId: market.id,
-                attempts: failureCount,
-                error,
-              });
-            } catch (alertError) {
-              logger?.error("failed to send failure alert", {
-                marketId: market.id,
-                alertError,
-              });
+          try {
+            await dependencies.processMarket(market);
+            marketFailureMap.delete(market.id);
+            marketsProcessed++;
+            options.metrics?.recordMarketFinalized();
+          } catch (error) {
+            options.metrics?.recordMarketFailed();
+            const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
+            marketFailureMap.set(market.id, failureCount);
+
+            logger?.error("market processing failed", {
+              marketId: market.id,
+              error,
+              consecutiveFailures: failureCount,
+            });
+
+            if (failureCount >= FAILURE_THRESHOLD && alertSender) {
+              try {
+                await alertSender({
+                  marketId: market.id,
+                  attempts: failureCount,
+                  error,
+                });
+              } catch (alertError) {
+                logger?.error("failed to send failure alert", {
+                  marketId: market.id,
+                  alertError,
+                });
+              }
             }
           }
-
-          // Continue to next market instead of failing the entire loop
+          marketsChecked += 1;
         }
+
+        if (batchSize === undefined || batchSize <= 0 || batch.length < batchSize) {
+          break;
+        }
+        offset += batchSize;
       }
 
-      const iterationDurationMs = Date.now() - startedAt;
+      const completedAt = Date.now();
+      options.onIterationComplete?.(completedAt);
+      options.metrics?.recordPollCompleted(completedAt);
+
+      const iterationDurationMs = completedAt - startedAt;
       logger?.info("poll iteration complete", {
-        marketsChecked: markets.length,
+        marketsChecked,
         marketsProcessed,
+        backlogDepth,
         durationMs: iterationDurationMs,
       });
 
       if (!options.signal.aborted) {
-        // Calculate adjusted sleep to maintain consistent poll interval
-        // Issue #448: Prevent interval drift by subtracting iteration duration
         const adjustedSleepMs = Math.max(0, options.pollIntervalMs - iterationDurationMs);
 
         if (adjustedSleepMs < options.pollIntervalMs && iterationDurationMs > options.pollIntervalMs) {
@@ -435,59 +463,6 @@ export async function runAggregator(
             );
           });
         }
-      const now = new Date();
-      const backlogDepth = dependencies.getBacklogDepth ? await dependencies.getBacklogDepth(now) : undefined;
-      
-      let marketsChecked = 0;
-      let offset = 0;
-      const batchSize = options.batchSize;
-
-      for (;;) {
-        if (options.signal.aborted) break;
-
-        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, offset);
-        if (batch.length === 0) break;
-
-        for (const market of batch) {
-          if (options.signal.aborted) break;
-          try {
-            await dependencies.processMarket(market);
-          } catch (error) {
-            logger?.error("error processing market in aggregator poll", {
-              marketId: market.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-          marketsChecked += 1;
-        }
-
-        if (batchSize === undefined || batchSize <= 0 || batch.length < batchSize) {
-          break;
-        }
-        offset += batchSize;
-      }
-
-      const completedAt = Date.now();
-      options.onIterationComplete?.(completedAt);
-
-      logger?.info("poll iteration complete", {
-        marketsChecked,
-        backlogDepth,
-        durationMs: completedAt - startedAt,
-      });
-
-      if (!options.signal.aborted) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, options.pollIntervalMs);
-          options.signal.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
-        });
       }
     }
   } finally {
@@ -504,8 +479,10 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   process.once("SIGTERM", shutdown);
 
   let metrics: OracleMetricsRuntime | undefined;
+  let aggMetricsServer: AggregatorMetricsServer | undefined;
   let healthServer: AggregatorHealthServer | undefined;
   let lastPollCompletedAt: number | null = null;
+  const aggregatorMetrics = new AggregatorMetrics();
 
   const dependencies = createProductionDependencies(config, logger);
 
@@ -518,6 +495,18 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
       });
     } catch (error) {
       logger.error("oracle metrics endpoint failed to start", { error });
+    }
+
+    try {
+      aggMetricsServer = new AggregatorMetricsServer({
+        metrics: aggregatorMetrics,
+        port: Number(process.env.AGGREGATOR_METRICS_PORT ?? 9102),
+        host: process.env.AGGREGATOR_METRICS_HOST ?? "0.0.0.0",
+      });
+      await aggMetricsServer.start();
+      logger.info("aggregator prometheus metrics server started", { port: 9102 });
+    } catch (error) {
+      logger.error("aggregator prometheus metrics server failed to start", { error });
     }
 
     if (config.HEALTH_ENABLED) {
@@ -549,6 +538,7 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
       pollIntervalMs: config.POLL_INTERVAL_MS,
       batchSize: config.AGGREGATOR_BATCH_SIZE,
       logger,
+      metrics: aggregatorMetrics,
       onIterationComplete: (timestamp) => {
         lastPollCompletedAt = timestamp;
       },
@@ -557,6 +547,7 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
     process.off("SIGINT", shutdown);
     process.off("SIGTERM", shutdown);
     await healthServer?.stop();
+    await aggMetricsServer?.stop();
     await metrics?.stop();
   }
 }

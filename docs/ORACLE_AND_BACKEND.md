@@ -745,3 +745,218 @@ jobs:
 | Prometheus + Grafana | P1 | 1 week | Production monitoring |
 | Full DNN integration | P2 | 3 months | Phase 3 |
 | Dispute mechanism | P2 | 6 weeks | Phase 2 |
+
+---
+
+## Part 5 — Oracle Provider Integration Contract
+
+This contract specifies how an external oracle provider integrates with the iPredict backend submission API (`POST /api/v1/oracle/submit`).
+
+### 1. Authentication & Credential Lifecycle
+
+All requests to `/api/v1/oracle/submit` must be authenticated with a configured provider API key.
+
+#### Header Formats
+The API key may be passed via any of the following headers:
+- `Authorization: Bearer <API_KEY>`
+- `Authorization: API-Key <API_KEY>`
+- `x-api-key: <API_KEY>`
+
+#### Provider Identity Binding
+Each API key is bound to a specific Stellar provider public key (`G...` address). When a submission is processed:
+1. The server authenticates the key (401 if missing or invalid).
+2. The server verifies that the key is authorized to submit for the `provider` address declared in the payload (403 `FORBIDDEN` if attempting to submit on behalf of an address the key does not own).
+
+#### Credential Rotation
+Multiple API keys can be bound to the same provider in backend configuration (`ORACLE_API_KEYS` in JSON or comma-separated format). To rotate credentials without downtime:
+1. Operator issues a new secondary API key bound to the provider.
+2. Provider switches client requests to the new key.
+3. Operator deprecates and removes the old key after verification.
+
+---
+
+### 2. Canonical Signing Payload Specification
+
+Providers sign a canonical UTF-8 formatted string with their Ed25519 Stellar keypair. The signature is transmitted base64-encoded in the `signature` field.
+
+#### Format Specification
+The canonical message consists of 6 lines separated strictly by LF (`\n`, 0x0A) with no trailing newline:
+
+```text
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
+```
+
+#### Field Rules
+- Line 1: Constant literal `ipredict-oracle-submit`
+- Line 2: `market_id:<marketId>` (integer ID, e.g. `42`)
+- Line 3: `outcome:<outcome>` (canonical outcome: `YES` or `NO`)
+- Line 4: `provider:<provider>` (56-character Stellar public key string `G...`)
+- Line 5: `timestamp:<timestamp>` (Unix timestamp in seconds as integer, or `0` if omitted)
+- Line 6: `nonce:<nonce>` (opaque string nonce, or empty string if omitted)
+
+#### Worked Example (Reproducible)
+Given:
+- `marketId`: `42`
+- `outcome`: `"YES"`
+- `provider`: `"GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"`
+- `timestamp`: `1700000000`
+- `nonce`: `"nonce-test-123"`
+
+Canonical string:
+```text
+ipredict-oracle-submit
+market_id:42
+outcome:YES
+provider:GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI
+timestamp:1700000000
+nonce:nonce-test-123
+```
+
+Hex representation of canonical UTF-8 bytes:
+```text
+69707265646963742d6f7261636c652d7375626d69740a6d61726b65745f69643a34320a6f7574636f6d653a5945530a70726f76696465723a47425a584e375049525a474e4d484741374d5555554634475750593541595056364c5934555632474c36564a474951525846444e4d4144490a74696d657374616d703a313730303030303030300a6e6f6e63653a6e6f6e63652d746573742d313233
+```
+
+Using Stellar Secret Key `SDN6XAY2H7G4QO3U7I5QW6T4D5J7E3W2Q1Z9X8C7V6B5N4M3L2K1J0I`:
+- Sign the canonical string bytes via `Keypair.sign(Buffer.from(canonical, "utf8"))`.
+- Base64-encode the resulting 64-byte signature and pass it in the `signature` field.
+
+---
+
+### 3. Outcome & Bond Specifications
+
+#### Binary Outcome Encoding
+- **Canonical values:** `"YES"` or `"NO"`.
+- **Accepted aliases:** `"yes"`, `"true"`, `true`, `"1"`, `1` are normalized to `"YES"`. `"no"`, `"false"`, `false`, `"0"`, `0` are normalized to `"NO"`.
+- Signature verification is always performed against the **canonical** outcome (`YES` or `NO`).
+
+#### Submitter Bond
+- Submissions require posting a bond specified in **stroops** (`1 XLM = 10,000,000 stroops`).
+- `bondAmount` may be passed as a number or string (e.g. `1000000000` for 100 XLM).
+- Must meet or exceed the backend's configured minimum `SUBMITTER_BOND_XLM * 10,000,000`.
+
+---
+
+### 4. API Endpoints and Schema
+
+#### Request: `POST /api/v1/oracle/submit`
+Headers:
+```http
+Content-Type: application/json
+Authorization: Bearer <API_KEY>
+Idempotency-Key: <UUID> (optional)
+```
+
+Body:
+```json
+{
+  "marketId": 42,
+  "outcome": "YES",
+  "provider": "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+  "bondAmount": 1000000000,
+  "signature": "<base64-signature>",
+  "nonce": "unique-random-nonce-123",
+  "timestamp": 1700000000
+}
+```
+
+#### Successful Response: `200 OK`
+```json
+{
+  "accepted": true,
+  "count": 1,
+  "threshold": 3,
+  "submissionsNeeded": 2
+}
+```
+- `accepted` (boolean): `true` if persisted.
+- `count` (number): Current total of valid submissions recorded for this market (including this one).
+- `threshold` (number): Configured threshold needed for aggregator consensus.
+- `submissionsNeeded` (number): Remaining submissions needed (`max(0, threshold - count)`).
+
+---
+
+### 5. Error Code Enumeration & Remediation
+
+| Status | Error Code | Cause | Remediation |
+|---|---|---|---|
+| `400` | `BAD_REQUEST` | Missing or invalid field in request body schema | Verify required fields: `marketId`, `outcome`, `provider`, `bondAmount`, `signature`. |
+| `400` | `BAD_REQUEST` | Bond amount below minimum (`bondNumeric < minBondStroops`) | Increase `bondAmount` to match minimum (e.g. 100 XLM = `1000000000` stroops). |
+| `400` | `BAD_REQUEST` | Timestamp outside acceptance window | Sync system clock using NTP; ensure `timestamp` is within `ORACLE_TIMESTAMP_WINDOW_SEC` (default 300s). |
+| `400` | `BAD_REQUEST` | Nonce has already been used | Generate a unique cryptographic nonce or UUIDv4 for each request. |
+| `401` | `UNAUTHORIZED` | Missing `Authorization` or `x-api-key` header | Provide the API key via `Authorization: Bearer <API_KEY>` or `x-api-key`. |
+| `401` | `UNAUTHORIZED` | Invalid API key presented | Verify API key matches credentials provided by the platform operator. |
+| `401` | `UNAUTHORIZED` | Invalid signature for provider | Rebuild canonical string byte-for-byte; ensure provider private key corresponds to `provider` public key. |
+| `403` | `FORBIDDEN` | API key bound to another provider address | Use the API key assigned to the `provider` address declared in payload. |
+| `409` | `CONFLICT` | Market already has an oracle submission | Market already recorded an outcome submission; duplicate submissions for the same market are rejected. |
+| `409` | `CONFLICT` | Idempotency key reused with different payload | If retrying with the same idempotency key, the body must match identically. Otherwise, use a new key. |
+| `500` | `INTERNAL_SERVER_ERROR` | Database or unhandled server exception | Retry with exponential backoff and provide `Idempotency-Key` to avoid double-processing. |
+
+---
+
+### 6. Minimal Working Client Example (TypeScript)
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+export interface SubmitOutcomeParams {
+  apiUrl: string;
+  apiKey: string;
+  marketId: number;
+  outcome: "YES" | "NO";
+  keypair: Keypair;
+  bondAmountStroops?: number;
+}
+
+export async function submitOracleOutcome(params: SubmitOutcomeParams) {
+  const { apiUrl, apiKey, marketId, outcome, keypair, bondAmountStroops = 1_000_000_000 } = params;
+  const provider = keypair.publicKey();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomUUID();
+
+  // 1. Build canonical signing message (LF-separated, no trailing newline)
+  const canonicalMessage = [
+    "ipredict-oracle-submit",
+    `market_id:${marketId}`,
+    `outcome:${outcome}`,
+    `provider:${provider}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join("\n");
+
+  // 2. Sign canonical message with Ed25519 keypair
+  const signature = keypair.sign(Buffer.from(canonicalMessage, "utf8")).toString("base64");
+
+  // 3. Post to the API
+  const response = await fetch(`${apiUrl}/api/v1/oracle/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      "Idempotency-Key": nonce,
+    },
+    body: JSON.stringify({
+      marketId,
+      outcome,
+      provider,
+      bondAmount: bondAmountStroops,
+      signature,
+      timestamp,
+      nonce,
+    }),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`Oracle submission failed (${response.status}): ${body.error?.message || JSON.stringify(body)}`);
+  }
+
+  return body; // { accepted: true, count: 1, threshold: 3, submissionsNeeded: 2 }
+}
+```
+

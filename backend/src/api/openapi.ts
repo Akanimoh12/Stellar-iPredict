@@ -45,7 +45,7 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
         oracleApiKey: {
           type: "http" as const,
           scheme: "bearer",
-          description: "Oracle provider API key, for `POST /api/oracle/*`.",
+          description: "Oracle provider API key, for `POST /api/v1/oracle/submit` and `POST /api/oracle/*`.",
         },
       },
     },

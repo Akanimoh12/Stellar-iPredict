@@ -14,6 +14,32 @@ import type { OracleSubmissionRow } from "../db/types.js";
 
 const TEST_API_KEY = "test-oracle-secret-key-123";
 
+/**
+ * Produce a valid submission signature for a provider keypair. The canonical
+ * message is built from the exact fields that will appear in the request body,
+ * so provider and message stay in lockstep with the handler.
+ */
+function signedSubmission(
+  kp: Keypair,
+  marketId: number,
+  outcome: string,
+  opts: { timestamp?: number; nonce?: string; bondAmount?: string | number } = {},
+): object {
+  const bondAmount = opts.bondAmount ?? 100_0000000;
+  return {
+    marketId,
+    outcome,
+    signature: signOracleMessage(
+      { marketId, outcome, provider: kp.publicKey(), timestamp: opts.timestamp, nonce: opts.nonce },
+      kp,
+    ),
+    provider: kp.publicKey(),
+    bondAmount,
+    ...(opts.timestamp !== undefined ? { timestamp: opts.timestamp } : {}),
+    ...(opts.nonce !== undefined ? { nonce: opts.nonce } : {}),
+  };
+}
+
 describe("POST /api/oracle/submit (legacy)", () => {
   let app: FastifyInstance;
   let submissions: OracleSubmissionRow[];
@@ -194,6 +220,8 @@ describe("POST /api/oracle/submit (legacy)", () => {
     expect(res1.statusCode).toBe(200);
     expect(res1.json()).toEqual({
       accepted: true,
+      count: 1,
+      threshold: 3,
       submissionsNeeded: 2,
     });
 
@@ -210,6 +238,8 @@ describe("POST /api/oracle/submit (legacy)", () => {
     expect(res2.statusCode).toBe(200);
     expect(res2.json()).toEqual({
       accepted: true,
+      count: 2,
+      threshold: 3,
       submissionsNeeded: 1,
     });
 
@@ -226,6 +256,8 @@ describe("POST /api/oracle/submit (legacy)", () => {
     expect(res3.statusCode).toBe(200);
     expect(res3.json()).toEqual({
       accepted: true,
+      count: 3,
+      threshold: 3,
       submissionsNeeded: 0,
     });
   });
@@ -333,6 +365,7 @@ describe("POST /api/oracle/submit — outcome validation (issue #650)", () => {
       marketId,
       outcome: rawOutcome,
       provider: provider.publicKey(),
+      bondAmount: 100_0000000,
       signature: signOracleMessage(
         { marketId, outcome: canonical, provider: provider.publicKey() },
         provider,
@@ -563,5 +596,120 @@ describe("POST /api/v1/oracle/submit (versioned)", () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json().accepted).toBe(true);
+    expect(res.json().count).toBe(1);
+    expect(res.json().threshold).toBe(3);
+    expect(res.json().submissionsNeeded).toBe(2);
   });
 });
+
+import {
+  closeTestApp,
+  createTestApp,
+  isTestDatabaseAvailable,
+  truncateAll,
+  type TestApp,
+} from "../../test/setup.js";
+
+const dbAvailable = await isTestDatabaseAvailable();
+
+describe.skipIf(!dbAvailable)(
+  "POST /api/v1/oracle/submit (integration against real database)",
+  () => {
+    let testApp: TestApp;
+    const providerA = Keypair.random();
+    const providerB = Keypair.random();
+
+    beforeAll(async () => {
+      testApp = await createTestApp();
+    });
+
+    afterAll(async () => {
+      await closeTestApp(testApp);
+    });
+
+    beforeEach(async () => {
+      process.env.ORACLE_API_KEY = TEST_API_KEY;
+      await truncateAll(testApp.pool);
+
+      // Seed market (id: 101) so foreign key constraints on oracle_submissions are satisfied
+      await testApp.pool.query(
+        `INSERT INTO markets (id, question, end_time, total_yes, total_no, resolved, cancelled, creator, bet_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [101, "Will XLM reach $5 by 2027?", 1893456000, "0", "0", false, false, providerA.publicKey(), 0],
+      );
+    });
+
+    it("persists submission end-to-end to real PostgreSQL and matches reported output", async () => {
+      const payload = signedSubmission(providerA, 101, "YES", { bondAmount: 100_0000000 });
+
+      const res = await testApp.server.inject({
+        method: "POST",
+        url: "/api/v1/oracle/submit",
+        headers: {
+          authorization: `Bearer ${TEST_API_KEY}`,
+        },
+        payload,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const json = res.json();
+      expect(json).toEqual({
+        accepted: true,
+        count: 1,
+        threshold: 3,
+        submissionsNeeded: 2,
+      });
+
+      // Query real PostgreSQL database row
+      const dbRes = await testApp.pool.query<OracleSubmissionRow>(
+        "SELECT * FROM oracle_submissions WHERE market_id = $1",
+        [101],
+      );
+
+      expect(dbRes.rows).toHaveLength(1);
+      const row = dbRes.rows[0];
+      expect(String(row.market_id)).toBe("101");
+      expect(row.submitter.trim()).toBe(providerA.publicKey());
+      expect(row.outcome).toBe("YES");
+      expect(row.status).toBe("submitted");
+      expect(row.bond_amount).toBe("1000000000");
+    });
+
+    it("enforces duplicate-market constraint with 409 Conflict against real database", async () => {
+      // First submission
+      const res1 = await testApp.server.inject({
+        method: "POST",
+        url: "/api/v1/oracle/submit",
+        headers: {
+          authorization: `Bearer ${TEST_API_KEY}`,
+        },
+        payload: signedSubmission(providerA, 101, "YES"),
+      });
+      expect(res1.statusCode).toBe(200);
+
+      // Second submission on the same market from providerB
+      const res2 = await testApp.server.inject({
+        method: "POST",
+        url: "/api/v1/oracle/submit",
+        headers: {
+          authorization: `Bearer ${TEST_API_KEY}`,
+        },
+        payload: signedSubmission(providerB, 101, "NO"),
+      });
+
+      expect(res2.statusCode).toBe(409);
+      const body = res2.json();
+      expect(body.error.code).toBe("CONFLICT");
+      expect(body.error.message).toContain("101");
+    });
+
+    it("resets state between tests so tests pass repeatedly in any order", async () => {
+      // Verify market 101 has 0 submissions after beforeEach truncate
+      const dbRes = await testApp.pool.query(
+        "SELECT COUNT(*)::text AS count FROM oracle_submissions WHERE market_id = $1",
+        [101],
+      );
+      expect(dbRes.rows[0].count).toBe("0");
+    });
+  },
+);

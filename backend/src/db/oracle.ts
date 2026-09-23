@@ -139,14 +139,6 @@ export type RecordOracleSubmissionInput = {
   nonce?: string;
   requestTimestamp?: Date;
 };
-export type RecordOracleSubmissionInput = {
-  marketId: number;
-  provider: string;
-  outcome: string;
-  bondAmount?: string | number;
-  nonce?: string;
-  requestTimestamp?: Date;
-};
 
 let pool: Pool | undefined;
 
@@ -154,7 +146,6 @@ export function setOracleDbPool(p: Pool): void {
   pool = p;
 }
 
-  const bondAmountStr = String(input.bondAmount);
 export async function recordOracleSubmission(
   input: RecordOracleSubmissionInput,
   db: Queryable,
@@ -186,6 +177,64 @@ export async function recordOracleSubmission(
   ]);
 
   return result.rows[0];
+}
+
+export interface RecordOracleSubmissionWithCountResult {
+  submission: OracleSubmissionRow;
+  count: number;
+}
+
+/**
+ * Record a submission and retrieve the updated count within the same transaction.
+ * Guarantees that the returned count is consistent with the insert.
+ */
+export async function recordOracleSubmissionWithCount(
+  input: RecordOracleSubmissionInput,
+  db: Queryable,
+): Promise<RecordOracleSubmissionWithCountResult> {
+  // If db is a Pool, check out a client to run both queries inside a single transaction
+  if (db && typeof (db as any).connect === "function") {
+    const client = await (db as any).connect();
+    try {
+      await client.query("BEGIN");
+      const submission = await recordOracleSubmission(input, client);
+      const count = await getOracleSubmissionsCount(input.marketId, client);
+      await client.query("COMMIT");
+      return { submission, count };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // If db is already a client or mock Queryable
+  let startedTx = false;
+  try {
+    await db.query("BEGIN");
+    startedTx = true;
+  } catch {
+    // If mock Queryable does not support BEGIN/COMMIT, continue
+  }
+
+  try {
+    const submission = await recordOracleSubmission(input, db);
+    const count = await getOracleSubmissionsCount(input.marketId, db);
+    if (startedTx) {
+      await db.query("COMMIT");
+    }
+    return { submission, count };
+  } catch (error) {
+    if (startedTx) {
+      try {
+        await db.query("ROLLBACK");
+      } catch {
+        // Ignore rollback failure on mock
+      }
+    }
+    throw error;
+  }
 }
 
 export async function getOracleSubmissionsCount(

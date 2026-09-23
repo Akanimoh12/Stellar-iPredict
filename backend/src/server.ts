@@ -8,7 +8,7 @@ import helmet from "@fastify/helmet";
 import compress from "@fastify/compress";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
-import { healthRoutes } from "./api/health.js";
+import { healthRoutes, markShuttingDown } from "./api/health.js";
 import { DEFAULT_CORS_ORIGINS, parseCorsOrigins } from "./lib/cors.js";
 import { registerErrorHandler, registerNotFoundHandler } from "./lib/errors.js";
 import {
@@ -59,7 +59,17 @@ export interface GracefulShutdownOptions {
   exitProcess?: boolean;
   shutdownDatabase?: boolean;
   shutdownDatabaseFn?: () => Promise<void>;
+  /**
+   * Upper bound, in ms, on how long shutdown waits for in-flight requests to
+   * drain before forcing the HTTP server closed. Must be kept shorter than
+   * the orchestrator's grace period (e.g. Kubernetes `terminationGracePeriodSeconds`)
+   * or the orchestrator sends SIGKILL first and this timeout never gets to run.
+   */
+  drainTimeoutMs?: number;
 }
+
+/** Default drain timeout — comfortably inside a typical 30s orchestrator grace period. */
+export const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const databasePool = options.pool;
@@ -226,7 +236,21 @@ export function registerGracefulShutdown(
   const signals = options.signals ?? ["SIGTERM", "SIGINT"];
   const exitProcess = options.exitProcess ?? true;
   const shutdownDatabase = options.shutdownDatabase ?? true;
+  const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   let isShuttingDown = false;
+
+  // Tracked so a forced closure can log exactly what was still in flight,
+  // rather than just "something was stuck".
+  const inFlightRequestIds = new Set<string>();
+  server.addHook("onRequest", async (request) => {
+    inFlightRequestIds.add(request.id);
+  });
+  server.addHook("onResponse", async (request) => {
+    inFlightRequestIds.delete(request.id);
+  });
+  server.addHook("onError", async (request) => {
+    inFlightRequestIds.delete(request.id);
+  });
 
   const shutdown = async (signal: NodeJS.Signals) => {
     if (isShuttingDown) {
@@ -234,15 +258,47 @@ export function registerGracefulShutdown(
     }
 
     isShuttingDown = true;
-    server.log.info({ signal }, "Graceful shutdown started");
+    // Flips readiness to "not ready" before anything else, so the load
+    // balancer stops routing new traffic here while draining proceeds.
+    markShuttingDown();
+    server.log.info({ signal, drainTimeoutMs }, "Graceful shutdown started");
 
     let failure: unknown;
+    let timedOut = false;
+
+    const closePromise = server.close();
+    const drainTimeout = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, drainTimeoutMs).unref();
+    });
 
     try {
-      await server.close();
+      await Promise.race([closePromise, drainTimeout]);
     } catch (error) {
       failure = error;
       server.log.error({ err: error, signal }, "Error closing HTTP server during shutdown");
+    }
+
+    if (timedOut) {
+      server.log.error(
+        {
+          signal,
+          drainTimeoutMs,
+          outstandingRequestCount: inFlightRequestIds.size,
+          outstandingRequestIds: [...inFlightRequestIds],
+        },
+        "Drain timeout elapsed with requests still in flight; forcing the server closed"
+      );
+
+      // Node 18.2+: drops every open socket immediately, letting the close()
+      // call above finally settle instead of hanging past the deadline.
+      const rawServer = server.server as unknown as { closeAllConnections?: () => void };
+      rawServer.closeAllConnections?.();
+      closePromise.catch(() => {});
+
+      failure ??= new Error(`Shutdown drain timeout of ${drainTimeoutMs}ms exceeded`);
     }
 
     if (shutdownDatabase) {

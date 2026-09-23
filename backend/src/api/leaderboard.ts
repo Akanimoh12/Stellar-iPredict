@@ -24,43 +24,118 @@ function leaderboardQueryKey(
   return cacheKey("leaderboard", `${sort}:${limit}:${offset}`);
 }
 
+const leaderboardResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    players: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          address: { type: "string" },
+          display_name: { type: ["string", "null"] },
+          points: { type: "string" },
+          won_bets: { type: "number" },
+          lost_bets: { type: "number" },
+          updated_at: { type: "string" },
+        },
+        required: [
+          "address",
+          "display_name",
+          "points",
+          "won_bets",
+          "lost_bets",
+          "updated_at",
+        ],
+      },
+    },
+    total: { type: "number" },
+  },
+  required: ["players", "total"],
+} as const;
+
+const leaderboardErrorResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    code: { type: "string" },
+    message: { type: "string" },
+    issues: { type: "array" },
+  },
+  required: ["code", "message"],
+} as const;
+
 export function registerLeaderboardRoutes(
   server: FastifyInstance,
   pool: Pool,
   redis?: Redis
 ): void {
-  server.get("/api/leaderboard", async (request, reply) => {
-    const parsed = leaderboardQuerySchema.safeParse(request.query);
+  server.get(
+    "/api/leaderboard",
+    {
+      schema: {
+        summary: "List leaderboard entries, paginated and sortable",
+        tags: ["leaderboard"],
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            offset: { type: "integer", minimum: 0, description: "Row offset" },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: 100,
+              description: "Page size",
+            },
+            sort: {
+              type: "string",
+              enum: ["points", "bets"],
+              description: "Sort order",
+            },
+          },
+        },
+        response: {
+          200: leaderboardResponseSchema,
+          304: { type: "null", description: "Not modified — ETag matched" },
+          400: leaderboardErrorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = leaderboardQuerySchema.safeParse(request.query);
 
-    if (!parsed.success) {
-      return reply.status(400).send({
-        code: "BAD_REQUEST",
-        message: "Invalid leaderboard query parameters",
-        issues: parsed.error.issues,
-      });
+      if (!parsed.success) {
+        return reply.status(400).send({
+          code: "BAD_REQUEST",
+          message: "Invalid leaderboard query parameters",
+          issues: parsed.error.issues,
+        });
+      }
+
+      const { offset, limit, sort } = parsed.data;
+      const key = leaderboardQueryKey(offset, limit, sort);
+
+      const loader = () =>
+        Promise.all([
+          getLeaderboard(pool, parsed.data),
+          getLeaderboardTotal(pool),
+        ]);
+
+      const [players, total] = redis
+        ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
+        : await loader();
+
+      const body = { players, total };
+      const etag = computeEtag(body);
+      reply.header("ETag", etag);
+
+      if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
+        return reply.status(304).send();
+      }
+
+      return reply.status(200).send(body);
     }
-
-    const { offset, limit, sort } = parsed.data;
-    const key = leaderboardQueryKey(offset, limit, sort);
-
-    const loader = () =>
-      Promise.all([
-        getLeaderboard(pool, parsed.data),
-        getLeaderboardTotal(pool),
-      ]);
-
-    const [players, total] = redis
-      ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
-      : await loader();
-
-    const body = { players, total };
-    const etag = computeEtag(body);
-    reply.header("ETag", etag);
-
-    if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
-      return reply.status(304).send();
-    }
-
-    return reply.status(200).send(body);
-  });
+  );
 }

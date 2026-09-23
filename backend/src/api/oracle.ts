@@ -7,6 +7,7 @@ import { badRequest, unauthorized, conflict, forbidden, notFound } from "../lib/
 import { logOracleSubmissionAttempt } from "../lib/log.js";
 import {
   recordOracleSubmission,
+  recordOracleSubmissionWithCount,
   getOracleSubmissionsCount,
   hasNonceBeenUsed,
   cleanupExpiredNonces,
@@ -179,6 +180,41 @@ export function buildCanonicalOracleMessage(
   ].join("\n");
 }
 
+export const outcomeSchema = z.union([
+  z.string().min(1),
+  z.boolean().transform((v) => (v ? "YES" : "NO")),
+]);
+
+/**
+ * Verify that the signature over the canonical oracle message matches the provider key.
+ */
+export function verifyOracleSubmissionSignature(
+  input: OracleVerificationInput,
+  signature: string,
+): boolean {
+  if (!signature) {
+    return false;
+  }
+  const message = buildCanonicalOracleMessage(input);
+  try {
+    return Keypair.fromPublicKey(input.provider).verify(
+      Buffer.from(message, "utf8"),
+      Buffer.from(signature, "base64"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Sign the canonical message with a provider keypair (helper for tests/docs/clients). */
+export function signOracleMessage(
+  input: OracleVerificationInput,
+  kp: Keypair,
+): string {
+  const message = buildCanonicalOracleMessage(input);
+  return kp.sign(Buffer.from(message, "utf8")).toString("base64");
+}
+
 const DEFAULT_ORACLE_THRESHOLD = 3;
 
 const oracleSubmitBodySchema = z.object({
@@ -226,10 +262,21 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         response: {
           200: {
             type: "object",
-            required: ["accepted", "submissionsNeeded"],
+            required: ["accepted", "count", "threshold", "submissionsNeeded"],
             properties: {
               accepted: { type: "boolean" },
-              submissionsNeeded: { type: "number" },
+              count: {
+                type: "number",
+                description: "Current number of accepted submissions for this market including this one",
+              },
+              threshold: {
+                type: "number",
+                description: "Configured submission threshold needed for consensus",
+              },
+              submissionsNeeded: {
+                type: "number",
+                description: "Remaining submissions needed to meet or exceed threshold",
+              },
             },
           },
           400: {
@@ -307,6 +354,8 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       },
     },
     async (request, reply) => {
+      const db: Queryable = pool;
+      const now = Date.now();
       const expectedApiKey = process.env.ORACLE_API_KEY;
 
       if (!expectedApiKey) {
@@ -343,7 +392,33 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         });
       }
 
-      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
+      const { marketId, outcome, signature, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Validate signature
+      if (
+        !verifyOracleSubmissionSignature(
+          {
+            marketId,
+            outcome: String(outcome),
+            provider,
+            timestamp,
+            nonce,
+          },
+          signature,
+        )
+      ) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "unauthorized",
+            message: "Invalid signature for provider",
+          },
+          request.log,
+        );
+        throw unauthorized("Invalid signature for provider");
+      }
 
       // Validate bond amount against configured minimum
       const bondNumeric = Number(bondAmount);
@@ -417,8 +492,9 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       let responseStatus: 200 | 400 | 401 | 403 | 404 | 409 = 200;
       let responseBody: unknown;
 
+      let count: number;
       try {
-        await recordOracleSubmission(
+        const result = await recordOracleSubmissionWithCount(
           {
             marketId,
             provider,
@@ -431,6 +507,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
           },
           db,
         );
+        count = result.count;
       } catch (error: any) {
         // Handle duplicate market submission (SQLSTATE 23505)
         if (
@@ -475,13 +552,13 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         request.log,
       );
 
-      const count = await getOracleSubmissionsCount(marketId, db);
+      const threshold = config.ORACLE_THRESHOLD;
       const submissionsNeeded = Math.max(
         0,
-        config.ORACLE_THRESHOLD - count,
+        threshold - count,
       );
 
-      responseBody = { accepted: true, submissionsNeeded };
+      responseBody = { accepted: true, count, threshold, submissionsNeeded };
       responseStatus = 200;
 
       // Store idempotency record if key was provided
@@ -567,10 +644,21 @@ export function registerOracleRoutes(
         response: {
           200: {
             type: "object",
-            required: ["accepted", "submissionsNeeded"],
+            required: ["accepted", "count", "threshold", "submissionsNeeded"],
             properties: {
               accepted: { type: "boolean" },
-              submissionsNeeded: { type: "number" },
+              count: {
+                type: "number",
+                description: "Current number of accepted submissions for this market including this one",
+              },
+              threshold: {
+                type: "number",
+                description: "Configured submission threshold needed for consensus",
+              },
+              submissionsNeeded: {
+                type: "number",
+                description: "Remaining submissions needed to meet or exceed threshold",
+              },
             },
           },
           400: {
@@ -620,6 +708,8 @@ export function registerOracleRoutes(
       },
     },
     async (request, reply) => {
+      const db: Queryable = (dbOverride ?? pool)!;
+      const now = Date.now();
       request.log.warn(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
       );
@@ -670,7 +760,23 @@ export function registerOracleRoutes(
         });
       }
 
-      const { marketId, outcome, provider, bondAmount, nonce, timestamp } = parsed.data;
+      const { marketId, outcome, signature, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Validate signature
+      if (
+        !verifyOracleSubmissionSignature(
+          {
+            marketId,
+            outcome: String(outcome),
+            provider,
+            timestamp,
+            nonce,
+          },
+          signature,
+        )
+      ) {
+        throw unauthorized("Invalid signature for provider");
+      }
 
       // Validate bond amount against configured minimum
       const bondNumeric = Number(bondAmount);
@@ -680,9 +786,6 @@ export function registerOracleRoutes(
           `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
         );
       }
-
-      // Replay protection: validate timestamp window
-      const { marketId, outcome, provider, nonce, timestamp } = parsed.data;
 
       // Replay protection: validate timestamp window
       if (timestamp !== undefined) {
@@ -724,15 +827,14 @@ export function registerOracleRoutes(
         }
       }
 
+      let count: number;
       try {
-        await recordOracleSubmission(
+        const result = await recordOracleSubmissionWithCount(
           {
             marketId,
             provider,
             outcome: String(outcome),
             bondAmount,
-            nonce,
-            outcome: String(outcome),
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
@@ -740,6 +842,7 @@ export function registerOracleRoutes(
           },
           db,
         );
+        count = result.count;
       } catch (error: any) {
         if (
           error.code === "23505" &&
@@ -752,13 +855,13 @@ export function registerOracleRoutes(
         throw error;
       }
 
-      const count = await getOracleSubmissionsCount(marketId, db);
+      const threshold = config.ORACLE_THRESHOLD;
       const submissionsNeeded = Math.max(
         0,
-        config.ORACLE_THRESHOLD - count,
+        threshold - count,
       );
 
-      const responseBody = { accepted: true, submissionsNeeded };
+      const responseBody = { accepted: true, count, threshold, submissionsNeeded };
 
       if (idempotencyKey) {
         const payloadHash = crypto

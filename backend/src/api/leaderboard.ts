@@ -63,8 +63,9 @@ const leaderboardErrorResponseSchema = {
     code: { type: "string" },
     message: { type: "string" },
     issues: { type: "array" },
+    requestId: { type: "string" },
   },
-  required: ["code", "message"],
+  required: ["code", "message", "requestId"],
 } as const;
 
 export function registerLeaderboardRoutes(
@@ -111,6 +112,7 @@ export function registerLeaderboardRoutes(
           code: "BAD_REQUEST",
           message: "Invalid leaderboard query parameters",
           issues: parsed.error.issues,
+          requestId: request.id,
         });
       }
 

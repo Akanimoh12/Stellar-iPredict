@@ -1,7 +1,9 @@
+import { REQUEST_ID_HEADER } from "./log.js";
+
 export interface FastifyErrorLike extends Error { statusCode?: number; code?: string }
 export interface FastifyReplyLike { status(code: number): FastifyReplyLike; header(name: string, value: string): FastifyReplyLike; send(payload: unknown): unknown }
 export interface FastifyInstanceLike { setErrorHandler(handler: typeof errorHandler): void }
-export interface FastifyRequestLike { method: string; url: string }
+export interface FastifyRequestLike { method: string; url: string; id?: string }
 
 export class HttpError extends Error {
   constructor(public readonly statusCode: number, public readonly code: string, message: string) {
@@ -17,7 +19,7 @@ export const notFound = (message = "Not found") => new HttpError(404, "NOT_FOUND
 export const methodNotAllowed = (message = "Method not allowed") => new HttpError(405, "METHOD_NOT_ALLOWED", message);
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
 
-export interface ErrorResponse { error: { code: string; message: string } }
+export interface ErrorResponse { error: { code: string; message: string; requestId: string } }
 
 const DEPENDENCY_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004", "08006", "08007", "57P01"]);
 export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolean {
@@ -39,10 +41,12 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
 }
 
 
-export function errorHandler(error: FastifyErrorLike, _request: FastifyRequestLike, reply: FastifyReplyLike): void {
+export function errorHandler(error: FastifyErrorLike, request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);
+  const requestId = request.id ?? "unknown";
   if (mapped.statusCode === 503) reply.header("Retry-After", "5");
-  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message } } satisfies ErrorResponse);
+  reply.header(REQUEST_ID_HEADER, requestId);
+  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message, requestId } } satisfies ErrorResponse);
 }
 
 export function registerErrorHandler(app: FastifyInstanceLike): void {

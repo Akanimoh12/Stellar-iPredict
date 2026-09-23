@@ -165,8 +165,9 @@ const errorResponseSchema = {
       properties: {
         code: { type: "string" },
         message: { type: "string" },
+        requestId: { type: "string" },
       },
-      required: ["code", "message"],
+      required: ["code", "message", "requestId"],
     },
   },
   required: ["error"],
@@ -270,6 +271,7 @@ export function createMarketsRoutes(
             code: "BAD_REQUEST",
             message: "Invalid query parameters",
             issues: parsed.error.issues,
+            requestId: request.id,
           },
         });
       }

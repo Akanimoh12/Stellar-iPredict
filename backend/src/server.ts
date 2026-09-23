@@ -24,10 +24,18 @@ import { registerStatusRoutes } from "./api/status.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
+import { registerCancellationHook } from "./lib/cancellation.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
 export { DEFAULT_CORS_ORIGINS, parseCorsOrigins };
+
+declare module "fastify" {
+  interface FastifyInstance {
+    /** Every route registered on this instance; see `registeredRoutes` in {@link buildServer}. */
+    registeredRoutes: { method: string; url: string }[];
+  }
+}
 
 
 export interface ServerConfig {
@@ -66,9 +74,28 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     disableRequestLogging: true,
   });
 
+  // Independent record of every route ever registered, regardless of where in
+  // this function it happens — added before anything else so it can't miss a
+  // route the way the OpenAPI spec generator's onRoute hook can if a plugin is
+  // registered above it. Exists purely so tests can diff the spec against the
+  // real route table (#476); not meant for runtime use.
+  const registeredRoutes: { method: string; url: string }[] = [];
+  server.addHook("onRoute", (opts) => {
+    const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
+    for (const method of methods) {
+      if (method === "HEAD" || method === "OPTIONS") continue;
+      registeredRoutes.push({ method, url: opts.url });
+    }
+  });
+  server.decorate("registeredRoutes", registeredRoutes);
+
   registerRequestLogging(server);
   registerMetricsHook(server);
   registerMetricsEndpoint(server);
+  // Exposes request.abortSignal, which read-only GET routes pass into
+  // queryWithCancel (db/pool.ts) so a disconnecting client's query gets
+  // cancelled at the Postgres level instead of running to completion (#475).
+  registerCancellationHook(server);
   registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.
@@ -111,10 +138,6 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
 
-  registerLeaderboardRoutes(server, databasePool, redis);
-  registerStatsRoutes(server, databasePool, redis);
-  registerOracleRoutes(server, databasePool);
-
   // CORS: allowlist only, never a reflected wildcard.
   server.register(cors, {
     origin(origin, callback) {
@@ -142,8 +165,15 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     maxAge: 86400,
   });
 
-  // OpenAPI spec at /api/docs.
+  // OpenAPI spec at /api/docs. Every route plugin below must be registered
+  // after this: registerOpenApi's onRoute hook only sees routes registered
+  // after it is attached, so anything registered above it silently disappears
+  // from the generated spec (#476).
   registerOpenApi(server);
+
+  registerLeaderboardRoutes(server, databasePool, redis);
+  registerStatsRoutes(server, databasePool, redis);
+  registerOracleRoutes(server, databasePool);
 
   // Routes go in a plugin registered after registerOpenApi, not directly on the
   // root instance: plugins load in registration order, so this guarantees the

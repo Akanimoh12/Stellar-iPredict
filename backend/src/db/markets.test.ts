@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { getMarketById, getMarkets, type MarketRow, type Queryable } from "./markets.js";
 
 describe("getMarkets", () => {
-  it("returns paginated markets rows and total count", async () => {
-    const marketRows: MarketRow[] = [
+  it("returns paginated markets rows and total count from a single windowed query", async () => {
+    const marketRows: Array<MarketRow & { total_count: number }> = [
       {
         id: 42,
         question: "Will XLM close above $1 by year end?",
@@ -20,13 +20,13 @@ describe("getMarkets", () => {
         bet_count: 3,
         created_at: new Date("2026-01-01T00:00:00.000Z"),
         updated_at: new Date("2026-01-01T00:00:00.000Z"),
+        total_count: 17,
       },
     ];
 
     const queryMock = vi
       .fn<Queryable["query"]>()
-      .mockResolvedValueOnce({ rows: marketRows })
-      .mockResolvedValueOnce({ rows: [{ total: 17 }] });
+      .mockResolvedValueOnce({ rows: marketRows });
 
     const db: Queryable = {
       query: queryMock as Queryable["query"],
@@ -43,21 +43,20 @@ describe("getMarkets", () => {
       db,
     );
 
-    expect(queryMock).toHaveBeenCalledTimes(2);
+    // A single round trip: no separate COUNT(*) query is issued.
+    expect(queryMock).toHaveBeenCalledTimes(1);
 
     const firstCall = queryMock.mock.calls[0];
     expect(firstCall[0]).toContain("FROM markets");
     expect(firstCall[0]).toContain("category = $1");
     expect(firstCall[0]).toContain("resolved = false");
     expect(firstCall[0]).toContain("ORDER BY (total_yes + total_no) DESC");
+    expect(firstCall[0]).toContain("COUNT(*) OVER ()");
     expect(firstCall[1]).toEqual(["Crypto", 10, 10]);
 
-    const secondCall = queryMock.mock.calls[1];
-    expect(secondCall[0]).toContain("SELECT COUNT(*)::INT AS total");
-    expect(secondCall[1]).toEqual(["Crypto"]);
-
+    const { total_count: _omit, ...expectedRow } = marketRows[0];
     expect(result).toEqual({
-      rows: marketRows,
+      rows: [expectedRow],
       total: 17,
       page: 2,
       limit: 10,
@@ -67,20 +66,52 @@ describe("getMarkets", () => {
   it("excludes resolved and cancelled markets when sort is ending_soon", async () => {
     const queryMock = vi
       .fn<Queryable["query"]>()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
+      .mockResolvedValueOnce({ rows: [] });
 
     const db: Queryable = {
       query: queryMock as Queryable["query"],
     };
 
-    await getMarkets({ sort: "ending_soon" }, db);
+    const result = await getMarkets({ sort: "ending_soon" }, db);
 
+    // Empty page falls back to a single plain COUNT(*) query.
     expect(queryMock).toHaveBeenCalledTimes(2);
     const firstCall = queryMock.mock.calls[0];
     expect(firstCall[0]).toContain("resolved = false AND cancelled = false");
     expect(firstCall[0]).toContain("end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
     expect(firstCall[0]).toContain("ORDER BY end_time ASC");
+    expect(result.total).toBe(0);
+  });
+
+  it("computes the total count over the filtered set, not the whole table", async () => {
+    const rowFor = (id: number, total: number) => ({
+      id,
+      question: "q",
+      image_url: null,
+      category: "Crypto" as const,
+      end_time: "1",
+      total_yes: "0",
+      total_no: "0",
+      resolved: false,
+      outcome: null,
+      cancelled: false,
+      creator: "G",
+      bet_count: 0,
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+      total_count: total,
+    });
+
+    const queryMock = vi
+      .fn<Queryable["query"]>()
+      .mockResolvedValueOnce({ rows: [rowFor(1, 3)] });
+    const db: Queryable = { query: queryMock as Queryable["query"] };
+
+    const result = await getMarkets({ filter: "resolved" }, db);
+
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(queryMock.mock.calls[0][0]).toContain("resolved = true");
+    expect(result.total).toBe(3);
   });
 });
 

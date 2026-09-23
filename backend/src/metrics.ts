@@ -104,6 +104,17 @@ let activeBuckets: readonly number[] = DEFAULT_BUCKETS;
 const errorRegistry = new Map<string, number>();
 
 // ---------------------------------------------------------------------------
+// Abandoned-query counter registry — issue #475
+// ---------------------------------------------------------------------------
+
+/**
+ * Key: normalised route label, or `"unknown"` when no route was supplied.
+ * Value: number of queries cancelled because the client disconnected before
+ * the query resolved (see db/pool.ts `queryWithCancel`).
+ */
+const abandonedQueryRegistry = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -256,6 +267,43 @@ export function getErrorCounts(): ErrorCountSnapshot[] {
  */
 export function resetErrorCounts(): void {
   errorRegistry.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Abandoned-query counter API — issue #475
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one query that was cancelled because its client disconnected
+ * before the query resolved. Making this a first-class counter (rather than
+ * only a log line) is what lets us confirm the win claimed in #475 is
+ * real — i.e. that clients actually disconnect mid-request often enough for
+ * cancellation to matter — before investing further here.
+ *
+ * @param route Fastify route label, e.g. `"GET /api/markets"`. Falls back to
+ *              `"unknown"` when the caller doesn't have one handy.
+ */
+export function recordAbandonedQuery(route?: string): void {
+  const label = route ?? "unknown";
+  const current = abandonedQueryRegistry.get(label) ?? 0;
+  abandonedQueryRegistry.set(label, current + 1);
+}
+
+/** Total abandoned-query count for a single route, or `undefined` if none. */
+export function getAbandonedQueryCount(route: string): number | undefined {
+  return abandonedQueryRegistry.get(route);
+}
+
+/** Abandoned-query counts for every route that has recorded at least one. */
+export function getAbandonedQueryCounts(): ErrorCountSnapshot[] {
+  return Array.from(abandonedQueryRegistry.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, count]) => Object.freeze({ route: label, count }));
+}
+
+/** Reset all abandoned-query count data. Useful in tests. */
+export function resetAbandonedQueryCounts(): void {
+  abandonedQueryRegistry.clear();
 }
 
 // ---------------------------------------------------------------------------

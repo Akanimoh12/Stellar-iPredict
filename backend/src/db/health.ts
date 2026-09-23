@@ -44,6 +44,28 @@ export async function pingDb(): Promise<HealthCheckResult> {
   }
 }
 
+/** Upper bound on how long a single readiness check may take. */
+export const HEALTH_CHECK_TIMEOUT_MS = 2000;
+
+/**
+ * Bounds a health check's runtime so a hung dependency can't hang the probe.
+ *
+ * A readiness check left to hang is worse than one that answers "unhealthy"
+ * promptly: most orchestrators treat a probe timeout as a slower, noisier
+ * failure signal than an explicit unhealthy response.
+ */
+export function withHealthTimeout(
+  check: Promise<HealthCheckResult>,
+  timeoutMs: number = HEALTH_CHECK_TIMEOUT_MS
+): Promise<HealthCheckResult> {
+  return Promise.race([
+    check,
+    new Promise<HealthCheckResult>((resolve) => {
+      setTimeout(() => resolve({ ok: false, error: `timed out after ${timeoutMs}ms` }), timeoutMs);
+    }),
+  ]);
+}
+
 /**
  * Retries database connection with exponential backoff.
  * Useful for startup when the database might not be immediately available.

@@ -13,6 +13,7 @@ vi.mock("@/db/redis", () => ({
 import { pingDb } from "@/db/health";
 import { pingRedis } from "@/db/redis";
 import { buildServer } from "@/server";
+import { markShuttingDown, resetShuttingDownForTests } from "./health.js";
 
 const pingDbMock = vi.mocked(pingDb);
 const pingRedisMock = vi.mocked(pingRedis);
@@ -32,6 +33,7 @@ beforeEach(() => {
 afterEach(async () => {
   await server?.close();
   server = undefined;
+  resetShuttingDownForTests();
 });
 
 describe("GET /readyz", () => {
@@ -59,8 +61,9 @@ describe("GET /readyz", () => {
     expect(res.statusCode).toBe(503);
     const body = res.json();
     expect(body.status).toBe("not ready");
-    expect(body.checks.db).toEqual({ ok: false, error: "connection refused" });
+    expect(body.checks.db).toEqual({ ok: false });
     expect(body.checks.redis).toEqual({ ok: true, latencyMs: 1 });
+    expect(JSON.stringify(body)).not.toContain("connection refused");
   });
 
   it("returns 503 with status 'not ready' when Redis is unhealthy", async () => {
@@ -74,7 +77,8 @@ describe("GET /readyz", () => {
     const body = res.json();
     expect(body.status).toBe("not ready");
     expect(body.checks.db).toEqual({ ok: true, latencyMs: 3 });
-    expect(body.checks.redis).toEqual({ ok: false, error: "ECONNREFUSED" });
+    expect(body.checks.redis).toEqual({ ok: false });
+    expect(JSON.stringify(body)).not.toContain("ECONNREFUSED");
   });
 
   it("returns 503 when both DB and Redis are unhealthy", async () => {
@@ -89,6 +93,30 @@ describe("GET /readyz", () => {
     expect(body.status).toBe("not ready");
     expect(body.checks.db.ok).toBe(false);
     expect(body.checks.redis.ok).toBe(false);
+  });
+
+  it("bounds a hung dependency check with a timeout instead of hanging", async () => {
+    pingDbMock.mockImplementation(() => new Promise(() => {})); // never resolves
+    pingRedisMock.mockResolvedValue({ ok: true, latencyMs: 1 });
+
+    const app = makeServer();
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().checks.db).toEqual({ ok: false });
+  }, 5000);
+
+  it("fails readiness immediately once shutdown has started", async () => {
+    pingDbMock.mockResolvedValue({ ok: true, latencyMs: 1 });
+    pingRedisMock.mockResolvedValue({ ok: true, latencyMs: 1 });
+
+    const app = makeServer();
+    markShuttingDown();
+
+    const res = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().status).toBe("not ready");
   });
 
   it("includes the system tag in OpenAPI schema", async () => {

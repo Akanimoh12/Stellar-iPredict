@@ -1,6 +1,9 @@
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import type { FilterableMarketCategory } from "@ipredict/shared";
 import type { MarketRow } from "./types.js";
+
+// Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
+types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
 
 export type MarketFilter = "active" | "resolved" | "ended" | "cancelled" | "all";
 export type MarketSort = "newest" | "volume" | "ending_soon" | "bettors";

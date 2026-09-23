@@ -74,7 +74,7 @@ describe("dependency errors", () => {
 
   it("adds Retry-After to dependency failures", () => {
     const reply = makeReply();
-    errorHandler(Object.assign(new Error("db details"), { code: "57P01" }), { method: "GET", url: "/" }, reply);
+    errorHandler(Object.assign(new Error("db details"), { code: "57P01" }), { method: "GET", url: "/", id: "req-1" }, reply);
     expect(reply.statusCode).toBe(503);
     expect(reply.headers["Retry-After"]).toBe("5");
     expect(reply.payload).not.toMatchObject({ error: { message: "db details" } });
@@ -82,6 +82,23 @@ describe("dependency errors", () => {
 
   it("keeps application bugs at 500", () => {
     expect(mapError(new Error("bug"))).toMatchObject({ statusCode: 500, code: "INTERNAL_SERVER_ERROR" });
+  });
+});
+
+describe("errorHandler request id", () => {
+  it("includes the request id in the body and the response header", () => {
+    const reply = makeReply();
+    errorHandler(new Error("bug"), { method: "GET", url: "/", id: "req-42" }, reply);
+
+    expect(reply.payload).toMatchObject({ error: { requestId: "req-42" } });
+    expect(reply.headers["x-request-id"]).toBe("req-42");
+  });
+
+  it("falls back to 'unknown' when the request carries no id", () => {
+    const reply = makeReply();
+    errorHandler(new Error("bug"), { method: "GET", url: "/" }, reply);
+
+    expect(reply.payload).toMatchObject({ error: { requestId: "unknown" } });
   });
 });
 
@@ -174,6 +191,8 @@ describe("unknown routes on the built server", () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("NOT_FOUND");
+    expect(res.json().error.requestId).toBeTruthy();
+    expect(res.headers["x-request-id"]).toBe(res.json().error.requestId);
   });
 
   it("returns 405 for a known path called with the wrong method", async () => {

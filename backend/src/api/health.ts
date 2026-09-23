@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
-import { pingDb } from "../db/health.js";
+import { pingDb, withHealthTimeout } from "../db/health.js";
 import { pingRedis } from "../db/redis.js";
 import { getResolutionDelayStatus } from "../db/markets.js";
 
@@ -9,11 +9,39 @@ interface CheckResult {
   error?: string;
 }
 
+/** Public shape of a dependency check — a boolean summary, no error detail. */
+interface PublicCheckResult {
+  ok: boolean;
+  latencyMs?: number;
+}
+
+/**
+ * Set once graceful shutdown begins so readiness fails immediately, before
+ * the HTTP server has finished draining. That's what makes a rolling deploy
+ * seamless: the load balancer stops sending new traffic as soon as shutdown
+ * starts rather than waiting for requests to start failing.
+ */
+let shuttingDown = false;
+
+/** Marks the process as shutting down; readiness reports "not ready" from here on. */
+export function markShuttingDown(): void {
+  shuttingDown = true;
+}
+
+/** Test-only: resets the shutdown flag between test runs. */
+export function resetShuttingDownForTests(): void {
+  shuttingDown = false;
+}
+
+function toPublicResult(result: CheckResult): PublicCheckResult {
+  return result.latencyMs === undefined ? { ok: result.ok } : { ok: result.ok, latencyMs: result.latencyMs };
+}
+
 interface ReadyzResponse {
   status: "ready" | "not ready";
   checks: {
-    db: CheckResult;
-    redis: CheckResult;
+    db: PublicCheckResult;
+    redis: PublicCheckResult;
   };
 }
 
@@ -66,7 +94,6 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
                     properties: {
                       ok: { type: "boolean" },
                       latencyMs: { type: "number" },
-                      error: { type: "string" },
                     },
                     required: ["ok"],
                   },
@@ -75,7 +102,6 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
                     properties: {
                       ok: { type: "boolean" },
                       latencyMs: { type: "number" },
-                      error: { type: "string" },
                     },
                     required: ["ok"],
                   },
@@ -88,13 +114,31 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
         },
       },
     },
-    async (_req, reply) => {
-      const [db, redis] = await Promise.all([pingDb(), pingRedis()]);
+    async (req, reply) => {
+      // Fails immediately once shutdown starts, without waiting on the
+      // dependency checks below — that's what stops a load balancer sending
+      // new traffic to an instance that's already draining.
+      if (shuttingDown) {
+        req.log.warn("readiness check failed: shutting down");
+        reply.status(503).send({ status: "not ready", checks: { db: { ok: false }, redis: { ok: false } } });
+        return;
+      }
+
+      const [db, redis] = await Promise.all([
+        withHealthTimeout(pingDb()),
+        withHealthTimeout(pingRedis()),
+      ]);
 
       const ready = db.ok && redis.ok;
+      if (!ready) {
+        // Detailed diagnostics (hostnames, driver error text, etc.) stay on
+        // the logging path only — the response body never carries them.
+        req.log.warn({ db, redis }, "readiness check failed");
+      }
+
       const body: ReadyzResponse = {
         status: ready ? "ready" : "not ready",
-        checks: { db, redis },
+        checks: { db: toPublicResult(db), redis: toPublicResult(redis) },
       };
 
       reply.status(ready ? 200 : 503).send(body);

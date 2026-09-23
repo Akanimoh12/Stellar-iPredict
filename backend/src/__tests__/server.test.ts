@@ -4,16 +4,23 @@ import type { FastifyInstance } from "fastify";
 import { registerGracefulShutdown } from "../server.js";
 import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
 
+function makeFakeServer(close: ReturnType<typeof vi.fn>): FastifyInstance {
+  return {
+    close,
+    addHook: vi.fn(),
+    server: { closeAllConnections: vi.fn() },
+    log: {
+      info: vi.fn(),
+      error: vi.fn(),
+      warn: vi.fn(),
+    },
+  } as unknown as FastifyInstance;
+}
+
 describe("registerGracefulShutdown", () => {
   it("closes the server once so Fastify stops accepting and drains in-flight requests", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
-    const server = {
-      close,
-      log: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
-    } as unknown as FastifyInstance;
+    const server = makeFakeServer(close);
 
     registerGracefulShutdown(server, {
       signals: ["SIGUSR2"],
@@ -29,13 +36,7 @@ describe("registerGracefulShutdown", () => {
   it("closes the database pool exactly once on graceful shutdown", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const shutdownDatabaseFn = vi.fn().mockResolvedValue(undefined);
-    const server = {
-      close,
-      log: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
-    } as unknown as FastifyInstance;
+    const server = makeFakeServer(close);
 
     registerGracefulShutdown(server, {
       signals: ["SIGUSR1"],
@@ -56,13 +57,7 @@ describe("registerGracefulShutdown", () => {
   it("closes the database pool even when server.close() fails partway through", async () => {
     const close = vi.fn().mockRejectedValue(new Error("Failed to drain HTTP connections"));
     const shutdownDatabaseFn = vi.fn().mockResolvedValue(undefined);
-    const server = {
-      close,
-      log: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
-    } as unknown as FastifyInstance;
+    const server = makeFakeServer(close);
 
     registerGracefulShutdown(server, {
       signals: ["SIGUSR2"],
@@ -75,6 +70,31 @@ describe("registerGracefulShutdown", () => {
 
     await vi.waitFor(() => {
       expect(close).toHaveBeenCalledTimes(1);
+      expect(shutdownDatabaseFn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("forces closure and logs outstanding requests once the drain timeout elapses", async () => {
+    const close = vi.fn().mockImplementation(() => new Promise(() => {})); // never resolves
+    const shutdownDatabaseFn = vi.fn().mockResolvedValue(undefined);
+    const server = makeFakeServer(close);
+
+    registerGracefulShutdown(server, {
+      signals: ["SIGUSR1"],
+      exitProcess: false,
+      shutdownDatabase: true,
+      shutdownDatabaseFn,
+      drainTimeoutMs: 20,
+    });
+
+    process.emit("SIGUSR1", "SIGUSR1");
+
+    await vi.waitFor(() => {
+      expect((server as any).server.closeAllConnections).toHaveBeenCalled();
+      expect(server.log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ drainTimeoutMs: 20 }),
+        expect.stringContaining("Drain timeout elapsed")
+      );
       expect(shutdownDatabaseFn).toHaveBeenCalledTimes(1);
     });
   });

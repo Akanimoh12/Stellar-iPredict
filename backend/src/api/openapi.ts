@@ -48,6 +48,27 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
           description: "Oracle provider API key, for `POST /api/v1/oracle/submit` and `POST /api/oracle/*`.",
         },
       },
+      schemas: {
+        Error: {
+          type: "object",
+          required: ["error"],
+          properties: {
+            error: {
+              type: "object",
+              required: ["code", "message", "requestId"],
+              properties: {
+                code: { type: "string", description: "Machine-readable error code" },
+                message: { type: "string", description: "Human-readable error message" },
+                requestId: {
+                  type: "string",
+                  description:
+                    "Correlation id for this request. Matches the `x-request-id` response header and the id tagging the corresponding server log line.",
+                },
+              },
+            },
+          },
+        },
+      },
     },
   };
 }

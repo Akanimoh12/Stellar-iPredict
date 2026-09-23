@@ -388,6 +388,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             code: "BAD_REQUEST",
             message: "Invalid request body",
             issues: parsed.error.issues,
+            requestId: request.id,
           },
         });
       }
@@ -756,6 +757,7 @@ export function registerOracleRoutes(
             code: "BAD_REQUEST",
             message: "Invalid request body",
             issues: parsed.error.issues,
+            requestId: request.id,
           },
         });
       }

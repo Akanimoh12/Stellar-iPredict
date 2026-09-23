@@ -104,6 +104,23 @@ let activeBuckets: readonly number[] = DEFAULT_BUCKETS;
 const errorRegistry = new Map<string, number>();
 
 // ---------------------------------------------------------------------------
+// Status code registry — issue #492
+// ---------------------------------------------------------------------------
+
+/**
+ * Key: `"<route label>\u0000<statusCode>"`. Value: response count.
+ *
+ * Cardinality stays bounded by the route table (a fixed, small set of
+ * templates) times the small set of HTTP status codes actually returned —
+ * never the raw request path, which is what would make this unbounded.
+ */
+const statusRegistry = new Map<string, number>();
+
+function statusKey(label: string, statusCode: number): string {
+  return `${label}\u0000${statusCode}`;
+}
+
+// ---------------------------------------------------------------------------
 // Abandoned-query counter registry — issue #475
 // ---------------------------------------------------------------------------
 
@@ -270,6 +287,45 @@ export function resetErrorCounts(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Status code counter API — issue #492
+// ---------------------------------------------------------------------------
+
+/** Immutable snapshot of a per-route, per-status response count. */
+export interface StatusCountSnapshot {
+  readonly route: string;
+  readonly statusCode: number;
+  readonly count: number;
+}
+
+/**
+ * Record one completed response for a route/status pair.
+ *
+ * @param method     HTTP method in upper-case, e.g. `"GET"`.
+ * @param routePath  Fastify route template, e.g. `"/api/markets/:id"`.
+ * @param statusCode HTTP status code of the response.
+ */
+export function recordStatus(method: string, routePath: string, statusCode: number): void {
+  const label = normaliseLabel(method, routePath);
+  const key = statusKey(label, statusCode);
+  statusRegistry.set(key, (statusRegistry.get(key) ?? 0) + 1);
+}
+
+/** Status-code counts for every route/status pair observed, sorted by route then status. */
+export function getStatusCounts(): StatusCountSnapshot[] {
+  return Array.from(statusRegistry.entries())
+    .map(([key, count]) => {
+      const [route, statusStr] = key.split("\u0000");
+      return Object.freeze({ route: route!, statusCode: Number(statusStr), count });
+    })
+    .sort((a, b) => a.route.localeCompare(b.route) || a.statusCode - b.statusCode);
+}
+
+/** Reset all status-code count data. Useful in tests. */
+export function resetStatusCounts(): void {
+  statusRegistry.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Abandoned-query counter API — issue #475
 // ---------------------------------------------------------------------------
 
@@ -389,6 +445,19 @@ export function serializeMetrics(): string {
     }
   }
 
+  // Status code breakdown, labelled by route pattern (never the raw path) so
+  // cardinality stays bounded by the route table times the status codes
+  // actually returned.
+  const statusCounts = getStatusCounts();
+  if (statusCounts.length > 0) {
+    lines.push("# HELP api_requests_total Total number of responses, by route and status code");
+    lines.push("# TYPE api_requests_total counter");
+    for (const entry of statusCounts) {
+      const route = escapeLabelValue(entry.route);
+      lines.push(`api_requests_total{route="${route}",status="${entry.statusCode}"} ${entry.count}`);
+    }
+  }
+
   // Cache hit rate (issue #214). Always emitted, even before the first
   // lookup — a series that only appears once traffic arrives is a series
   // nobody can build a dashboard panel against.
@@ -437,6 +506,7 @@ export function registerMetricsHook(app: FastifyInstance): void {
     const routePath: string =
       (request.routeOptions as { url?: string }).url ?? request.url;
     observe(request.method, routePath, reply.elapsedTime);
+    recordStatus(request.method, routePath, reply.statusCode);
 
     // Record 5xx server errors for monitoring
     if (reply.statusCode >= 500 && reply.statusCode < 600) {
@@ -445,17 +515,49 @@ export function registerMetricsHook(app: FastifyInstance): void {
   });
 }
 
+/** Header carrying the scrape token that gates the metrics endpoint. */
+export const METRICS_TOKEN_HEADER = "x-metrics-token";
+
+/**
+ * Checks whether a request is allowed to read `/metrics`.
+ *
+ * The endpoint carries request-rate and latency data that is operationally
+ * sensitive (traffic shape, route inventory), so it must not be reachable by
+ * anyone who can reach the API. Without a configured token the endpoint is
+ * closed entirely — there is no "open by default" fallback — since a
+ * scraper that hasn't been given a token yet is not a reason to leave the
+ * route exposed to the public internet in the meantime.
+ */
+export function isMetricsRequestAuthorized(
+  headerValue: string | string[] | undefined,
+  expectedToken: string | undefined
+): boolean {
+  if (!expectedToken) return false;
+  const provided = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return provided === expectedToken;
+}
+
 /**
  * Register the /metrics endpoint that serves Prometheus metrics.
  *
+ * Gated by a shared-secret token (`METRICS_TOKEN` env var, sent as the
+ * `x-metrics-token` header) so the endpoint is not publicly exposed — a
+ * missing or mismatched token gets the same 404 as any other unknown route,
+ * so the endpoint's existence isn't disclosed either.
+ *
  * Call this once inside {@link buildServer} to expose metrics at GET /metrics.
  */
-export function registerMetricsEndpoint(app: FastifyInstance): void {
+export function registerMetricsEndpoint(
+  app: FastifyInstance,
+  options: { token?: string } = {}
+): void {
+  const expectedToken = options.token ?? process.env.METRICS_TOKEN;
+
   app.get(
     "/metrics",
     {
       schema: {
-        summary: "Prometheus metrics endpoint",
+        summary: "Prometheus metrics endpoint (requires x-metrics-token header)",
         tags: ["system"],
         response: {
           200: {
@@ -465,7 +567,12 @@ export function registerMetricsEndpoint(app: FastifyInstance): void {
         },
       },
     },
-    async (_req, reply) => {
+    async (req, reply) => {
+      if (!isMetricsRequestAuthorized(req.headers[METRICS_TOKEN_HEADER], expectedToken)) {
+        reply.callNotFound();
+        return;
+      }
+
       const pool = await serializePoolMetrics();
       reply
         .type("text/plain; version=0.0.4; charset=utf-8")

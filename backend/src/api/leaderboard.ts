@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getLeaderboard, getLeaderboardTotal } from "../db/leaderboard.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import { cacheKey } from "../cache/cacheKeys.js";
+import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
 
 const leaderboardQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
@@ -52,6 +53,14 @@ export function registerLeaderboardRoutes(
       ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
       : await loader();
 
-    return reply.status(200).send({ players, total });
+    const body = { players, total };
+    const etag = computeEtag(body);
+    reply.header("ETag", etag);
+
+    if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
+      return reply.status(304).send();
+    }
+
+    return reply.status(200).send(body);
   });
 }

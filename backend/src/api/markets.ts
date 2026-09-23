@@ -1,11 +1,10 @@
-import { createHash } from "node:crypto";
-
 import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
 import { stroopsToXlm, xlmToStroops } from "../lib/amount.js";
+import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
 import {
   getMarketById,
   getMarkets,
@@ -34,39 +33,6 @@ const MARKETS_ACTIVE_TTL = 15;
 const MARKETS_DEFAULT_TTL = 30;
 const BETS_TTL = CACHE_TTLS.bets; // 30s
 const ODDS_TTL = CACHE_TTLS.odds; // 30s
-
-/**
- * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
- * its canonical `JSON.stringify` form, per RFC 7232 §2.3.
- */
-export function computeEtag(payload: unknown): string {
-  const hash = createHash("sha1").update(JSON.stringify(payload)).digest("hex");
-  return `"${hash}"`;
-}
-
-/**
- * Whether an `If-None-Match` request header matches `etag`.
- *
- * The header may carry a comma-separated list and/or the `*` wildcard
- * (RFC 7232 §3.2); a weak comparison (leading `W/`) is treated as a match
- * since we only ever compare full representations here.
- */
-export function matchesIfNoneMatch(
-  header: string | string[] | undefined,
-  etag: string
-): boolean {
-  if (!header) {
-    return false;
-  }
-
-  const values = Array.isArray(header) ? header : [header];
-  return values.some((value) =>
-    value
-      .split(",")
-      .map((candidate) => candidate.trim())
-      .some((candidate) => candidate === "*" || candidate === etag || candidate === `W/${etag}`)
-  );
-}
 
 export function parsePositiveInteger(value: string): number | null {
   if (!/^\d+$/.test(value)) {

@@ -19,8 +19,15 @@ export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT",
 
 export interface ErrorResponse { error: { code: string; message: string } }
 
-function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: string; message: string } {
+const DEPENDENCY_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004", "08006", "08007", "57P01"]);
+export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolean {
+  const code = (error as FastifyErrorLike).code;
+  return typeof code === "string" && DEPENDENCY_CODES.has(code.toUpperCase());
+}
+
+export function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: string; message: string } {
   if (error instanceof HttpError) return { statusCode: error.statusCode, code: error.code, message: error.message };
+  if (isDependencyUnavailable(error)) return { statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" };
   const maybeStatus = (error as FastifyErrorLike).statusCode;
   const statusCode = typeof maybeStatus === "number" && maybeStatus >= 400 && maybeStatus < 500 ? maybeStatus : 500;
   if (statusCode < 500) {
@@ -34,6 +41,7 @@ function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: 
 
 export function errorHandler(error: FastifyErrorLike, _request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);
+  if (mapped.statusCode === 503) reply.header("Retry-After", "5");
   reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message } } satisfies ErrorResponse);
 }
 

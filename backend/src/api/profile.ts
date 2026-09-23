@@ -1,9 +1,7 @@
 import { type FastifyInstance, type FastifyPluginAsync } from "fastify";
 import { pool } from "../db/pool.js";
 import { getBetsByBettor } from "../db/bets.js";
-
-// Validates a Stellar public key (starts with G, 56 characters, Base32 encoding)
-const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
+import { normalizeAddress } from "../lib/address.js";
 
 // Paths are relative to the API prefix applied by the route index — see
 // `registerApiRoutes` in ./index.ts.
@@ -13,7 +11,8 @@ export const profileRoutes: FastifyPluginAsync = async (server: FastifyInstance)
     async (request, reply) => {
       const { address } = request.params;
 
-      if (!STELLAR_ADDRESS_REGEX.test(address)) {
+      let normalizedAddress: string;
+      try { normalizedAddress = normalizeAddress(address); } catch {
         return reply.status(400).send({
           error: "Bad Request",
           message: "Invalid Stellar address format",
@@ -22,7 +21,7 @@ export const profileRoutes: FastifyPluginAsync = async (server: FastifyInstance)
 
       try {
         // Fetch user bets using existing DB method
-        const bets = await getBetsByBettor(pool, address);
+        const bets = await getBetsByBettor(pool, normalizedAddress);
 
         // Fetch user leaderboard aggregates (points, wins, losses)
         const lbQuery = `
@@ -30,7 +29,7 @@ export const profileRoutes: FastifyPluginAsync = async (server: FastifyInstance)
           FROM leaderboard 
           WHERE address = $1;
         `;
-        const lbResult = await pool.query(lbQuery, [address]);
+        const lbResult = await pool.query(lbQuery, [normalizedAddress]);
         const lbStats = lbResult.rows[0];
 
         // Construct standard profile response, falling back to 0/empty 

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
 
 const { getBetsByBettorMock, poolQueryMock } = vi.hoisted(() => ({
   getBetsByBettorMock: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock("../db/pool.js", () => ({
 import { buildServer } from "../server.js";
 
 describe("GET /api/v1/profile/:address", () => {
-  const address = `G${"A".repeat(55)}`;
+  const address = Keypair.random().publicKey();
 
   beforeEach(() => {
     getBetsByBettorMock.mockReset();

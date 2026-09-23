@@ -291,6 +291,25 @@ describe("RedisSlidingWindowStore", () => {
   let mockRedis: ReturnType<typeof createMockRedis>;
   let store: RedisSlidingWindowStore;
 
+  it("falls back to a local limiter and alerts once when Redis is unavailable", async () => {
+    const alert = vi.fn();
+    const unavailableRedis = { eval: vi.fn().mockRejectedValue(new Error("redis down")) };
+    const fallback = new SlidingWindowStore();
+    const degradedStore = new RedisSlidingWindowStore(unavailableRedis as any, { fallbackStore: fallback, onDegraded: alert });
+
+    expect((await degradedStore.increment("k", 1, 60)).allowed).toBe(true);
+    expect((await degradedStore.increment("k", 1, 60)).allowed).toBe(false);
+    await degradedStore.increment("k", 1, 60);
+    expect(alert).toHaveBeenCalledTimes(1);
+    fallback.destroy();
+  });
+
+  it("supports an explicit fail-closed policy", async () => {
+    const unavailableRedis = { eval: vi.fn().mockRejectedValue(Object.assign(new Error(), { code: "ECONNREFUSED" })) };
+    const degradedStore = new RedisSlidingWindowStore(unavailableRedis as any, { failurePolicy: "closed", onDegraded: vi.fn() });
+    expect((await degradedStore.increment("k", 10, 60)).allowed).toBe(false);
+  });
+
   beforeEach(() => {
     mockRedis = createMockRedis();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

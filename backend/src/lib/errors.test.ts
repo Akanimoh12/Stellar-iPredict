@@ -10,6 +10,8 @@ import { buildServer } from "../server.js";
 import {
   RouteTable,
   createNotFoundHandler,
+  errorHandler,
+  mapError,
   normalizePath,
   type FastifyReplyLike,
 } from "./errors.js";
@@ -61,6 +63,25 @@ describe("normalizePath", () => {
 
   it("keeps the root path", () => {
     expect(normalizePath("/")).toBe("/");
+  });
+});
+
+describe("dependency errors", () => {
+  it("maps driver connection failures to 503 without leaking details", () => {
+    const mapped = mapError(Object.assign(new Error("password=secret host=db"), { code: "ECONNREFUSED" }));
+    expect(mapped).toEqual({ statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" });
+  });
+
+  it("adds Retry-After to dependency failures", () => {
+    const reply = makeReply();
+    errorHandler(Object.assign(new Error("db details"), { code: "57P01" }), { method: "GET", url: "/" }, reply);
+    expect(reply.statusCode).toBe(503);
+    expect(reply.headers["Retry-After"]).toBe("5");
+    expect(reply.payload).not.toMatchObject({ error: { message: "db details" } });
+  });
+
+  it("keeps application bugs at 500", () => {
+    expect(mapError(new Error("bug"))).toMatchObject({ statusCode: 500, code: "INTERNAL_SERVER_ERROR" });
   });
 });
 

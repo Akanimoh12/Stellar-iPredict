@@ -122,9 +122,22 @@ export async function getMarkets(
     whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
   const offset = (page - 1) * limit;
 
+  // Fetch the page and its total row count (over the same filtered set) in a
+  // single round trip using `COUNT(*) OVER ()`, rather than issuing a second
+  // `SELECT COUNT(*)` query. This keeps the endpoint at one query instead of
+  // two, so adding the total does not double the query cost/latency.
+  //
+  // Accuracy guarantee: because the count is computed by the same query, in
+  // the same snapshot, as the page of rows it accompanies, it is an EXACT
+  // count of rows matching the active filters as of that single query — not
+  // an approximation, and not subject to drift from a second round trip that
+  // could race with concurrent inserts/updates/deletes between two queries.
+  // It reflects a point-in-time snapshot: a write that commits immediately
+  // after the query runs will not be reflected until the next request.
   const rowsQuery = `
     SELECT
-      ${MARKET_COLUMNS}
+      ${MARKET_COLUMNS},
+      COUNT(*) OVER ()::INT AS total_count
     FROM markets
     ${whereSql}
     ORDER BY ${ORDER_BY[sort]}
@@ -133,19 +146,39 @@ export async function getMarkets(
   `;
 
   const rowsValues = [...baseValues, limit, offset];
-  const countQuery = `SELECT COUNT(*)::INT AS total FROM markets ${whereSql}`;
 
-  const [{ rows }, { rows: totalRows }] = await Promise.all([
-    db.query<MarketRow>(rowsQuery, rowsValues),
-    db.query<{ total: number }>(countQuery, baseValues),
-  ]);
+  const { rows } = await db.query<MarketRow & { total_count: number }>(
+    rowsQuery,
+    rowsValues,
+  );
+
+  const total = rows.length > 0 ? Number(rows[0].total_count) : await countWhenEmptyPage(whereSql, baseValues, db);
 
   return {
-    rows,
-    total: totalRows[0]?.total ?? 0,
+    rows: rows.map(({ total_count: _total_count, ...row }) => row as MarketRow),
+    total,
     page,
     limit,
   };
+}
+
+/**
+ * `COUNT(*) OVER ()` only appears on returned rows, so a page past the end of
+ * the result set (e.g. an `offset` beyond the last row) comes back empty and
+ * carries no count. In that case fall back to a plain `COUNT(*)` — this is
+ * the only path where a second query is issued, and it's inherently rare
+ * (an out-of-range page request).
+ */
+async function countWhenEmptyPage(
+  whereSql: string,
+  baseValues: unknown[],
+  db: Queryable,
+): Promise<number> {
+  const { rows } = await db.query<{ total: number }>(
+    `SELECT COUNT(*)::INT AS total FROM markets ${whereSql}`,
+    baseValues,
+  );
+  return rows[0]?.total ?? 0;
 }
 
 export async function getMarketById(

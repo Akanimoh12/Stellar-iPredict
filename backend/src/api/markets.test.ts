@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   computeEtag,
@@ -8,6 +8,8 @@ import {
   parsePositiveInteger
 } from "./markets";
 import { registerErrorHandler } from "../lib/errors.js";
+import { registerCancellationHook } from "../lib/cancellation.js";
+import { getAbandonedQueryCounts, resetAbandonedQueryCounts } from "../metrics.js";
 import type { MarketRow, Queryable } from "../db/markets.js";
 
 function createMarket(overrides: Partial<MarketRow> = {}): MarketRow {
@@ -41,10 +43,14 @@ async function buildTestServer(db: Queryable) {
 function createListDb(markets: MarketRow[]): Queryable {
   return {
     query: vi.fn(async (sql: string) => {
-      if (sql.includes("COUNT")) {
+      if (sql.includes("COUNT(*)::INT AS total ")) {
+        // Fallback path used only when the windowed query's page is empty.
         return { rows: [{ total: markets.length }] };
       }
-      return { rows: markets };
+      // Main query: COUNT(*) OVER () rides along on every row.
+      return {
+        rows: markets.map((market) => ({ ...market, total_count: markets.length }))
+      };
     }) as Queryable["query"]
   };
 }
@@ -405,5 +411,134 @@ describe("GET /api/markets - category parameter", () => {
 
     expect(response.statusCode).toBe(200);
     expect(queryMock).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Client-disconnect cancellation (#475)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `Queryable` that also looks like a real pg `Pool` (has `.connect()`),
+ * which is what makes `withCancellation` in markets.ts treat it as
+ * cancellable. The "connection" it hands out resolves `pg_backend_pid()`
+ * immediately, then hangs on the real query until the test settles it —
+ * mirroring the shape `queryWithCancel` (db/pool.ts) expects.
+ */
+function createCancellablePoolDouble(rows: unknown[]) {
+  let resolveRealQuery!: (value: { rows: unknown[] }) => void;
+  let rejectRealQuery!: (err: unknown) => void;
+
+  const cancelCalls: unknown[][] = [];
+
+  const client = {
+    query: vi.fn(async (text: string) => {
+      if (text === "SELECT pg_backend_pid() AS pid") {
+        return { rows: [{ pid: 4321 }] };
+      }
+      return new Promise((resolve, reject) => {
+        resolveRealQuery = resolve;
+        rejectRealQuery = reject;
+      });
+    }),
+    release: vi.fn(),
+  };
+
+  const pool = {
+    connect: vi.fn(async () => client),
+    query: vi.fn(async (text: string, params?: unknown[]) => {
+      cancelCalls.push([text, params]);
+      return { rows: [] };
+    }),
+  };
+
+  return {
+    pool: pool as unknown as Queryable,
+    cancelCalls,
+    settle: () => resolveRealQuery({ rows }),
+    fail: (err: unknown) => rejectRealQuery(err),
+  };
+}
+
+async function buildCancellableTestServer(db: Queryable) {
+  const server = Fastify({ logger: false });
+  registerCancellationHook(server);
+  registerErrorHandler(server);
+  createMarketsRoutes(server, db);
+  await server.ready();
+  return server;
+}
+
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+describe("GET /api/markets/:id — cancellation on client disconnect (#475)", () => {
+  beforeEach(() => {
+    resetAbandonedQueryCounts();
+  });
+
+  it("completes normally when the client stays connected", async () => {
+    const market = createMarket({ id: 7 });
+    const fake = createCancellablePoolDouble([market]);
+    const server = await buildCancellableTestServer(fake.pool);
+
+    const responsePromise = server.inject({
+      method: "GET",
+      url: "/api/markets/7"
+    });
+
+    await flushMicrotasks();
+    fake.settle();
+
+    const response = await responsePromise;
+    expect(response.statusCode).toBe(200);
+    expect(fake.cancelCalls).toHaveLength(0);
+    expect(getAbandonedQueryCounts()).toEqual([]);
+
+    await server.close();
+  });
+
+  it("cancels the in-flight query via pg_cancel_backend when the client disconnects and records it", async () => {
+    const fake = createCancellablePoolDouble([createMarket({ id: 9 })]);
+
+    const server = Fastify({ logger: false });
+    registerCancellationHook(server);
+
+    let capturedRawResponse: { writableEnded: boolean; emit: (e: string) => void } | undefined;
+    server.addHook("onRequest", async (_request, reply) => {
+      capturedRawResponse = reply.raw as unknown as typeof capturedRawResponse;
+    });
+
+    registerErrorHandler(server);
+    createMarketsRoutes(server, fake.pool);
+    await server.ready();
+
+    const responsePromise = server.inject({
+      method: "GET",
+      url: "/api/markets/9"
+    });
+
+    // Let the handler start (pid lookup resolves), then simulate the client
+    // going away before the query returns.
+    await flushMicrotasks();
+    await flushMicrotasks();
+    capturedRawResponse?.emit("close");
+    await flushMicrotasks();
+
+    // Postgres reports the statement was cancelled.
+    fake.fail(new Error("canceling statement due to user request"));
+
+    const response = await responsePromise;
+
+    // The handler's query rejected, so the route surfaces an error response
+    // rather than hanging — nobody is left to want the (discarded) data.
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(fake.cancelCalls).toEqual([["SELECT pg_cancel_backend($1)", [4321]]]);
+    expect(getAbandonedQueryCounts()).toEqual([
+      { route: "GET /api/markets/:id", count: 1 }
+    ]);
+
+    await server.close();
   });
 });

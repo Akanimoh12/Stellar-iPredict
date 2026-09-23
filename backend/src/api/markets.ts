@@ -5,6 +5,7 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
+import { stroopsToXlm, xlmToStroops } from "../lib/amount.js";
 import {
   getMarketById,
   getMarkets,
@@ -390,26 +391,41 @@ export function createMarketsRoutes(
           throw notFound("Market not found");
         }
 
-        const totalYes = Number(market.total_yes) || 0;
-        const totalNo = Number(market.total_no) || 0;
-        const totalPool = totalYes + totalNo;
+        let yesStroops = 0n;
+        let noStroops = 0n;
+        try {
+          if (market.total_yes) yesStroops = xlmToStroops(market.total_yes);
+        } catch {
+          yesStroops = 0n;
+        }
+        try {
+          if (market.total_no) noStroops = xlmToStroops(market.total_no);
+        } catch {
+          noStroops = 0n;
+        }
+
+        const totalPoolStroops = yesStroops + noStroops;
+        const totalPool = stroopsToXlm(totalPoolStroops);
 
         let yesOdds: number;
         let noOdds: number;
 
-        if (totalPool <= 0) {
+        if (totalPoolStroops <= 0n) {
           yesOdds = 0.5;
           noOdds = 0.5;
         } else {
-          yesOdds = Number((totalYes / totalPool).toFixed(4));
-          noOdds = Number((totalNo / totalPool).toFixed(4));
+          const SCALE = 1_000_000_000n;
+          const yesRatio = Number((yesStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          const noRatio = Number((noStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          yesOdds = Number(yesRatio.toFixed(4));
+          noOdds = Number(noRatio.toFixed(4));
         }
 
         return {
           market_id: market.id,
           total_yes: market.total_yes,
           total_no: market.total_no,
-          total_pool: totalPool.toFixed(7),
+          total_pool: totalPool,
           yes_odds: yesOdds,
           no_odds: noOdds,
           implied_probability: {

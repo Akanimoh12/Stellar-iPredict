@@ -1,5 +1,8 @@
-import { Pool, type PoolClient, type QueryResult } from "pg";
+import { Pool, types, type PoolClient, type QueryResult } from "pg";
 import { logSlowQuery } from "../lib/log.js";
+
+// Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
+types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
 
 const DEFAULT_POOL_SIZE = Number.parseInt(process.env.DB_POOL_SIZE ?? "10", 10);
 const IDLE_TIMEOUT_MS = Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS ?? "30000", 10);
@@ -20,8 +23,31 @@ const IDLE_IN_TRANSACTION_TIMEOUT_MS = Number.parseInt(
   10,
 );
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL environment variable is required");
+let _pool: Pool | null = null;
+
+function getPool(): Pool {
+  if (!_pool) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error("DATABASE_URL environment variable is required");
+    }
+
+    _pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: DEFAULT_POOL_SIZE,
+      idleTimeoutMillis: IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+    });
+
+    _pool.on("connect", async (client) => {
+      await client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+      await client.query(`SET idle_in_transaction_session_timeout = ${IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
+    });
+
+    _pool.on("error", (err) => {
+      console.error("Unexpected pool error:", err);
+    });
+  }
+  return _pool;
 }
 
 // Lazy accessor so `import { pool }` call sites keep working unchanged while
@@ -34,16 +60,6 @@ export const pool: Pool = new Proxy({} as Pool, {
   },
 });
 
-pool.on("connect", async (client) => {
-  await client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
-  await client.query(`SET idle_in_transaction_session_timeout = ${IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
-});
-
-pool.on("error", (err) => {
-  console.error("Unexpected pool error:", err);
-});
-
-export { pool };
 
 /**
  * Pool saturation gauges, readable without attaching a debugger.

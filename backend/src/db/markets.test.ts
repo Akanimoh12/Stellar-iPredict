@@ -123,4 +123,34 @@ describe("getMarketById", () => {
     await expect(getMarketById(0, db)).rejects.toThrow("id must be a positive integer");
     await expect(getMarketById(1.5, db)).rejects.toThrow("id must be a positive integer");
   });
+
+  it("preserves exact string amounts larger than Number.MAX_SAFE_INTEGER without precision loss", async () => {
+    const hugeAmountStr = "12345678901234567890.1234567";
+    const market: MarketRow = {
+      id: 8,
+      question: "Large amount market",
+      image_url: null,
+      category: "Crypto",
+      end_time: "1735689600",
+      total_yes: hugeAmountStr,
+      total_no: hugeAmountStr,
+      resolved: false,
+      outcome: null,
+      cancelled: false,
+      creator: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      bet_count: 1,
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    };
+
+    const queryMock = vi.fn().mockResolvedValue({ rows: [market] });
+    const db: Queryable = { query: queryMock as Queryable["query"] };
+
+    const result = await getMarketById(8, db);
+    expect(result?.total_yes).toBe(hugeAmountStr);
+    expect(result?.total_no).toBe(hugeAmountStr);
+    expect(typeof result?.total_yes).toBe("string");
+    expect(typeof result?.total_no).toBe("string");
+  });
 });
+

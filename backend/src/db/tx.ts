@@ -51,6 +51,19 @@ export function calculateRetryDelay(
  * Begins the transaction, executes the callback, and commits on success.
  * If the callback throws an error, the transaction is rolled back.
  *
+ * Deliberately NOT wired to client-disconnect cancellation (#475): unlike
+ * the standalone read queries `queryWithCancel` (db/pool.ts) targets,
+ * everything here shares one connection across BEGIN / the callback's
+ * statements / COMMIT. Cancelling one statement mid-transaction via
+ * `pg_cancel_backend` would abort the whole backend transaction while this
+ * function's own control flow has no way to know that happened — it would
+ * still try to run further statements or COMMIT on a connection Postgres
+ * has already marked failed, which is exactly the "leave a transaction in
+ * an inconsistent state" outcome #475 explicitly calls out to avoid. A
+ * disconnected client here still gets its transaction rolled back through
+ * the normal catch/ROLLBACK path once `fn` itself fails or the process
+ * notices — it's just never cancelled early.
+ *
  * @param fn The callback function to execute within the transaction
  * @returns The result of the callback
  */

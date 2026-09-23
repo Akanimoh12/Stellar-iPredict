@@ -24,6 +24,7 @@ import { registerStatusRoutes } from "./api/status.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
+import { registerCancellationHook } from "./lib/cancellation.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -69,6 +70,10 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   registerRequestLogging(server);
   registerMetricsHook(server);
   registerMetricsEndpoint(server);
+  // Exposes request.abortSignal, which read-only GET routes pass into
+  // queryWithCancel (db/pool.ts) so a disconnecting client's query gets
+  // cancelled at the Postgres level instead of running to completion (#475).
+  registerCancellationHook(server);
   registerErrorHandler(server);
 
   // One error envelope for every failure, including unknown routes and methods.

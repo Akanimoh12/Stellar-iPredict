@@ -15,6 +15,7 @@ import {
 } from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
+import { queryWithCancel, type CancellablePool } from "../db/pool.js";
 import {
   marketKey,
   marketsListKey,
@@ -205,6 +206,36 @@ const errorResponseSchema = {
   required: ["error"],
 } as const;
 
+/**
+ * Wraps `db` so its queries are cancelled (see db/pool.ts `queryWithCancel`)
+ * if `signal` aborts before they resolve — i.e. the client disconnected.
+ *
+ * Only ever used for these GET routes: each issues its own standalone,
+ * read-only query outside of any transaction, so abandoning one mid-flight
+ * can never leave a transaction half-committed. `db` is only a real
+ * cancellable Postgres pool in production (it needs `.connect()` for the
+ * pg_cancel_backend dance); unit tests inject a bare `{ query }` fake, which
+ * this passes through untouched.
+ */
+function withCancellation(
+  db: Queryable | undefined,
+  signal: AbortSignal | undefined,
+  route: string,
+): Queryable | undefined {
+  if (
+    !db ||
+    !signal ||
+    typeof (db as unknown as Partial<CancellablePool>).connect !== "function"
+  ) {
+    return db;
+  }
+  const cancellablePool = db as unknown as CancellablePool;
+  return {
+    query: (text: string, values?: unknown[]) =>
+      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }),
+  };
+}
+
 export function createMarketsRoutes(
   app: FastifyInstance,
   db?: Queryable,
@@ -282,12 +313,17 @@ export function createMarketsRoutes(
       const key = marketsListKey(filter, category, sort, page, limit);
       const ttl =
         filter === "active" ? MARKETS_ACTIVE_TTL : MARKETS_DEFAULT_TTL;
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets",
+      );
 
       const result = redis
         ? await getOrSet(redis, key, ttl, () =>
-            getMarkets({ filter, category, sort, page, limit }, db)
+            getMarkets({ filter, category, sort, page, limit }, cancellableDb)
           )
-        : await getMarkets({ filter, category, sort, page, limit }, db);
+        : await getMarkets({ filter, category, sort, page, limit }, cancellableDb);
 
       const body = {
         markets: result.rows,
@@ -469,7 +505,12 @@ export function createMarketsRoutes(
         throw badRequest("id must be a positive integer");
       }
 
-      const loader = () => getMarketById(id, db);
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id",
+      );
+      const loader = () => getMarketById(id, cancellableDb);
       const market = redis
         ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, loader)
         : await loader();
@@ -568,8 +609,14 @@ export function createMarketsRoutes(
       const page = Math.max(1, query.page ?? 1);
       const limit = Math.min(100, Math.max(1, query.limit ?? 50));
 
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id/bets",
+      );
+
       // Verify the market exists before returning bets.
-      const marketLoader = () => getMarketById(id, db);
+      const marketLoader = () => getMarketById(id, cancellableDb);
       const market = redis
         ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, marketLoader)
         : await marketLoader();
@@ -578,7 +625,7 @@ export function createMarketsRoutes(
         throw notFound("Market not found");
       }
 
-      if (!db) {
+      if (!cancellableDb) {
         throw badRequest("Database not available");
       }
 
@@ -587,7 +634,7 @@ export function createMarketsRoutes(
       // For other pages the key includes the page/limit so they get their own
       // cache entries — still subject to the same 30s TTL.
       const key = betsKey(id);
-      const loader = () => getBetsByMarketFromDb(id, page, limit, db);
+      const loader = () => getBetsByMarketFromDb(id, page, limit, cancellableDb);
 
       return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();
     },

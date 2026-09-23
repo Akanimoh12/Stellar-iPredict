@@ -7,6 +7,7 @@ vi.mock("../db/bets.js", () => ({ getBetsByBettor: vi.fn() }));
 vi.mock("../db/pool.js", () => ({ pool: { query: poolQueryMock } }));
 
 import { buildServer } from "../server.js";
+import { createFakePool } from "../test/fakePool.js";
 import {
   RouteTable,
   createNotFoundHandler,
@@ -82,6 +83,30 @@ describe("dependency errors", () => {
 
   it("keeps application bugs at 500", () => {
     expect(mapError(new Error("bug"))).toMatchObject({ statusCode: 500, code: "INTERNAL_SERVER_ERROR" });
+  });
+
+  it("maps Fastify payload too large errors to 413 PAYLOAD_TOO_LARGE", () => {
+    const error = Object.assign(new Error("request body larger than max allowable size"), {
+      code: "FST_ERR_CTP_BODY_TOO_LARGE",
+      statusCode: 413,
+    });
+    expect(mapError(error)).toEqual({
+      statusCode: 413,
+      code: "PAYLOAD_TOO_LARGE",
+      message: "request body larger than max allowable size",
+    });
+  });
+
+  it("maps Fastify request timeout errors to 408 REQUEST_TIMEOUT", () => {
+    const error = Object.assign(new Error("request timed out"), {
+      code: "FST_ERR_REQ_TIMEOUT",
+      statusCode: 408,
+    });
+    expect(mapError(error)).toEqual({
+      statusCode: 408,
+      code: "REQUEST_TIMEOUT",
+      message: "request timed out",
+    });
   });
 });
 
@@ -185,7 +210,7 @@ afterEach(async () => {
 
 describe("unknown routes on the built server", () => {
   it("returns the error envelope for an unknown path", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "GET", url: "/does-not-exist" });
 
@@ -196,7 +221,7 @@ describe("unknown routes on the built server", () => {
   });
 
   it("returns 405 for a known path called with the wrong method", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "DELETE", url: "/healthz" });
 
@@ -206,7 +231,7 @@ describe("unknown routes on the built server", () => {
   });
 
   it("still serves the route it knows", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "GET", url: "/healthz" });
 

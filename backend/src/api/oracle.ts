@@ -606,7 +606,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
  */
 export function registerOracleRoutes(
   server: FastifyInstance,
-  pool?: Pool,
+  pool: Pool | Queryable,
   dbOverride?: Queryable,
 ): void {
   // Validate that a database is available at registration time, not per-request.
@@ -709,7 +709,7 @@ export function registerOracleRoutes(
       },
     },
     async (request, reply) => {
-      const db: Queryable = (dbOverride ?? pool)!;
+      const db: Queryable = dbOverride ?? pool;
       const now = Date.now();
       request.log.warn(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",

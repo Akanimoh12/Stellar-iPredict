@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "@/server";
+import { createFakePool } from "../test/fakePool.js";
 
 let server: FastifyInstance | undefined;
 
 function makeServer(): FastifyInstance {
-  server = buildServer({ corsOrigins: [] });
+  server = buildServer({ corsOrigins: [], pool: createFakePool() });
   return server;
 }
 

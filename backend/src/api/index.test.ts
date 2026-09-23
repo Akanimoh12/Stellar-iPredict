@@ -11,13 +11,14 @@ vi.mock("../db/pool.js", () => ({ pool: { query: poolQueryMock } }));
 
 import { buildServer } from "../server.js";
 import { API_PREFIX, API_VERSION, routers } from "./index.js";
+import { createFakePool } from "../test/fakePool.js";
 
 const ADDRESS = `G${"A".repeat(55)}`;
 
 let server: FastifyInstance | undefined;
 
 function makeServer(): FastifyInstance {
-  server = buildServer({ corsOrigins: [] });
+  server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
   return server;
 }
 

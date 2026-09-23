@@ -8,7 +8,7 @@ describe("registerOracleRoutes - pool validation", () => {
     const server = Fastify();
 
     expect(() => {
-      registerOracleRoutes(server);
+      (registerOracleRoutes as any)(server);
     }).toThrow(
       "Oracle routes require a database pool. Pass options.pool to buildServer or dbOverride to registerOracleRoutes.",
     );
@@ -32,7 +32,7 @@ describe("registerOracleRoutes - pool validation", () => {
     };
 
     expect(() => {
-      registerOracleRoutes(server, undefined, mockDb);
+      registerOracleRoutes(server, undefined as any, mockDb);
     }).not.toThrow();
   });
 

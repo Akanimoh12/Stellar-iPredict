@@ -185,12 +185,11 @@ const errorResponseSchema = {
  * this passes through untouched.
  */
 function withCancellation(
-  db: Queryable | undefined,
+  db: Queryable,
   signal: AbortSignal | undefined,
   route: string,
-): Queryable | undefined {
+): Queryable {
   if (
-    !db ||
     !signal ||
     typeof (db as unknown as Partial<CancellablePool>).connect !== "function"
   ) {
@@ -205,7 +204,7 @@ function withCancellation(
 
 export function createMarketsRoutes(
   app: FastifyInstance,
-  db?: Queryable,
+  db: Queryable,
   redis?: Redis
 ): void {
   // ── GET /api/markets ──────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ import {
   METRICS_TOKEN_HEADER,
 } from "../metrics.js";
 import { buildServer } from "@/server";
+import { createFakePool } from "../test/fakePool.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -320,7 +321,7 @@ describe("registerMetricsHook (Fastify integration)", () => {
   beforeEach(() => {
     resetHistogram();
     resetErrorCounts();
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
   });
 
   afterEach(async () => {

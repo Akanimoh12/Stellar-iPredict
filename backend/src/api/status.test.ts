@@ -239,7 +239,7 @@ describe("GET /status", () => {
     // Registration order is easy to break: a route added straight onto the
     // instance loads before the OpenAPI plugin's onRoute hook and vanishes
     // from the spec. Pin it so a refactor cannot silently undocument the feed.
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: makePool({}) as never });
     const res = await server.inject({ method: "GET", url: "/api/docs" });
 
     expect(Object.keys(res.json().paths ?? {})).toContain("/status");

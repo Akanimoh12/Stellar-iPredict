@@ -1,5 +1,9 @@
 # Council Resolution Runbook
 
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](./STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers council voting, the aggregator, and incident severity and communication.
+
 > **Phase 1.5 Implementation Guide**  
 > How council members submit outcomes and how the aggregator finalizes markets.
 

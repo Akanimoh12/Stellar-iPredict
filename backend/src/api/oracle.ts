@@ -505,6 +505,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
               : undefined,
+            requestId: request.id,
           },
           db,
         );
@@ -841,6 +842,7 @@ export function registerOracleRoutes(
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
               : undefined,
+            requestId: request.id,
           },
           db,
         );

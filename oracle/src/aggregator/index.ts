@@ -1,7 +1,7 @@
 import { Networks, rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
-import { createLogger, type Logger } from "../log.js";
+import { createCorrelationId, createLogger, isValidRequestId, type Logger } from "../log.js";
 import {
   loadOracleMetricsConfig,
   startOracleMetrics,
@@ -178,6 +178,18 @@ export interface AggregatorMarket {
   /** Market end time in Unix seconds; with `id`, the keyset cursor for paging. */
   endTime?: number;
 }
+/**
+ * Tracing context for one attempt at processing one market (#467). The loop
+ * creates it and passes it down explicitly rather than through async-local
+ * storage, so every function that logs for the attempt visibly takes it.
+ */
+export interface ProcessMarketContext {
+  /** Fresh per attempt; the same format as the backend's request ids. */
+  correlationId: string;
+  /** Bound to `correlationId` and `marketId`: every line it emits carries both. */
+  logger?: Logger;
+}
+
 export interface AggregatorDependencies {
   connect(): Promise<void>;
   /**
@@ -190,19 +202,20 @@ export interface AggregatorDependencies {
   listExpiredUnresolvedMarkets(now: Date, limit?: number, after?: AggregatorMarket): Promise<AggregatorMarket[]>;
   getBacklogDepth?(now: Date): Promise<number>;
   checkReadiness?(): Promise<{ db: { ok: boolean; latencyMs?: number; error?: string }; rpc: { ok: boolean; latencyMs?: number; error?: string } }>;
-  processMarket(market: AggregatorMarket): Promise<void>;
+  processMarket(market: AggregatorMarket, context?: ProcessMarketContext): Promise<void>;
   close(): Promise<void>;
 }
 
 export function createProductionDependencies(
   config: AggregatorConfig,
   logger: Logger = createLogger({ level: config.LOG_LEVEL }),
-  overrides: { database?: Pool; server?: rpc.Server } = {},
+  overrides: { database?: Pool; server?: rpc.Server; fetchFn?: typeof fetch } = {},
 ): AggregatorDependencies {
   const database = overrides.database ?? new Pool({ connectionString: config.DATABASE_URL });
   const server = overrides.server ?? new rpc.Server(config.SOROBAN_RPC_URL);
   const submissionStore = createPostgresSubmissionStore(database);
   const networkPassphrase = config.NETWORK_PASSPHRASE ?? Networks.TESTNET;
+  const rootLogger = logger;
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
@@ -256,12 +269,15 @@ export function createProductionDependencies(
 
       return { db: dbRes, rpc: rpcRes };
     },
-    async processMarket(market) {
+    async processMarket(market, context) {
       // Handles exactly one market. Errors propagate: runAggregator is the
       // isolation boundary that logs them, counts consecutive failures and
       // escalates (#446) before moving on to the next market. Catching here
       // hid every failure from that accounting and from the failure metric.
       const marketId = market.id.trim();
+      const correlationId = context?.correlationId ?? createCorrelationId();
+      // Every line below goes through this logger, so each carries the id.
+      let logger = context?.logger ?? rootLogger.child({ correlationId, marketId });
       // Defensive: the expiry query already filters these out, but a market
       // can be cancelled or resolved between the query and this call.
       if (market.cancelled) {
@@ -303,7 +319,23 @@ export function createProductionDependencies(
         return;
       }
 
-      // 2. Load the council's current submissions and compute the tally.
+      // 2. Cross the process boundary (#467): a submission the backend took
+      //    over HTTP stored its request id on the market's oracle_submissions
+      //    row. Binding it here ties this attempt to that request, so either
+      //    id finds the other in the logs.
+      const origin = await database.query<{ request_id: string | null }>(
+        "SELECT request_id FROM oracle_submissions WHERE market_id = $1 AND request_id IS NOT NULL",
+        [onChainMarketId],
+      );
+      const originRequestId = origin.rows
+        .map((row) => row.request_id)
+        .find((id): id is string => isValidRequestId(id));
+      if (originRequestId) {
+        logger = logger.child({ originRequestId });
+        logger.info("correlated with originating backend request");
+      }
+
+      // 3. Load the council's current submissions and compute the tally.
       const votes = await submissionStore.getSubmissions(marketId);
       const tally = computeTally(marketId, votes);
       logger.info("computed tally", {
@@ -313,7 +345,7 @@ export function createProductionDependencies(
         totalVoters: tally.totalVoters,
       });
 
-      // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
+      // 4. Evaluate the threshold. `null` means no outcome (or an ambiguous
       //    both-outcomes) majority — the market stays untouched this poll.
       const outcome = selectThresholdOutcome(votes, config.COUNCIL_THRESHOLD, logger, marketId);
       if (outcome === null) {
@@ -326,11 +358,11 @@ export function createProductionDependencies(
         return;
       }
 
-      // 4. Safety gate — assertCanFinalize throws with a descriptive reason
+      // 5. Safety gate — assertCanFinalize throws with a descriptive reason
       //    if submissions are insufficient or the tally is ambiguous.
       assertCanFinalize(marketId, tally, createBalancedValidationConfig(config.COUNCIL_THRESHOLD));
 
-      // 5. Finalize on-chain and persist the decision.
+      // 6. Finalize on-chain, persist the decision and notify.
       logger.info("threshold met, finalizing market", { marketId, decision: outcome });
       const txHash = await finalizeMarketDecision(
         database,
@@ -341,6 +373,8 @@ export function createProductionDependencies(
         outcome,
         [...tally.votes],
         networkPassphrase,
+        { webhookUrl: config.FINALIZE_WEBHOOK_URL, fetchFn: overrides.fetchFn, logger },
+        { correlationId, originRequestId, logger },
       );
       logger.info("market finalized", { marketId, decision: outcome, txHash });
     },
@@ -424,8 +458,12 @@ export async function runAggregator(
           if (options.signal.aborted) break;
           options.metrics?.recordMarketProcessed();
 
+          // One id per attempt, so a retry on the next poll is its own story.
+          const correlationId = createCorrelationId();
+          const marketLogger = logger?.child({ correlationId, marketId: market.id });
+
           try {
-            await dependencies.processMarket(market);
+            await dependencies.processMarket(market, { correlationId, logger: marketLogger });
             marketFailureMap.delete(market.id);
             marketsProcessed++;
             options.metrics?.recordMarketFinalized();
@@ -434,7 +472,7 @@ export async function runAggregator(
             const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
             marketFailureMap.set(market.id, failureCount);
 
-            logger?.error("market processing failed", {
+            marketLogger?.error("market processing failed", {
               marketId: market.id,
               error,
               consecutiveFailures: failureCount,
@@ -446,9 +484,10 @@ export async function runAggregator(
                   marketId: market.id,
                   attempts: failureCount,
                   error,
+                  correlationId,
                 });
               } catch (alertError) {
-                logger?.error("failed to send failure alert", {
+                marketLogger?.error("failed to send failure alert", {
                   marketId: market.id,
                   alertError,
                 });

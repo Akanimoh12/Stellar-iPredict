@@ -138,6 +138,12 @@ export type RecordOracleSubmissionInput = {
   bondAmount: string | number;
   nonce?: string;
   requestTimestamp?: Date;
+  /**
+   * The HTTP request's id (`request.id`, see lib/log.ts). Stored so the oracle
+   * aggregator can tie its processing of this market back to the request that
+   * submitted it (#467).
+   */
+  requestId?: string;
 };
 
 let pool: Pool | undefined;
@@ -162,8 +168,8 @@ export async function recordOracleSubmission(
   }
 
   const queryText = `
-    INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status, nonce, request_timestamp)
-    VALUES ($1, $2, $3, $4, 'submitted', $5, $6)
+    INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status, nonce, request_timestamp, request_id)
+    VALUES ($1, $2, $3, $4, 'submitted', $5, $6, $7)
     RETURNING id, market_id::text AS market_id, submitter, outcome, bond_amount, submitted_at, status
   `;
 
@@ -174,6 +180,7 @@ export async function recordOracleSubmission(
     bondAmountStr,
     input.nonce ?? null,
     input.requestTimestamp ?? null,
+    input.requestId ?? null,
   ]);
 
   return result.rows[0];

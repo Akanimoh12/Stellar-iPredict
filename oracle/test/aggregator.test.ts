@@ -138,7 +138,10 @@ describe("council aggregator skeleton", () => {
     };
     await runAggregator(dependencies, { signal: controller.signal, pollIntervalMs: 1 });
     expect(dependencies.connect).toHaveBeenCalledOnce();
-    expect(dependencies.processMarket).toHaveBeenCalledWith({ id: "42", cancelled: false });
+    expect(dependencies.processMarket).toHaveBeenCalledWith(
+      { id: "42", cancelled: false },
+      expect.objectContaining({ correlationId: expect.any(String) }),
+    );
     expect(dependencies.close).toHaveBeenCalledOnce();
   });
 
@@ -167,9 +170,11 @@ describe("council aggregator skeleton", () => {
 
     // All three markets should be processed despite the error
     expect(processMarketMock).toHaveBeenCalledTimes(3);
-    expect(processMarketMock).toHaveBeenCalledWith({ id: "market-1", cancelled: false });
-    expect(processMarketMock).toHaveBeenCalledWith({ id: "bad-market", cancelled: false });
-    expect(processMarketMock).toHaveBeenCalledWith({ id: "market-3", cancelled: false });
+    expect(processMarketMock.mock.calls.map(([market]) => market)).toEqual([
+      { id: "market-1", cancelled: false },
+      { id: "bad-market", cancelled: false },
+      { id: "market-3", cancelled: false },
+    ]);
   });
 
   it("tracks consecutive failures and escalates after threshold (issue #446)", async () => {
@@ -282,7 +287,8 @@ describe("council aggregator skeleton", () => {
 
   it("logs overrun when iteration exceeds poll interval (issue #448)", async () => {
     const controller = new AbortController();
-    const loggerMock = { warn: vi.fn(), info: vi.fn(), error: vi.fn() };
+    const loggerMock = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), child: vi.fn() };
+    loggerMock.child.mockReturnValue(loggerMock);
     let iterationCount = 0;
 
     const dependencies: AggregatorDependencies = {
@@ -457,18 +463,26 @@ function buildBacklog(): BacklogMarket[] {
   ];
 }
 
+interface BacklogTrace {
+  /** Every structured log line the run emitted, parsed. */
+  lines: Array<Record<string, unknown>>;
+  /** Every finalize webhook the run sent. */
+  webhooks: Array<{ headers: Record<string, string>; body: Record<string, unknown> }>;
+}
+
 interface BacklogRun {
   /** Market ids processMarket was called with, per iteration (1-based). */
   attempts: Map<number, string[]>;
   /** Market ids the expiry query would return at the start of each iteration. */
   eligible: Map<number, string[]>;
-  alerts: Array<{ marketId: string; attempts: number }>;
+  alerts: Array<{ marketId: string; attempts: number; correlationId?: string }>;
 }
 
 async function runBacklog(
   world: BacklogWorld,
   iterations: number,
   betweenIterations: (completed: number) => void = () => {},
+  trace?: BacklogTrace,
 ): Promise<BacklogRun> {
   const config = loadAggregatorConfig({
     COUNCIL_SIZE: "7",
@@ -478,10 +492,24 @@ async function runBacklog(
     RESOLVER_KEY: world.resolverSecret,
     MARKET_CONTRACT_ID: world.contractId,
     NETWORK_PASSPHRASE: Networks.TESTNET,
+    FINALIZE_WEBHOOK_URL: "https://hooks.backlog.invalid/finalized",
   });
-  const logger = createLogger({ level: "error", sink: () => {} });
+  const logger = trace
+    ? createLogger({ level: "debug", sink: (line) => trace.lines.push(JSON.parse(line)) })
+    : createLogger({ level: "error", sink: () => {} });
+  const fetchFn = (async (_url: string, init: RequestInit) => {
+    trace?.webhooks.push({
+      headers: init.headers as Record<string, string>,
+      body: JSON.parse(String(init.body)),
+    });
+    return new Response(null, { status: 204 });
+  }) as unknown as typeof fetch;
   const clock = virtualClock(T0);
-  const deps = createProductionDependencies(config, logger, { database: world.pool(), server: world.server() });
+  const deps = createProductionDependencies(config, logger, {
+    database: world.pool(),
+    server: world.server(),
+    fetchFn,
+  });
 
   const run: BacklogRun = { attempts: new Map(), eligible: new Map(), alerts: [] };
   let iteration = 1;
@@ -507,7 +535,7 @@ async function runBacklog(
     logger,
     clock,
     alertSender: async (alert) => {
-      run.alerts.push({ marketId: alert.marketId, attempts: alert.attempts });
+      run.alerts.push({ marketId: alert.marketId, attempts: alert.attempts, correlationId: alert.correlationId });
     },
     onIterationComplete: () => {
       betweenIterations(iteration);
@@ -584,7 +612,7 @@ describe("aggregator loop against a simulated multi-market backlog (#468)", () =
     const { run } = await runScenario();
 
     expect(finalizedIn(run, "101")).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(run.alerts.filter((a) => a.marketId === "101").map((a) => a.attempts)).toEqual([5, 6]);
+    expect(run.alerts.filter((a) => a.marketId === "101").map(({ attempts }) => attempts)).toEqual([5, 6]);
     expect(run.alerts.every((a) => a.marketId === "101")).toBe(true);
   });
 
@@ -608,7 +636,132 @@ describe("aggregator loop against a simulated multi-market backlog (#468)", () =
     const second = await runScenario();
 
     expect(second.run.attempts).toEqual(first.run.attempts);
-    expect(second.run.alerts).toEqual(first.run.alerts);
+    // Correlation ids are random per attempt; everything else must repeat.
+    const withoutIds = (run: BacklogRun) => run.alerts.map(({ marketId, attempts }) => ({ marketId, attempts }));
+    expect(withoutIds(second.run)).toEqual(withoutIds(first.run));
     expect([...second.world.finalized.keys()]).toEqual([...first.world.finalized.keys()]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Correlation ids across the finalization path (#467)
+// ---------------------------------------------------------------------------
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Lines the loop emits outside any single market's processing. */
+const LOOP_LEVEL_MESSAGES = new Set(["aggregator connected", "poll iteration complete", "aggregator stopped"]);
+
+describe("correlation ids across the finalization path (#467)", () => {
+  async function tracedRun(world = new BacklogWorld(buildBacklog()), iterations = 6) {
+    const trace: BacklogTrace = { lines: [], webhooks: [] };
+    const run = await runBacklog(
+      world,
+      iterations,
+      (completed) => {
+        if (completed === 1 && world.markets.has("108")) world.addVotes("108", votes(true, 1, 3));
+      },
+      trace,
+    );
+    return { world, run, trace };
+  }
+
+  it("tags every log line emitted while processing a market", async () => {
+    const { trace } = await tracedRun();
+
+    const untagged = trace.lines.filter((line) => !UUID.test(String(line.correlationId)));
+    // Only the loop's own bookkeeping lines are outside a market attempt.
+    expect([...new Set(untagged.map((line) => line.message))].sort()).toEqual(
+      [...LOOP_LEVEL_MESSAGES].filter((m) => untagged.some((l) => l.message === m)).sort(),
+    );
+    expect(untagged.every((line) => line.marketId === undefined)).toBe(true);
+    // And the tagged lines really are per market: one market per id.
+    const marketsById = new Map<string, Set<unknown>>();
+    for (const line of trace.lines.filter((l) => l.correlationId)) {
+      const markets = marketsById.get(String(line.correlationId)) ?? new Set();
+      markets.add(line.marketId);
+      marketsById.set(String(line.correlationId), markets);
+    }
+    for (const [id, markets] of marketsById) expect([...markets], id).toHaveLength(1);
+  });
+
+  it("retrieves the whole story of one finalization from a single id", async () => {
+    const { world, trace } = await tracedRun();
+
+    const webhook = trace.webhooks.find((w) => w.body.marketId === "102");
+    const correlationId = String(webhook?.body.correlationId);
+    expect(correlationId).toMatch(UUID);
+
+    const story = trace.lines.filter((line) => line.correlationId === correlationId);
+    expect(story.map((line) => line.message)).toEqual([
+      "computed tally",
+      "vote tally",
+      "threshold met, finalizing market",
+      "persisted finalized decision",
+      "Market 102 finalized",
+      "market finalized",
+    ]);
+    expect(story.every((line) => line.marketId === "102")).toBe(true);
+    // The row the attempt wrote leads back to the same story.
+    expect(world.finalized.get("102")?.requestId).toBe(correlationId);
+  });
+
+  it("sends the correlation id in every webhook payload and x-request-id header", async () => {
+    const { world, trace } = await tracedRun();
+
+    expect(trace.webhooks.map((w) => w.body.marketId).sort()).toEqual([...world.finalized.keys()].sort());
+    for (const { body, headers } of trace.webhooks) {
+      expect(body.correlationId).toMatch(UUID);
+      expect(headers["x-request-id"]).toBe(body.correlationId);
+      expect(world.finalized.get(String(body.marketId))?.requestId).toBe(body.correlationId);
+    }
+    const ids = trace.webhooks.map((w) => w.body.correlationId);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("gives each attempt its own id, so a retry is a separate story", async () => {
+    const { run, trace } = await tracedRun();
+
+    const failure = trace.lines.find((l) => l.message === "market processing failed" && l.marketId === "105");
+    const success = trace.lines.find((l) => l.message === "market finalized" && l.marketId === "105");
+    expect(failure?.correlationId).toMatch(UUID);
+    expect(success?.correlationId).toMatch(UUID);
+    expect(failure?.correlationId).not.toBe(success?.correlationId);
+    expect(failure?.error).toMatchObject({ message: "503 Service Unavailable" });
+
+    // Escalations carry the id of the attempt that tripped them.
+    const alert = run.alerts.find((a) => a.marketId === "101" && a.attempts === 5);
+    expect(alert?.correlationId).toMatch(UUID);
+    expect(
+      trace.lines.some((l) => l.message === "market processing failed" && l.correlationId === alert?.correlationId),
+    ).toBe(true);
+  });
+
+  it("joins the backend request id of an HTTP submission across the process boundary", async () => {
+    const backendRequestId = "7d1f2a9e-5b4c-4e3a-9f10-2b3c4d5e6f70";
+    const world = new BacklogWorld([
+      { id: "201", scenario: "submitted over HTTP", endTime: T0_S - HOUR_S, ...open(), votes: votes(true, 4) },
+    ]);
+    // What POST /api/oracle/submit leaves behind: the market's row, stamped
+    // with the backend's request id.
+    world.backendSubmissions.set("201", backendRequestId);
+
+    const { trace } = await tracedRun(world, 1);
+
+    const joined = trace.lines.find((l) => l.message === "correlated with originating backend request");
+    expect(joined).toMatchObject({ marketId: "201", originRequestId: backendRequestId });
+    expect(joined?.correlationId).toMatch(UUID);
+    // processMarket's later lines carry both ids, so searching for either one
+    // finds them; the loop's own lines for the attempt carry the correlation id.
+    const attempt = trace.lines.filter((l) => l.correlationId === joined?.correlationId);
+    const fromProcessMarket = attempt.slice(attempt.indexOf(joined!)).filter((l) => l.message !== "market processing failed");
+    expect(fromProcessMarket.map((l) => l.message)).toEqual([
+      "correlated with originating backend request",
+      "computed tally",
+      "vote tally",
+      "threshold met, finalizing market",
+    ]);
+    expect(fromProcessMarket.every((l) => l.originRequestId === backendRequestId)).toBe(true);
+    expect(attempt.every((l) => l.marketId === "201")).toBe(true);
   });
 });

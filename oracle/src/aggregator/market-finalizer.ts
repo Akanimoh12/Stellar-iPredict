@@ -10,8 +10,18 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import type { Pool } from "pg";
+import type { Logger } from "../log.js";
 import type { CouncilVote } from "./threshold.js";
 import { notifyFinalized, type FinalizeNotifierOptions } from "./finalize-notifier.js";
+
+/** Correlation for one finalization, passed explicitly from processMarket (#467). */
+export interface FinalizeTrace {
+  correlationId: string;
+  /** Backend request id of the HTTP submission for this market, if any. */
+  originRequestId?: string;
+  /** Logger already bound to the correlation id. */
+  logger?: Logger;
+}
 
 export class MarketAlreadyFinalizedError extends Error {
   constructor(marketId: string) {
@@ -132,6 +142,8 @@ export async function persistFinalDecision(
   txHash: string,
   councilVotes: CouncilVote[],
   submitter: string,
+  /** Correlation id of the attempt writing the row, stored in request_id (#467). */
+  requestId?: string,
 ): Promise<void> {
   const existing = await db.query("SELECT 1 FROM oracle_submissions WHERE market_id = $1", [marketId]);
   if ((existing.rowCount ?? 0) > 0) {
@@ -151,8 +163,9 @@ export async function persistFinalDecision(
         decision,
         tx_hash,
         finalized_at,
-        council_votes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        council_votes,
+        request_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         marketId,
         submitter,
@@ -166,6 +179,7 @@ export async function persistFinalDecision(
         txHash,
         now,
         JSON.stringify(councilVotes),
+        requestId ?? null,
       ],
     );
   } catch (error) {
@@ -186,6 +200,7 @@ export async function finalizeMarketDecision(
   councilVotes: CouncilVote[],
   networkPassphrase: string = Networks.TESTNET,
   notifierOptions?: FinalizeNotifierOptions,
+  trace?: FinalizeTrace,
 ): Promise<string> {
   const txHash = await submitResolutionTransaction(
     server,
@@ -204,10 +219,16 @@ export async function finalizeMarketDecision(
     txHash,
     councilVotes,
     Keypair.fromSecret(resolverSecret).publicKey(),
+    trace?.correlationId,
   );
-  console.info(
-    `Persisted finalized decision for market ${marketId} with tx_hash=${txHash} and decision=${decisionLabel(decision)}`,
-  );
+  const persisted = { marketId: String(marketId), txHash, decision: decisionLabel(decision) };
+  if (trace?.logger) {
+    trace.logger.info("persisted finalized decision", persisted);
+  } else {
+    console.info(
+      `Persisted finalized decision for market ${marketId} with tx_hash=${txHash} and decision=${decisionLabel(decision)}`,
+    );
+  }
 
   // Best-effort side effect — a webhook failure must not undo the finalization.
   await notifyFinalized(
@@ -217,8 +238,10 @@ export async function finalizeMarketDecision(
       txHash,
       councilVotes,
       finalizedAt: new Date().toISOString(),
+      correlationId: trace?.correlationId,
+      originRequestId: trace?.originRequestId,
     },
-    notifierOptions,
+    { ...notifierOptions, logger: notifierOptions?.logger ?? trace?.logger },
   );
 
   return txHash;

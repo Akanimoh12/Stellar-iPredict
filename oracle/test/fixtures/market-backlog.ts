@@ -53,6 +53,8 @@ export interface FinalizedRow {
   decision: string;
   txHash: string;
   councilVotes: CouncilVote[];
+  /** Correlation id of the aggregator attempt that wrote the row. */
+  requestId: string | null;
 }
 
 export interface SentTransaction {
@@ -80,6 +82,8 @@ export class BacklogWorld {
   readonly markets = new Map<string, BacklogMarket>();
   /** `oracle_submissions` rows, keyed by market id (the table is UNIQUE on it). */
   readonly finalized = new Map<string, FinalizedRow>();
+  /** Rows the backend wrote for HTTP submissions: market id → its request id. */
+  readonly backendSubmissions = new Map<string, string>();
   readonly transactions: SentTransaction[] = [];
   /** Market ids of resolve transactions the contract refused (market not open). */
   readonly rejected: string[] = [];
@@ -149,12 +153,18 @@ export class BacklogWorld {
     }
 
     if (sql === "SELECT 1 FROM oracle_submissions WHERE market_id = $1") {
-      return result(this.finalized.has(String(params[0])) ? [{ "?column?": 1 }] : []);
+      return result(this.hasSubmissionRow(String(params[0])) ? [{ "?column?": 1 }] : []);
+    }
+
+    if (sql === "SELECT request_id FROM oracle_submissions WHERE market_id = $1 AND request_id IS NOT NULL") {
+      const id = String(params[0]);
+      const requestId = this.backendSubmissions.get(id) ?? this.finalized.get(id)?.requestId ?? null;
+      return result(requestId ? [{ request_id: requestId }] : []);
     }
 
     if (sql.startsWith("INSERT INTO oracle_submissions")) {
       const marketId = String(params[0]);
-      if (this.finalized.has(marketId)) throw uniqueViolation();
+      if (this.hasSubmissionRow(marketId)) throw uniqueViolation();
       // ck_oracle_submissions_outcome_canonical (migration 0017).
       if (params[2] !== "YES" && params[2] !== "NO") {
         throw new Error(`new row violates check constraint "ck_oracle_submissions_outcome_canonical": ${String(params[2])}`);
@@ -164,11 +174,17 @@ export class BacklogWorld {
         decision: String(params[6]),
         txHash: String(params[7]),
         councilVotes: JSON.parse(String(params[9])) as CouncilVote[],
+        requestId: (params[10] as string | null | undefined) ?? null,
       });
       return result([]);
     }
 
     throw new Error(`BacklogWorld: unhandled SQL: ${sql}`);
+  }
+
+  /** oracle_submissions is UNIQUE on market_id: one row, whoever wrote it. */
+  private hasSubmissionRow(marketId: string): boolean {
+    return this.finalized.has(marketId) || this.backendSubmissions.has(marketId);
   }
 
   private invocation(tx: Transaction): { fn: string; args: unknown[] } {

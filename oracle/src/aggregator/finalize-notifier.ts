@@ -1,3 +1,4 @@
+import { REQUEST_ID_HEADER } from "../log.js";
 import type { CouncilVote } from "./threshold.js";
 
 /**
@@ -15,6 +16,10 @@ export interface FinalizeNotification {
   txHash: string;
   councilVotes: readonly CouncilVote[];
   finalizedAt: string;
+  /** Id of the processing attempt that finalized the market (#467). */
+  correlationId?: string;
+  /** Backend request id of the HTTP submission for this market, if there was one. */
+  originRequestId?: string;
 }
 
 export interface Logger {
@@ -57,6 +62,10 @@ export async function notifyFinalized(
     txHash: notification.txHash,
     voters: notification.councilVotes.length,
     finalizedAt: notification.finalizedAt,
+    // Omitted rather than null when absent, so the payload shape is unchanged
+    // for callers that do not trace.
+    ...(notification.correlationId ? { correlationId: notification.correlationId } : {}),
+    ...(notification.originRequestId ? { originRequestId: notification.originRequestId } : {}),
   };
 
   // Always log — this is the audit-friendly baseline that needs no config.
@@ -73,7 +82,11 @@ export async function notifyFinalized(
   try {
     const response = await fetchFn(options.webhookUrl, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        // Same header the backend uses, so a receiver can log it the same way.
+        ...(notification.correlationId ? { [REQUEST_ID_HEADER]: notification.correlationId } : {}),
+      },
       body: JSON.stringify({ event: "market_finalized", ...summary }),
       signal: controller.signal,
     });

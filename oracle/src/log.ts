@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface LogFields {
@@ -116,4 +118,39 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   };
 
   return logger;
+}
+
+/**
+ * Correlation ids (#467).
+ *
+ * One id per market processing attempt, bound to every log line emitted while
+ * processing it, sent with the finalize webhook, and stored on the
+ * oracle_submissions row the attempt writes. The format is the backend's
+ * request id convention (`genReqId` in backend/src/lib/log.ts): a random UUID,
+ * with inbound values accepted only if they pass the same check. That lets one
+ * search term span both services, and lets migration 0022 enforce a single
+ * rule for the ids either side stores.
+ */
+
+/** Header the backend reads and echoes the request id in; the webhook sends it too. */
+export const REQUEST_ID_HEADER = "x-request-id";
+
+/** Matches backend MAX_REQUEST_ID_LENGTH. */
+export const MAX_REQUEST_ID_LENGTH = 128;
+
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+/** Same rule as backend `isValidRequestId`: safe to write into a log line. */
+export function isValidRequestId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_REQUEST_ID_LENGTH &&
+    REQUEST_ID_PATTERN.test(value)
+  );
+}
+
+/** A fresh correlation id for one market processing attempt. */
+export function createCorrelationId(): string {
+  return randomUUID();
 }

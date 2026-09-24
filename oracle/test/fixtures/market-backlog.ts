@@ -155,6 +155,10 @@ export class BacklogWorld {
     if (sql.startsWith("INSERT INTO oracle_submissions")) {
       const marketId = String(params[0]);
       if (this.finalized.has(marketId)) throw uniqueViolation();
+      // ck_oracle_submissions_outcome_canonical (migration 0017).
+      if (params[2] !== "YES" && params[2] !== "NO") {
+        throw new Error(`new row violates check constraint "ck_oracle_submissions_outcome_canonical": ${String(params[2])}`);
+      }
       this.finalized.set(marketId, {
         marketId,
         decision: String(params[6]),

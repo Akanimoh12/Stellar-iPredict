@@ -156,7 +156,9 @@ export async function persistFinalDecision(
       [
         marketId,
         submitter,
-        decisionLabel(decision),
+        // `outcome` only accepts the canonical YES/NO since migration 0017;
+        // `decision` keeps its documented lowercase label.
+        decision ? "YES" : "NO",
         0,
         now,
         "finalized",

@@ -153,6 +153,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   registerRequestLogging(server);
   registerMetricsHook(server);
+  // The one route deliberately registered ahead of CORS and the not-found
+  // handler: an unauthorized scrape must get the same 404 as an unknown path,
+  // and the 404/405 handler would otherwise learn that /metrics exists and
+  // answer 405. It still receives CORS headers — see the CORS comment below.
   registerMetricsEndpoint(server);
   // Exposes request.abortSignal, which read-only GET routes pass into
   // queryWithCancel (db/pool.ts) so a disconnecting client's query gets
@@ -164,11 +168,6 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // Registered before anything adds a route: the 404/405 handler learns which
   // methods a path accepts from an onRoute hook, which only sees later routes.
   registerNotFoundHandler(server);
-
-  // Per-route rate limiting — runs early so abusive clients are rejected
-  // before any route handler or downstream middleware does real work.
-  registerRateLimiter(server);
-
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -201,6 +200,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
 
   // CORS: allowlist only, never a reflected wildcard.
+  //
+  // Ordering (#470): register CORS ahead of every route (bar /metrics, above)
+  // and of every hook that can reply early, such as the rate limiter below —
+  // the same hazard the OpenAPI comment further down describes. Fastify runs
+  // onRequest hooks in registration order, and a hook that sends its own reply
+  // skips all hooks after it: with the limiter registered first, 429s reached
+  // browsers with no CORS headers and their Retry-After was unreadable. (Routes
+  // themselves pick up root hooks when the server becomes ready, so a route
+  // above this line would still get CORS on Fastify 5 — keep the order anyway.)
+  // Keep this registration at the root, never inside an encapsulated route
+  // plugin: cors-routes.test.ts fails for any route or early reply that ends
+  // up without CORS headers.
   // Security rationale (issue #472):
   // Credentials (cookies / HTTP auth headers) are disabled by default (`corsCredentials: false`).
   // The API is bearer-token and API-key authenticated via request headers, so cookies
@@ -231,6 +242,11 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     credentials: corsCredentials,
     maxAge: 86400,
   });
+
+  // Per-route rate limiting — runs before any route handler or downstream
+  // middleware does real work. Registered after helmet and CORS so that a 429
+  // still carries security and CORS headers; see the ordering note above.
+  registerRateLimiter(server);
 
   // OpenAPI spec at /api/docs. Every route plugin below must be registered
   // after this: registerOpenApi's onRoute hook only sees routes registered

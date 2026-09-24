@@ -14,6 +14,8 @@ const schema = z.object({
   COUNCIL_THRESHOLD: positiveInteger.default(4),
   DATABASE_URL: z.string().min(1),
   SOROBAN_RPC_URL: z.string().url(),
+  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
+  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
   LOG_LEVEL: z.string().min(1).default("info"),
 

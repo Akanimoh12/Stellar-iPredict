@@ -20,8 +20,17 @@ import {
 import { createPostgresSubmissionStore, computeTally } from "./tally.js";
 import { selectThresholdOutcome } from "./threshold.js";
 import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
-import { finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
-import { AggregatorMetrics, AggregatorMetricsServer } from "./metrics.js";
+import { finalizeMarketDecision, queryMarketState, queryRegisteredResolvers } from "./market-finalizer.js";
+import {
+  compareCouncilResolvers,
+  loadCouncilConfig,
+  type CouncilConfig,
+} from "../config/council.js";
+import {
+  AggregatorMetrics,
+  AggregatorMetricsServer,
+  createPostgresResolutionMetricStore,
+} from "./metrics.js";
 
 
 export {
@@ -61,6 +70,7 @@ export {
   AggregatorMetricsServer,
   DEFAULT_LAG_BUCKETS_HOURS,
   ORACLE_RESOLUTION_LAG_H_METRIC,
+  createPostgresResolutionMetricStore,
   type AggregatorMetricsServerOptions,
   type AggregatorMetricsSnapshot,
   type NamedMetric,
@@ -90,7 +100,12 @@ export {
   type ResolveMarketResult,
 } from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
-export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+export {
+  MarketAlreadyFinalizedError,
+  finalizeMarketDecision,
+  queryMarketState,
+  queryRegisteredResolvers,
+} from "./market-finalizer.js";
 
 export {
   OffChainSubmitterService,
@@ -218,13 +233,51 @@ export interface AggregatorDependencies {
 export function createProductionDependencies(
   config: AggregatorConfig,
   logger: Logger = createLogger({ level: config.LOG_LEVEL }),
-  overrides: { database?: Pool; server?: rpc.Server; fetchFn?: typeof fetch } = {},
+  overrides: {
+    database?: Pool;
+    server?: rpc.Server;
+    council?: CouncilConfig;
+    onAmbiguousTally?: (alert: { marketId: string; yesVotes: number; noVotes: number; threshold: number }) => Promise<void>;
+  } = {},
 ): AggregatorDependencies {
   const database = overrides.database ?? new Pool({ connectionString: config.DATABASE_URL });
   const server = overrides.server ?? new rpc.Server(config.SOROBAN_RPC_URL);
-  const submissionStore = createPostgresSubmissionStore(database);
+  const councilVoteManager = new CouncilVoteManager(createPostgresSubmissionStore(database));
+  const resolutionMetricStore = createPostgresResolutionMetricStore(database);
   const networkPassphrase = config.NETWORK_PASSPHRASE ?? Networks.TESTNET;
-  const rootLogger = logger;
+  let resolverSetMatches = overrides.council === undefined;
+
+  // A stale council file should not take the whole oracle offline, but it must
+  // never be allowed to submit a resolution that the contract will reject.
+  async function refreshResolverSet(): Promise<void> {
+    if (!overrides.council || !config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
+      resolverSetMatches = true;
+      return;
+    }
+
+    try {
+      const onChainResolvers = await queryRegisteredResolvers(
+        server,
+        config.MARKET_CONTRACT_ID,
+        config.RESOLVER_KEY,
+        networkPassphrase,
+      );
+      const report = compareCouncilResolvers(overrides.council, onChainResolvers);
+      resolverSetMatches = report.matches;
+      if (!report.matches) {
+        logger.error("council resolver configuration diverges from on-chain registry", {
+          missingOnChain: report.missingOnChain,
+          unconfiguredOnChain: report.unconfiguredOnChain,
+        });
+      } else {
+        logger.info("council resolver configuration matches on-chain registry");
+      }
+    } catch (error) {
+      resolverSetMatches = false;
+      logger.warn("unable to validate council resolver configuration", { error });
+    }
+  }
+
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
@@ -237,20 +290,21 @@ export function createProductionDependencies(
       }
       logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
     },
-    async listExpiredUnresolvedMarkets(now, limit, after) {
-      const nowSeconds = Math.floor(now.getTime() / 1_000);
-      const params: unknown[] = [nowSeconds];
-      let sql = `SELECT id::text, cancelled, end_time FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE`;
+    async listExpiredUnresolvedMarkets(now, limit, offset = 0) {
+      await refreshResolverSet();
       if (limit !== undefined && limit > 0) {
-        params.push(limit);
-        if (after?.endTime !== undefined) {
-          params.push(after.endTime, after.id);
-          sql += ` AND (end_time, id) > ($3, $4)`;
-        }
-        sql += ` ORDER BY end_time ASC, id ASC LIMIT $2`;
-      } else {
-        sql += ` ORDER BY end_time ASC, id ASC`;
+        const result = await database.query<AggregatorMarket>(
+          `SELECT id::text, cancelled FROM markets
+           WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+             AND NOT EXISTS (
+               SELECT 1 FROM oracle_ambiguous_tallies a
+               WHERE a.market_id = markets.id AND a.status = 'manual_review'
+             )
+           ORDER BY end_time ASC, id ASC
+           LIMIT $2 OFFSET $3`,
+          [Math.floor(now.getTime() / 1_000), limit, offset],
+        );
+        return result.rows;
       }
       const result = await database.query<{ id: string; cancelled: boolean; end_time: string | number }>(sql, params);
       // BIGINT comes back from pg as a string.
@@ -259,7 +313,11 @@ export function createProductionDependencies(
     async getBacklogDepth(now) {
       const result = await database.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE`,
+         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+           AND NOT EXISTS (
+             SELECT 1 FROM oracle_ambiguous_tallies a
+             WHERE a.market_id = markets.id AND a.status = 'manual_review'
+           )`,
         [Math.floor(now.getTime() / 1_000)],
       );
       return parseInt(result.rows[0]?.count ?? "0", 10);
@@ -291,15 +349,32 @@ export function createProductionDependencies(
       // escalates (#446) before moving on to the next market. Catching here
       // hid every failure from that accounting and from the failure metric.
       const marketId = market.id.trim();
-      const correlationId = context?.correlationId ?? createCorrelationId();
-      // Every line below goes through this logger, so each carries the id.
-      let logger = context?.logger ?? rootLogger.child({ correlationId, marketId });
-      // Defensive: the expiry query already filters these out, but a market
-      // can be cancelled or resolved between the query and this call.
-      if (market.cancelled) {
-        logger.info("market is cancelled, skipping", { marketId });
-        return;
-      }
+      try {
+        if (!resolverSetMatches) {
+          throw new Error("council resolver configuration does not match the on-chain registry");
+        }
+        // Defensive: the expiry query already filters these out, but a market
+        // can be cancelled or resolved between the query and this call.
+        if (market.cancelled) {
+          logger.info("market is cancelled, skipping", { marketId });
+          return;
+        }
+
+        // The on-chain and finalizer APIs take a numeric market id.
+        const onChainMarketId = Number(marketId);
+        if (!Number.isSafeInteger(onChainMarketId) || onChainMarketId < 0) {
+          logger.error("market id is not a non-negative integer, skipping", { marketId });
+          return;
+        }
+
+        if (!config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
+          logger.error("aggregator is not configured for finalization, skipping", {
+            marketId,
+            hasMarketContractId: Boolean(config.MARKET_CONTRACT_ID),
+            hasResolverKey: Boolean(config.RESOLVER_KEY),
+          });
+          return;
+        }
 
       // The on-chain and finalizer APIs take a numeric market id.
       const onChainMarketId = Number(marketId);
@@ -308,8 +383,9 @@ export function createProductionDependencies(
         return;
       }
 
-      if (!config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
-        logger.error("aggregator is not configured for finalization, skipping", {
+        // 2. Load the council's current submissions and compute the tally.
+        const tally = await councilVoteManager.getTallyFromStore(marketId);
+        logger.info("computed tally", {
           marketId,
           hasMarketContractId: Boolean(config.MARKET_CONTRACT_ID),
           hasResolverKey: Boolean(config.RESOLVER_KEY),
@@ -317,55 +393,70 @@ export function createProductionDependencies(
         return;
       }
 
-      // 1. On-chain state — never finalize a market that is already resolved
-      //    or cancelled on the contract, regardless of the DB view.
-      const state = await queryMarketState(
-        server,
-        config.MARKET_CONTRACT_ID,
-        onChainMarketId,
-        config.RESOLVER_KEY,
-        networkPassphrase,
-      );
-      if (state.cancelled) {
-        logger.info("market is cancelled on-chain, skipping", { marketId });
-        return;
-      }
-      if (state.resolved) {
-        logger.info("market is already resolved on-chain, skipping", { marketId });
-        return;
-      }
+        // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
+        //    both-outcomes) majority — the market stays untouched this poll.
+        const outcome = selectThresholdOutcome(tally.votes, config.COUNCIL_THRESHOLD, logger, marketId);
+        if (outcome === null) {
+          const recorded = await database.query(
+            `INSERT INTO oracle_ambiguous_tallies (market_id, yes_votes, no_votes, threshold)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (market_id) DO UPDATE
+               SET status = 'manual_review',
+                   yes_votes = EXCLUDED.yes_votes,
+                   no_votes = EXCLUDED.no_votes,
+                   threshold = EXCLUDED.threshold,
+                   last_seen_at = NOW(),
+                   alert_claimed_at = NOW()
+             WHERE oracle_ambiguous_tallies.status = 'cleared'
+             RETURNING market_id`,
+            [marketId, tally.yesVotes, tally.noVotes, config.COUNCIL_THRESHOLD],
+          );
+          logger.error("ambiguous council tally, market held for manual review", {
+            marketId,
+            yesVotes: tally.yesVotes,
+            noVotes: tally.noVotes,
+            threshold: config.COUNCIL_THRESHOLD,
+          });
+          if (recorded.rows.length > 0) {
+            await overrides.onAmbiguousTally?.({
+              marketId,
+              yesVotes: tally.yesVotes,
+              noVotes: tally.noVotes,
+              threshold: config.COUNCIL_THRESHOLD,
+            });
+          }
+          return;
+        }
 
-      // 2. Cross the process boundary (#467): a submission the backend took
-      //    over HTTP stored its request id on the market's oracle_submissions
-      //    row. Binding it here ties this attempt to that request, so either
-      //    id finds the other in the logs.
-      const origin = await database.query<{ request_id: string | null }>(
-        "SELECT request_id FROM oracle_submissions WHERE market_id = $1 AND request_id IS NOT NULL",
-        [onChainMarketId],
-      );
-      const originRequestId = origin.rows
-        .map((row) => row.request_id)
-        .find((id): id is string => isValidRequestId(id));
-      if (originRequestId) {
-        logger = logger.child({ originRequestId });
-        logger.info("correlated with originating backend request");
-      }
+        // 4. Safety gate — assertCanFinalize throws with a descriptive reason
+        //    if submissions are insufficient or the tally is ambiguous.
+        assertCanFinalize(marketId, tally, createBalancedValidationConfig(config.COUNCIL_THRESHOLD));
 
-      // 3. Load the council's current submissions and compute the tally.
-      const votes = await submissionStore.getSubmissions(marketId);
-      const tally = computeTally(marketId, votes);
-      logger.info("computed tally", {
-        marketId,
-        yesVotes: tally.yesVotes,
-        noVotes: tally.noVotes,
-        totalVoters: tally.totalVoters,
-      });
-
-      // 4. Evaluate the threshold. `null` means no outcome (or an ambiguous
-      //    both-outcomes) majority — the market stays untouched this poll.
-      const outcome = selectThresholdOutcome(votes, config.COUNCIL_THRESHOLD, logger, marketId);
-      if (outcome === null) {
-        logger.warn("threshold not met, market left unresolved", {
+        // 5. Finalize on-chain and persist the decision.
+        logger.info("threshold met, finalizing market", { marketId, decision: outcome });
+        const txHash = await finalizeMarketDecision(
+          database,
+          server,
+          config.MARKET_CONTRACT_ID,
+          config.RESOLVER_KEY,
+          onChainMarketId,
+          outcome,
+          [...tally.votes],
+          networkPassphrase,
+          undefined,
+          (finalizedAt) => {
+            const resolvedAt = Math.floor(finalizedAt.getTime() / 1_000);
+            const lagHours = (resolvedAt - state.endTime) / 3_600;
+            void resolutionMetricStore
+              .recordResolution({ marketId, endTime: state.endTime, resolvedAt, lagHours })
+              .catch((error: unknown) => {
+                logger.warn("failed to persist resolution metric", { marketId, error });
+              });
+          },
+        );
+        logger.info("market finalized", { marketId, decision: outcome, txHash });
+      } catch (error) {
+        logger.error("failed to process market", {
           marketId,
           yesVotes: tally.yesVotes,
           noVotes: tally.noVotes,
@@ -565,6 +656,7 @@ export async function runAggregator(
 export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = loadAggregatorConfig(env);
   const logger = createLogger({ level: config.LOG_LEVEL, bindings: { service: "oracle-aggregator" } });
+  const councilConfig = loadCouncilConfig(env);
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
@@ -576,7 +668,10 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   let lastPollCompletedAt: number | null = null;
   const aggregatorMetrics = new AggregatorMetrics();
 
-  const dependencies = createProductionDependencies(config, logger);
+  const dependencies = createProductionDependencies(config, logger, {
+    council: councilConfig,
+    onAmbiguousTally: createAmbiguousTallyAlertSender(config.FINALIZE_WEBHOOK_URL, logger),
+  });
 
   try {
     try {

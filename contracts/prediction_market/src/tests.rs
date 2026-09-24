@@ -351,12 +351,26 @@ fn test_resolver_can_resolve() {
     let resolver = Address::generate(&t.env);
     t.client.add_resolver(&t.admin, &resolver);
     assert!(t.client.is_resolver(&resolver));
+    assert_eq!(t.client.get_resolvers(), soroban_sdk::vec![&t.env, resolver.clone()]);
 
     advance_time(&t.env, 3601);
     t.client.resolve_market(&resolver, &id, &true);
 
     let market = t.client.get_market(&id);
     assert!(market.resolved);
+}
+
+#[test]
+fn test_resolver_registry_removes_addresses() {
+    let t = setup();
+    let first = Address::generate(&t.env);
+    let second = Address::generate(&t.env);
+    t.client.add_resolver(&t.admin, &first);
+    t.client.add_resolver(&t.admin, &second);
+    t.client.remove_resolver(&t.admin, &first);
+
+    assert_eq!(t.client.get_resolvers(), soroban_sdk::vec![&t.env, second]);
+    assert!(!t.client.is_resolver(&first));
 }
 
 // ── 15. Non-resolver cannot resolve ──────────────────────────────────────────

@@ -29,6 +29,7 @@ SELECT category, class, retention, justification FROM data_retention_policies OR
 | `idempotency_keys` | `idempotency_keys` | operational | 24 hours (hard ceiling) | Retry-deduplication cache. Clients do not retry a submission a day later. The app also prunes at `ORACLE_IDEMPOTENCY_RETENTION_SEC` (default 1h). |
 | `oracle_nonces` | `oracle_submissions` rows with a nonce | operational | 10 minutes | Replay-protection window only (`ORACLE_NONCE_RETENTION_SEC`). Enforced by the backend on request traffic. |
 | `oracle_submissions_rejected` | `oracle_submissions` WHERE `status = 'rejected'` and no dispute | operational | 180 days | A rejected submission that was never challenged has no audit weight after ~two quarters. |
+| `oracle_resolution_lag` | `oracle_resolution_lag` | operational | 400 days | Historical aggregator performance for dashboards; older observations are outside the reporting window. |
 | `oracle_submissions_finalized` | `oracle_submissions` WHERE `status = 'finalized'` | **audit** | 7 years | The record of how a market resolved. |
 | `council_votes` | `council_votes` | **audit** | 7 years | Which council member voted which outcome — primary dispute evidence. |
 | `oracle_disputes` | `oracle_disputes` | **audit** | 7 years | The dispute record itself; bounded by the longest plausible dispute/appeal window. |
@@ -53,6 +54,7 @@ SELECT * FROM enforce_data_retention();
 --  dead_letter_events       |          17
 --  idempotency_keys         |         903
 --  oracle_submissions_rejected |        4
+-- oracle_resolution_lag       |        0
 ```
 
 Run it daily from cron on the DB host (see `infra/README.md` § "Data
@@ -63,7 +65,8 @@ retention"):
 ```
 
 Each function is also callable individually with custom parameters
-(`purge_dead_letter_events(retention_days, batch_size)`, etc.) and is safe to
+(`purge_dead_letter_events(retention_days, batch_size)`,
+`purge_oracle_resolution_lag(retention_days, batch_size)`, etc.) and is safe to
 run repeatedly — call until `rows_removed` is `0` to drain a large backlog
 without a long-held lock. The indexer exposes `purgeDeadLetterEvents()`
 (`indexer/src/deadLetter.ts`) for the same purpose in-process.

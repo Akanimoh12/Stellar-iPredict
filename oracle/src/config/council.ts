@@ -155,6 +155,30 @@ export interface CouncilConfig {
   resolverSecretKey: string;
 }
 
+export interface CouncilResolverDivergence {
+  /** Configured members absent from the on-chain resolver set. */
+  missingOnChain: readonly string[];
+  /** On-chain resolvers absent from configured council membership. */
+  unconfiguredOnChain: readonly string[];
+  matches: boolean;
+}
+
+/** Compares canonical resolver addresses without exposing any secret config. */
+export function compareCouncilResolvers(
+  config: CouncilConfig,
+  onChainResolvers: readonly string[],
+): CouncilResolverDivergence {
+  const configured = new Set(config.members);
+  const onChain = new Set(onChainResolvers);
+  const missingOnChain = config.members.filter((member) => !onChain.has(member));
+  const unconfiguredOnChain = onChainResolvers.filter((resolver) => !configured.has(resolver));
+  return {
+    missingOnChain,
+    unconfiguredOnChain,
+    matches: missingOnChain.length === 0 && unconfiguredOnChain.length === 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

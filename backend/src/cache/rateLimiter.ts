@@ -15,6 +15,8 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { config } from "../config/index.js";
 
 // ---------------------------------------------------------------------------
 // Shared store interface
@@ -47,8 +49,18 @@ export interface RateLimitResult {
 // Configuration
 // ---------------------------------------------------------------------------
 
-import { RATE_LIMITS, type RateLimitConfig } from "../config/rateLimits.js";
-export { RATE_LIMITS, type RateLimitConfig };
+import {
+  RATE_LIMITS,
+  RATE_LIMITS_AUTHENTICATED,
+  RATE_LIMITS_ANONYMOUS,
+  type RateLimitConfig,
+} from "../config/rateLimits.js";
+export {
+  RATE_LIMITS,
+  RATE_LIMITS_AUTHENTICATED,
+  RATE_LIMITS_ANONYMOUS,
+  type RateLimitConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Sliding window store
@@ -204,27 +216,134 @@ export function resolveRateLimit(
 // ---------------------------------------------------------------------------
 
 /**
- * Extract a per-client identifier from a request.  Uses the leftmost IP
- * in `X-Forwarded-For` when behind a reverse proxy, otherwise `req.ip`.
+ * Verify that a candidate credential matches one of the known API keys.
  *
- * For oracle endpoints, uses the authenticated provider identity instead of IP
- * to prevent providers from bypassing limits via IP changes.
+ * Uses `crypto.timingSafeEqual` for constant-time comparison to prevent
+ * timing-attack key enumeration (#485).  Empty-string or whitespace-only
+ * candidates always return `false` without touching `timingSafeEqual`,
+ * since `timingSafeEqual` throws on zero-length buffers.
+ *
+ * @param candidate The credential extracted from the request.
+ * @param knownKeys  The list of valid API keys (from config).
+ * @returns `true` if the candidate matches a known key.
  */
-function clientId(req: FastifyRequest): string {
-  // For oracle endpoints, use provider identity from request body if available
-  if (req.url.includes("/oracle/submit") && req.body) {
-    const body = req.body as any;
-    if (body.provider && typeof body.provider === "string") {
-      return `provider:${body.provider}`;
+function verifyApiKey(candidate: string, knownKeys: readonly string[]): boolean {
+  // Guard: empty or whitespace-only credentials can never be valid.
+  // Also protects against `timingSafeEqual` throwing on zero-length buffers
+  // and avoids unnecessary buffer allocation.
+  if (candidate == null || candidate.trim().length === 0) {
+    return false;
+  }
+  if (knownKeys.length === 0) {
+    return false;
+  }
+
+  const candidateBuf = Buffer.from(candidate, "utf8");
+  for (const key of knownKeys) {
+    if (Buffer.byteLength(key, "utf8") === candidateBuf.length) {
+      const keyBuf = Buffer.from(key, "utf8");
+      if (timingSafeEqual(candidateBuf, keyBuf)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Determine whether a request carries a **verified** authenticated identity,
+ * and return a stable per-identity identifier when it does.
+ *
+ * Supported credential sources (checked in order):
+ *  1. `Authorization: Bearer <key>`  → `auth:<sha256-of-key>`
+ *  2. `Authorization: Api-Key <key>`  → `key:<sha256-of-key>`
+ *  3. `X-API-Key: <key>`              → `key:<sha256-of-key>`
+ *  4. Oracle body `provider` field    → `provider:<name>`
+ *
+ * ## Verification (#485)
+ *
+ * A credential is only honoured when it matches one of the keys listed in
+ * `config.API_KEYS` (populated from the `API_KEYS` environment variable).
+ * Comparison uses `crypto.timingSafeEqual` to prevent timing-attack key
+ * enumeration.  An unverified token — e.g. a random string sent with a
+ * `Bearer` scheme — does **not** qualify for the authenticated tier and
+ * the caller is treated as anonymous, preserving the higher anonymous limit.
+ *
+ * Returns `null` when no recognised credential is present **or** when the
+ * credential fails verification.
+ */
+function authenticatedIdentity(req: FastifyRequest): string | null {
+  const knownKeys = config.API_KEYS;
+
+  // No configured API keys → nobody can be elevated (fail closed).
+  if (knownKeys.length === 0) {
+    return null;
+  }
+
+  const auth = req.headers.authorization;
+
+  // Helper: extract the raw credential from the Authorization header.
+  const extractAuthCredential = (): string | null => {
+    if (typeof auth !== "string") return null;
+    const bearer = auth.match(/^Bearer\s+(.+)$/i);
+    if (bearer) return bearer[1];
+    const apiKey = auth.match(/^Api-Key\s+(.+)$/i);
+    if (apiKey) return apiKey[1];
+    return null;
+  };
+
+  const verifiedCredential = (() => {
+    const cred = extractAuthCredential();
+    if (cred !== null && verifyApiKey(cred, knownKeys)) {
+      return cred;
+    }
+    return null;
+  })();
+
+  // 1. Verified Authorization: Bearer or Api-Key.
+  if (verifiedCredential !== null) {
+    // For oracle endpoints, prefer the `provider` body field as the identity
+    // so each oracle provider gets its own rate-limit bucket.
+    if (req.url.includes("/oracle/submit") && req.body) {
+      const body = req.body as Record<string, unknown>;
+      const provider = body.provider;
+      if (typeof provider === "string" && provider.length > 0) {
+        return `provider:${provider}`;
+      }
+    }
+        const prefix = /^Bearer\s+/i.test(auth ?? "") ? "auth" : "key";
+    return `${prefix}:${hashToken(verifiedCredential)}`;
+  }
+
+  // 2. X-API-Key header.
+  const xApiKey = req.headers["x-api-key"];
+  if (typeof xApiKey === "string" && xApiKey.length > 0) {
+    if (verifyApiKey(xApiKey, knownKeys)) {
+      return `key:${hashToken(xApiKey)}`;
     }
   }
 
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string") {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return req.ip;
+  return null;
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Client identification
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the per-client identity for rate-limit keying.
+ *
+ * Prefers an authenticated identity (hashed Bearer token / API key /
+ * provider) so that a single user gets one shared bucket across IPs.
+  * Falls back to `req.ip` (which respects constrained `trustProxy`) for
+ * anonymous requests.
+ */
+function clientId(req: FastifyRequest): string {
+  return authenticatedIdentity(req) ?? req.ip;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +369,18 @@ export function registerRateLimiter(
   server.addHook(
     "onRequest",
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const config = resolveRateLimit(request.method, request.url, limits);
-      const id = clientId(request);
+      // Determine whether the request carries an authenticated identity.
+      // Authenticated callers get the higher per-identity budget from
+      // RATE_LIMITS_AUTHENTICATED and are keyed by identity, not IP (#485).
+      const identity = authenticatedIdentity(request);
+      const isAuthenticated = identity !== null;
+      const effectiveLimits = isAuthenticated ? RATE_LIMITS_AUTHENTICATED : limits;
+      const config = resolveRateLimit(
+        request.method,
+        request.url,
+        effectiveLimits,
+      );
+      const id = identity ?? request.ip;
       const key = `${id}:${request.method}:${request.url.split("?")[0]}`;
 
       // `await` works with both sync (in-memory) and async (Redis) stores.

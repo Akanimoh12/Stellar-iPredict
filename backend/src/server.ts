@@ -17,6 +17,7 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+import { config } from "./config/index.js";
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
@@ -57,12 +58,26 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const redis = options.redis;
   const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
 
-  const server = Fastify({
+      const server = Fastify({
     logger: options.logger ?? createLoggerOptions(),
     genReqId,
     // The onResponse hook in registerRequestLogging is the single per-request
     // log line; Fastify's built-in pair would just duplicate it.
     disableRequestLogging: true,
+    // Trust proxy headers **only** from known reverse proxies.  Using `true`
+    // (the previous approach) makes Fastify honour X-Forwarded-For from any
+    // peer — including the original client — which lets attackers spoof their
+    // rate-limit IP or bypass address-based controls (#485).
+    //
+    // `TRUSTED_PROXIES` is a comma-separated list of CIDR ranges (e.g.
+    // "10.0.0.0/8,172.16.0.0/12").  In test mode we fall back to `false`
+    // so `server.inject()` clients aren't treated as proxied.
+    trustProxy:
+      process.env.NODE_ENV === "test"
+        ? false
+        : config.TRUSTED_PROXIES.length > 0
+          ? config.TRUSTED_PROXIES
+          : ["127.0.0.1/32", "::1/128"],
   });
 
   registerRequestLogging(server);
@@ -228,9 +243,20 @@ export function registerGracefulShutdown(
 
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
   const { pool } = await import("./db/pool.js");
-  const server = buildServer({ corsOrigins: config.corsOrigins, pool });
+  const { getRedisClient } = await import("./db/redis.js");
+  const redis = getRedisClient();
+  const server = buildServer({ corsOrigins: config.corsOrigins, pool, redis });
 
-  registerGracefulShutdown(server);
+  registerGracefulShutdown(server, {
+    shutdownDatabase: true,
+    shutdownDatabaseFn: async () => {
+      // Close Redis first so in-flight cache writes are flushed, then the DB pool.
+      const { closeRedis } = await import("./db/redis.js");
+      await closeRedis();
+      const { shutdown } = await import("./db/pool.js");
+      await shutdown();
+    },
+  });
 
   await server.listen({ port: config.port, host: config.host });
 

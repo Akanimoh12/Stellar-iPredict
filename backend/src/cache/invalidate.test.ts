@@ -18,7 +18,10 @@ import {
   invalidateOnBetPlaced,
   invalidateOnMarketResolved,
   invalidateOnMarketCancelled,
+  cacheFailureLogCount,
+  resetFailureLogger,
 } from "./invalidate.js";
+import { resetCircuitBreaker, getCircuitBreaker } from "./circuitBreaker.js";
 import {
   marketKey,
   marketsAllKey,
@@ -71,6 +74,8 @@ type FakeRedis = ReturnType<typeof createFakeRedis>;
 
 beforeEach(() => {
   resetVersion();
+  resetCircuitBreaker();
+  resetFailureLogger();
 });
 
 function seedAll(redis: FakeRedis, marketId: number): void {
@@ -140,6 +145,59 @@ describe("invalidate()", () => {
     await invalidate(redis, "delete:this");
 
     expect(redis.has("keep:this")).toBe(true);
+  });
+
+  it("swallows redis.del rejections and returns 0 (#481)", async () => {
+    // A redis.del that rejects should be caught — the caller should get 0
+    // and not see an unhandled rejection or exception.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failingRedis = {
+      _store: new Map(),
+      del: vi.fn().mockRejectedValue(new Error("Connection lost")),
+    };
+
+    const count = await invalidate(failingRedis as any, "some:key");
+
+    expect(count).toBe(0);
+    expect(failingRedis.del).toHaveBeenCalledTimes(1);
+
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it("records a circuit-breaker failure on redis.del rejection (#481)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failingRedis = {
+      _store: new Map(),
+      del: vi.fn().mockRejectedValue(new Error("Connection lost")),
+    };
+
+    await invalidate(failingRedis as any, "some:key");
+
+    // After a rejection, the circuit breaker should have recorded a failure.
+    const breaker = getCircuitBreaker();
+    expect(breaker.getMetrics().failures).toBeGreaterThan(0);
+
+    // The rate-limited failure logger should have counted the failure (#481).
+    expect(cacheFailureLogCount).toBe(1);
+
+    resetCircuitBreaker();
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it("logs cache failures at a rate-limited cadence (#481)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failingRedis = {
+      _store: new Map(),
+      del: vi.fn().mockRejectedValue(new Error("Connection lost")),
+    };
+
+    // Two failures — both should be counted.
+    await invalidate(failingRedis as any, "key1");
+    await invalidate(failingRedis as any, "key2");
+    expect(cacheFailureLogCount).toBe(2);
+
+    resetCircuitBreaker();
+    vi.mocked(console.warn).mockRestore();
   });
 });
 

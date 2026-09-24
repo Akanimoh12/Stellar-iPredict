@@ -170,6 +170,8 @@ export function resetCacheStats(): void {
 // Prometheus serialization
 // ---------------------------------------------------------------------------
 
+import { serializeCircuitMetrics } from "./circuitBreaker.js";
+
 /** `String(NaN)` is `"NaN"`, which the exposition format accepts as-is. */
 function formatValue(value: number): string {
   if (Number.isNaN(value)) return "NaN";
@@ -215,6 +217,9 @@ export function serializeCacheMetrics(): string {
       lines.push(`cache_namespace_misses_total{namespace="${entry.namespace}"} ${entry.misses}`);
     }
   }
+
+    // Circuit-breaker metrics — issue #481.
+  lines.push(serializeCircuitMetrics());
 
   return lines.join("\n") + "\n";
 }

@@ -4,7 +4,8 @@ import type { Redis } from "ioredis";
 import { z } from "zod";
 import { getLeaderboard, getLeaderboardTotal } from "../db/leaderboard.js";
 import { getOrSet } from "../cache/cacheAside.js";
-import { cacheKey } from "../cache/cacheKeys.js";
+import { cacheKey, CACHE_TTLS } from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
 
 const leaderboardQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
@@ -12,8 +13,9 @@ const leaderboardQuerySchema = z.object({
   sort: z.enum(["points", "bets"]).default("points"),
 });
 
-// TTL in seconds — leaderboard changes slowly, 1 min is sufficient
-const LEADERBOARD_CACHE_TTL = 60;
+// TTL in seconds — sourced from CACHE_TTLS so the header and Redis TTL
+// never drift apart (#480).
+const LEADERBOARD_CACHE_TTL = CACHE_TTLS.leaderboardTop20;
 
 function leaderboardQueryKey(
   offset: number,
@@ -28,30 +30,79 @@ export function registerLeaderboardRoutes(
   pool: Pool,
   redis?: Redis
 ): void {
-  server.get("/api/leaderboard", async (request, reply) => {
-    const parsed = leaderboardQuerySchema.safeParse(request.query);
+    server.get(
+    "/api/leaderboard",
+    {
+      schema: {
+        summary: "Leaderboard rankings",
+        description:
+          "Returns a paginated leaderboard of top players by points or bet count. " +
+          "This is aggregate, non-user-specific data safe for shared caches.",
+        tags: ["leaderboard"],
+        querystring: {
+          type: "object",
+          properties: {
+            offset: { type: "integer", minimum: 0, description: "Pagination offset" },
+            limit: { type: "integer", minimum: 1, maximum: 100, description: "Page size" },
+            sort: { type: "string", enum: ["points", "bets"], description: "Sort field" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives. max-age mirrors the server-side Redis TTL (60s).",
+                example: "public, max-age=60, stale-while-revalidate=60",
+              },
+            },
+            properties: {
+              players: { type: "array", items: { type: "object" } },
+              total: { type: "number" },
+            },
+            required: ["players", "total"],
+          },
+          400: {
+            type: "object",
+            properties: {
+              code: { type: "string" },
+              message: { type: "string" },
+              issues: { type: "array", items: { type: "object" } },
+            },
+            required: ["code", "message"],
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = leaderboardQuerySchema.safeParse(request.query);
 
-    if (!parsed.success) {
-      return reply.status(400).send({
-        code: "BAD_REQUEST",
-        message: "Invalid leaderboard query parameters",
-        issues: parsed.error.issues,
-      });
-    }
+      if (!parsed.success) {
+        return reply.status(400).send({
+          code: "BAD_REQUEST",
+          message: "Invalid leaderboard query parameters",
+          issues: parsed.error.issues,
+        });
+      }
 
-    const { offset, limit, sort } = parsed.data;
-    const key = leaderboardQueryKey(offset, limit, sort);
+      const { offset, limit, sort } = parsed.data;
+      const key = leaderboardQueryKey(offset, limit, sort);
 
-    const loader = () =>
-      Promise.all([
-        getLeaderboard(pool, parsed.data),
-        getLeaderboardTotal(pool),
-      ]);
+      const loader = () =>
+        Promise.all([
+          getLeaderboard(pool, parsed.data),
+          getLeaderboardTotal(pool),
+        ]);
 
-    const [players, total] = redis
-      ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
-      : await loader();
+      const [players, total] = redis
+        ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
+        : await loader();
 
-    return reply.status(200).send({ players, total });
-  });
+      reply.header("Cache-Control", cacheControlPublic(LEADERBOARD_CACHE_TTL));
+      return reply.status(200).send({ players, total });
+    },
+  );
 }

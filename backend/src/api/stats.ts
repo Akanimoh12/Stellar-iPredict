@@ -2,9 +2,10 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import type { Pool } from "pg";
 import { getOrSet } from "../cache/cacheAside.js";
-import { statsKey } from "../cache/cacheKeys.js";
+import { statsKey, CACHE_TTLS } from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
 
-const STATS_CACHE_TTL = 60;
+const STATS_CACHE_TTL = CACHE_TTLS.statsGlobal;
 
 export interface StatsResponse {
   totalMarkets: number;
@@ -18,7 +19,34 @@ export function registerStatsRoutes(
   pool: Pool,
   redis?: Redis
 ): void {
-  server.get("/api/stats", async (_request, reply) => {
+    server.get("/api/stats", {
+    schema: {
+      summary: "Global platform statistics",
+      tags: ["stats"],
+      response: {
+        200: {
+          type: "object",
+          additionalProperties: false,
+          headers: {
+            "Cache-Control": {
+              type: "string",
+              description:
+                "Cache directives. max-age mirrors the server-side Redis TTL (60s). " +
+                "This is aggregate, non-user-specific data safe for shared caches.",
+              example: "public, max-age=60, stale-while-revalidate=60",
+            },
+          },
+          properties: {
+            totalMarkets: { type: "number" },
+            totalVolume: { type: "string" },
+            totalUsers: { type: "number" },
+            totalBets: { type: "number" },
+          },
+          required: ["totalMarkets", "totalVolume", "totalUsers", "totalBets"],
+        },
+      },
+    },
+  }, async (_request, reply) => {
     const key = statsKey();
 
     const loader = async (): Promise<StatsResponse> => {
@@ -48,6 +76,7 @@ export function registerStatsRoutes(
       ? await getOrSet(redis, key, STATS_CACHE_TTL, loader)
       : await loader();
 
+        reply.header("Cache-Control", cacheControlPublic(STATS_CACHE_TTL));
     return reply.status(200).send(stats);
   });
 }

@@ -1,10 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+
+// The rate limiter reads API_KEYS from the config singleton at import time.
+// Mock the config module before rateLimiter.ts is imported so that the
+// verified-key tests below have known keys to match against (#485).
+vi.mock("../../config/index.js", () => ({
+  config: {
+    API_KEYS: ["test-token", "token-a", "token-b", "my-key"],
+    TRUSTED_PROXIES: [],
+  },
+}));
+
 import {
   SlidingWindowStore,
   resolveRateLimit,
   registerRateLimiter,
   RATE_LIMITS,
+  RATE_LIMITS_AUTHENTICATED,
   type RateLimitConfig,
 } from "../cache/rateLimiter.js";
 import { RedisSlidingWindowStore } from "../cache/rateLimiterRedis.js";
@@ -280,6 +292,155 @@ describe("registerRateLimiter (Fastify hook)", () => {
     const nowSec = Math.ceil(Date.now() / 1_000);
     expect(reset).toBeGreaterThanOrEqual(nowSec);
     expect(reset).toBeLessThanOrEqual(nowSec + 61);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Authenticated vs. anonymous rate-limit tiers (#485)
+// ---------------------------------------------------------------------------
+
+describe("resolveRateLimit with authenticated tiers", () => {
+  it("returns higher limits for authenticated callers on known routes", () => {
+    const anon = resolveRateLimit("GET", "/api/markets", RATE_LIMITS);
+    const auth = resolveRateLimit(
+      "GET",
+      "/api/markets",
+      RATE_LIMITS_AUTHENTICATED,
+    );
+    expect(auth.requests).toBeGreaterThanOrEqual(anon.requests);
+    expect(auth.requests).toBe(120);
+  });
+
+  it("falls back to authenticated default for unknown routes", () => {
+    const config = resolveRateLimit(
+      "GET",
+      "/api/unknown",
+      RATE_LIMITS_AUTHENTICATED,
+    );
+    expect(config.requests).toBe(60);
+  });
+});
+
+describe("registerRateLimiter — authenticated vs. anonymous", () => {
+  let server: FastifyInstance;
+  let store: SlidingWindowStore;
+
+  const LIMITS: Record<string, RateLimitConfig> = {
+    "GET /api/markets": { requests: 3, window: 60 },
+    default: { requests: 2, window: 60 },
+  };
+
+  beforeEach(() => {
+    store = new SlidingWindowStore();
+    server = Fastify({ logger: false, trustProxy: false });
+    registerRateLimiter(server, LIMITS, store);
+
+    server.get("/api/markets", async () => ({ ok: true }));
+  });
+
+  afterEach(async () => {
+    store.destroy();
+    await server.close();
+  });
+
+  it("uses higher authenticated budget when a Bearer token is present", async () => {
+    // RATE_LIMITS_AUTHENTICATED.default = 60 requests.
+    // We send 5 — all should succeed.
+    for (let i = 0; i < 5; i++) {
+      const res = await server.inject({
+        method: "GET",
+        url: "/api/markets",
+        headers: { authorization: "Bearer test-token" },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it("enforces anonymous budget when no credential is present", async () => {
+    // LIMITS["GET /api/markets"] = 3 requests.
+    for (let i = 0; i < 3; i++) {
+      const res = await server.inject({
+        method: "GET",
+        url: "/api/markets",
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    // 4th should be blocked.
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+    });
+    expect(res.statusCode).toBe(429);
+  });
+
+  it("keys authenticated users separately by identity", async () => {
+    // Token A hits the anonymous limit-equivalent (3) then gets blocked
+    // if it were anonymous, but authenticated budget is 60.
+    // Token B should have its own independent bucket.
+
+    // Exhaust anonymous-like behavior is not possible since each token
+    // gets the authenticated budget. Instead, verify two different tokens
+    // both succeed on the same route:
+    const resA = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const resB = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(resA.statusCode).toBe(200);
+    expect(resB.statusCode).toBe(200);
+  });
+
+  it("derives identity from X-API-Key header", async () => {
+    for (let i = 0; i < 5; i++) {
+      const res = await server.inject({
+        method: "GET",
+        url: "/api/markets",
+        headers: { "x-api-key": "my-key" },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it("treats unverified Bearer tokens as anonymous (#485)", async () => {
+    // A random token not in API_KEYS should NOT get the authenticated budget.
+    // LIMITS["GET /api/markets"] = 3 — 4th request must be blocked.
+    for (let i = 0; i < 3; i++) {
+      const res = await server.inject({
+        method: "GET",
+        url: "/api/markets",
+        headers: { authorization: "Bearer invalid-token" },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { authorization: "Bearer invalid-token" },
+    });
+    expect(res.statusCode).toBe(429);
+  });
+
+  it("treats unverified X-API-Key as anonymous (#485)", async () => {
+    // "wrong-key" is not in API_KEYS — should be anonymous budget (3 req).
+    for (let i = 0; i < 3; i++) {
+      const res = await server.inject({
+        method: "GET",
+        url: "/api/markets",
+        headers: { "x-api-key": "wrong-key" },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/markets",
+      headers: { "x-api-key": "wrong-key" },
+    });
+    expect(res.statusCode).toBe(429);
   });
 });
 

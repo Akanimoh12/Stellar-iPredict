@@ -1,7 +1,8 @@
 import { Redis, RedisOptions } from 'ioredis';
 import { recordCacheHit, recordCacheMiss } from './hitRate.js';
-
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+import { getCircuitBreaker } from './circuitBreaker.js';
+import { config } from '../config/index.js';
+import { logCacheFailure } from './invalidate.js';
 
 const options: RedisOptions = {
   // Reconnect strategy: exponential backoff up to 2 seconds
@@ -20,13 +21,22 @@ const options: RedisOptions = {
 
 let client: Redis | null = null;
 
+const circuit = getCircuitBreaker();
+
 /**
- * Single configured Redis client instance for the application.
- * DO NOT instantiate `new Redis()` elsewhere.
+ * Lazily constructs and returns the single configured Redis client.
+ *
+ * The client is created on first call (not at import time) and sourced
+ * from the validated config module — see `config/index.ts`.  Importing this
+ * module therefore opens no connection, which keeps tests fast and
+ * deterministic without a running Redis server.
+ *
+ * DO NOT instantiate `new Redis()` elsewhere — use this function or
+ * {@link setRedisClient} to inject a test double.
  */
 export function getRedisClient(): Redis {
   if (client === null) {
-    client = new Redis(REDIS_URL, options);
+    client = new Redis(config.REDIS_URL, options);
   }
   return client;
 }
@@ -41,55 +51,109 @@ export function setRedisClient(fake: Redis): void {
 
 /**
  * Typed JSON helper for caching.
+ *
+ * Every method is circuit-breaker aware: when the breaker is OPEN the
+ * operations degrade gracefully — `get` returns `null` (a cache miss,
+ * so the caller falls back to the database), while `set` and `del` become
+ * no-ops.  This means a Redis outage never propagates as a 5xx to the
+ * client.
  */
 export const cache = {
   /**
    * Retrieves and parses a JSON value.
-   * Returns null if the key doesn't exist or is invalid JSON.
+   *
+   * Returns `null` if the key doesn't exist, is invalid JSON, or Redis is
+   * unavailable (circuit open or command rejected).  A `null` return is
+   * treated as a cache miss by callers, so the loader / database path
+   * runs transparently.
    */
   async get<T>(key: string): Promise<T | null> {
-    const data = await getRedisClient().get(key);
-    if (!data) {
-      recordCacheMiss(key);
+    if (!circuit.canAttempt()) {
       return null;
     }
+
     try {
-      const value = JSON.parse(data) as T;
-      recordCacheHit(key);
-      return value;
-    } catch {
-      // Unparseable entry: the caller gets null and goes to its source, so
-      // this is a miss for `cache_hit_rate` purposes (issue #214).
-      recordCacheMiss(key);
+      const data = await getRedisClient().get(key);
+      circuit.recordSuccess();
+
+      if (!data) {
+        recordCacheMiss(key);
+        return null;
+      }
+      try {
+        const value = JSON.parse(data) as T;
+        recordCacheHit(key);
+        return value;
+      } catch {
+        // Unparseable entry: the caller gets null and goes to its source, so
+        // this is a miss for `cache_hit_rate` purposes (issue #214).
+        recordCacheMiss(key);
+        return null;
+      }
+    } catch (error) {
+      circuit.recordFailure();
+      logCacheFailure(error);
+      // Swallow — callers treat null as "go to the database".
       return null;
     }
   },
 
   /**
    * Serializes to JSON and sets the value.
+   *
+   * Failures are swallowed: a stale cache entry is better than a failed
+   * request.  Redis will naturally evict old entries once it recovers.
+   *
    * @param ttlSeconds Optional time-to-live in seconds.
    */
   async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
-    const redis = getRedisClient();
-    const serialized = JSON.stringify(value);
-    if (ttlSeconds !== undefined && ttlSeconds > 0) {
-      await redis.set(key, serialized, 'EX', ttlSeconds);
-    } else {
-      await redis.set(key, serialized);
+    if (!circuit.canAttempt()) {
+      return;
+    }
+
+    try {
+      const redis = getRedisClient();
+      const serialized = JSON.stringify(value);
+      if (ttlSeconds !== undefined && ttlSeconds > 0) {
+        await redis.set(key, serialized, 'EX', ttlSeconds);
+      } else {
+        await redis.set(key, serialized);
+      }
+      circuit.recordSuccess();
+    } catch (error) {
+      circuit.recordFailure();
+      logCacheFailure(error);
+      // Swallowed — cache writes are best-effort.
     }
   },
 
   /**
    * Deletes a key.
+   *
+   * Failures are swallowed: a failed invalidation means the next read
+   * simply gets a stale entry for up to one TTL, which is acceptable
+   * degradation under outage conditions.
    */
   async del(key: string): Promise<void> {
-    await getRedisClient().del(key);
+    if (!circuit.canAttempt()) {
+      return;
+    }
+
+    try {
+      await getRedisClient().del(key);
+      circuit.recordSuccess();
+    } catch (error) {
+      circuit.recordFailure();
+      logCacheFailure(error);
+    }
   },
 
   /**
    * Gracefully close the Redis connection.
    */
   async close(): Promise<void> {
-    await getRedisClient().quit();
+    if (client) {
+      await client.quit();
+    }
   },
 };

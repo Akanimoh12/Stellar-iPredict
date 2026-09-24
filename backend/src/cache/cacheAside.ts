@@ -34,6 +34,8 @@
 
 import type { Redis } from "ioredis";
 import { recordCacheHit, recordCacheMiss } from "./hitRate.js";
+import { getCircuitBreaker } from "./circuitBreaker.js";
+import { logCacheFailure } from "./invalidate.js";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -56,7 +58,9 @@ import { recordCacheHit, recordCacheMiss } from "./hitRate.js";
  *
  * @returns The cached or freshly-loaded value (JSON-round-tripped).
  *
- * @throws Any error thrown by `loader` or Redis propagates to the caller.
+  * @throws Any error thrown by `loader` propagates to the caller.
+ *       Redis errors do **not** propagate — they are counted by the circuit
+ *       breaker and the loader is called instead (degrade-to-db).
  */
 export async function getOrSet<T>(
   redis: Redis,
@@ -64,23 +68,40 @@ export async function getOrSet<T>(
   ttlSec: number,
   loader: () => Promise<T>
 ): Promise<T> {
-  // 1. Check Redis.
-  const cached = await redis.get(key);
-  if (cached !== null) {
-    try {
-      const value = JSON.parse(cached) as T;
-      recordCacheHit(key);
-      return value;
-    } catch {
-      // Corrupt cache entry — fall through to refresh. Counted as a miss
-      // below: the caller still pays for the loader, which is what
-      // `cache_hit_rate` measures (issue #214).
-    }
-  }
-  recordCacheMiss(key);
+  const circuit = getCircuitBreaker();
 
-  // 2. Cache miss — single-flight the entire load+store operation so
-  //    concurrent callers share both the loader call and the setex.
+  // 1. Check Redis — but only if the circuit is closed or half-open.
+  //    When OPEN, skip straight to the loader to avoid adding latency.
+  if (circuit.canAttempt()) {
+    try {
+      const cached = await redis.get(key);
+      circuit.recordSuccess();
+
+      if (cached !== null) {
+        try {
+          const value = JSON.parse(cached) as T;
+          recordCacheHit(key);
+          return value;
+        } catch {
+          // Corrupt cache entry — fall through to refresh. Counted as a miss
+          // below: the caller still pays for the loader, which is what
+          // `cache_hit_rate` measures (issue #214).
+        }
+      }
+      recordCacheMiss(key);
+    } catch (error) {
+      circuit.recordFailure();
+      logCacheFailure(error);
+      // Redis is unhealthy — fall through to the loader (degrade-to-db).
+      recordCacheMiss(key);
+    }
+  } else {
+    // Circuit is OPEN — skip Redis entirely to avoid adding latency.
+    recordCacheMiss(key);
+  }
+
+  // 2. Cache miss (or degraded) — single-flight the entire load+store
+  //    operation so concurrent callers share both the loader call and the setex.
   return withSingleFlight(key, "getOrSet", async () => {
     const value = await loader();
 
@@ -90,9 +111,12 @@ export async function getOrSet<T>(
     if (serialised !== undefined) {
       try {
         await redis.setex(key, ttlSec, serialised);
-      } catch {
-        // Logged upstream by the Redis client; swallow here so callers
-        // always receive their data even when the cache is unwriteable.
+        circuit.recordSuccess();
+      } catch (error) {
+        circuit.recordFailure();
+        logCacheFailure(error);
+        // Swallow here so callers always receive their data even when the
+        // cache is unwriteable.
       }
     }
 

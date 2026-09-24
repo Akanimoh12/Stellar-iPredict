@@ -43,11 +43,39 @@ const envSchema = z.object({
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 300))
     .pipe(z.number().int().positive()),
-  ORACLE_NONCE_RETENTION_SEC: z
+    ORACLE_NONCE_RETENTION_SEC: z
     .string()
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 600))
     .pipe(z.number().int().positive()),
+  // Comma-separated list of API keys that qualify for the authenticated
+  // rate-limit tier.  Used by the rate-limiter to verify that a Bearer or
+  // X-API-Key credential is genuine before elevating the caller (#485).
+  API_KEYS: z
+    .string()
+    .optional()
+    .default("")
+    .transform((v) =>
+      v
+        .split(",")
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0),
+    ),
+  // Comma-separated CIDR ranges of trusted reverse proxies.  When set,
+  // Fastify's `trustProxy` is configured with this list so that
+  // X-Forwarded-For is only honoured when the immediate peer is a known
+  // proxy — preventing clients from spoofing their address (#485).
+  // When empty (and NODE_ENV !== "test"), defaults to loopback ranges.
+  TRUSTED_PROXIES: z
+    .string()
+    .optional()
+    .default("")
+    .transform((v) =>
+      v
+        .split(",")
+        .map((c) => c.trim())
+        .filter((c) => c.length > 0),
+    ),
 });
 
 const result = envSchema.safeParse(process.env);

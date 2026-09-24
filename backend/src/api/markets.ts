@@ -15,17 +15,19 @@ import {
   oddsKey,
   CACHE_TTLS,
 } from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
 
 type MarketParams = {
   id: string;
 };
 
-// TTLs in seconds — mirrors docs/ORACLE_AND_BACKEND.md §Caching Strategy
-const MARKET_DETAIL_TTL = 30;
-const MARKETS_ACTIVE_TTL = 15;
-const MARKETS_DEFAULT_TTL = 30;
-const BETS_TTL = CACHE_TTLS.bets; // 30s
-const ODDS_TTL = CACHE_TTLS.odds; // 30s
+// TTLs in seconds — sourced from CACHE_TTLS in cacheKeys.ts so the
+// server-side cache and the Cache-Control header never drift apart (#480).
+const MARKET_DETAIL_TTL = CACHE_TTLS.market;
+const MARKETS_ACTIVE_TTL = CACHE_TTLS.marketsActive;
+const MARKETS_DEFAULT_TTL = CACHE_TTLS.marketsAll;
+const BETS_TTL = CACHE_TTLS.bets;
+const ODDS_TTL = CACHE_TTLS.odds;
 
 /**
  * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
@@ -241,10 +243,23 @@ export function createMarketsRoutes(
             },
           },
         },
-        response: {
+                response: {
           200: {
             type: "object",
             additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives. `max-age` mirrors the server-side Redis TTL. " +
+                  "Varies by filter: `active` filter → 15s, default → 30s.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+              ETag: {
+                type: "string",
+                description: "Strong ETag for conditional GET (RFC 7232).",
+              },
+            },
             properties: {
               markets: { type: "array", items: marketResponseSchema },
               total: { type: "number" },
@@ -276,7 +291,7 @@ export function createMarketsRoutes(
       const ttl =
         filter === "active" ? MARKETS_ACTIVE_TTL : MARKETS_DEFAULT_TTL;
 
-      const result = redis
+            const result = redis
         ? await getOrSet(redis, key, ttl, () =>
             getMarkets({ filter, category, sort, page, limit }, db)
           )
@@ -291,6 +306,7 @@ export function createMarketsRoutes(
 
       const etag = computeEtag(body);
       reply.header("ETag", etag);
+      reply.header("Cache-Control", cacheControlPublic(ttl));
 
       if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
         return reply.status(304).send();
@@ -315,14 +331,25 @@ export function createMarketsRoutes(
           },
           required: ["id"],
         },
-        response: {
-          200: oddsResponseSchema,
+                response: {
+          200: {
+            ...oddsResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis odds TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
           400: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -366,6 +393,7 @@ export function createMarketsRoutes(
         };
       };
 
+      reply.header("Cache-Control", cacheControlPublic(ODDS_TTL));
       return redis
         ? getOrSet(redis, oddsKey(id), ODDS_TTL, calculateOddsPayload)
         : calculateOddsPayload();
@@ -387,14 +415,25 @@ export function createMarketsRoutes(
           },
           required: ["id"],
         },
-        response: {
-          200: marketResponseSchema,
+                response: {
+          200: {
+            ...marketResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis market-detail TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
           400: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -409,6 +448,7 @@ export function createMarketsRoutes(
         throw notFound("Market not found");
       }
 
+      reply.header("Cache-Control", cacheControlPublic(MARKET_DETAIL_TTL));
       return market;
     }
   );
@@ -447,10 +487,20 @@ export function createMarketsRoutes(
             },
           },
         },
-        response: {
+                response: {
           200: {
             type: "object",
             additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis bets TTL (30s). " +
+                  "Public blockchain data; safe for shared caches.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
             properties: {
               bets: {
                 type: "array",
@@ -489,7 +539,7 @@ export function createMarketsRoutes(
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -520,6 +570,7 @@ export function createMarketsRoutes(
       const key = betsKey(id);
       const loader = () => getBetsByMarketFromDb(id, page, limit, db);
 
+      reply.header("Cache-Control", cacheControlPublic(BETS_TTL));
       return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();
     },
   );

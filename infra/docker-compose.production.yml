@@ -291,6 +291,9 @@ services:
       NODE_ENV: production
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:?set SOROBAN_RPC_URL in infra/.env}
+      # Without these the aggregator skips every market as "not configured".
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:?set NETWORK_PASSPHRASE in infra/.env}
+      MARKET_CONTRACT_ID: ${MARKET_CONTRACT_ID:?set MARKET_CONTRACT_ID in infra/.env}
       POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
       COUNCIL_SIZE: ${COUNCIL_SIZE:-7}
       COUNCIL_THRESHOLD: ${COUNCIL_THRESHOLD:-4}

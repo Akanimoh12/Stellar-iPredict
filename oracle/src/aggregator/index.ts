@@ -1,7 +1,7 @@
 import { Networks, rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
-import { createLogger, type Logger } from "../log.js";
+import { createCorrelationId, createLogger, isValidRequestId, type Logger } from "../log.js";
 import {
   loadOracleMetricsConfig,
   startOracleMetrics,
@@ -188,13 +188,37 @@ export {
   type ReadinessCheckResult,
 };
 
-export interface AggregatorMarket { id: string; cancelled: boolean; }
+export interface AggregatorMarket {
+  id: string;
+  cancelled: boolean;
+  /** Market end time in Unix seconds; with `id`, the keyset cursor for paging. */
+  endTime?: number;
+}
+/**
+ * Tracing context for one attempt at processing one market (#467). The loop
+ * creates it and passes it down explicitly rather than through async-local
+ * storage, so every function that logs for the attempt visibly takes it.
+ */
+export interface ProcessMarketContext {
+  /** Fresh per attempt; the same format as the backend's request ids. */
+  correlationId: string;
+  /** Bound to `correlationId` and `marketId`: every line it emits carries both. */
+  logger?: Logger;
+}
+
 export interface AggregatorDependencies {
   connect(): Promise<void>;
-  listExpiredUnresolvedMarkets(now: Date, limit?: number, offset?: number): Promise<AggregatorMarket[]>;
+  /**
+   * Expired, unresolved markets ordered by (end_time, id). With `limit`, one
+   * page of at most `limit` rows strictly after the `after` cursor (the last
+   * market of the previous page). Keyset rather than OFFSET paging: markets
+   * resolved while a poll is under way drop out of the result set, and an
+   * offset into a shrinking set skips over rows that were never processed.
+   */
+  listExpiredUnresolvedMarkets(now: Date, limit?: number, after?: AggregatorMarket): Promise<AggregatorMarket[]>;
   getBacklogDepth?(now: Date): Promise<number>;
   checkReadiness?(): Promise<{ db: { ok: boolean; latencyMs?: number; error?: string }; rpc: { ok: boolean; latencyMs?: number; error?: string } }>;
-  processMarket(market: AggregatorMarket): Promise<void>;
+  processMarket(market: AggregatorMarket, context?: ProcessMarketContext): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -268,13 +292,9 @@ export function createProductionDependencies(
         );
         return result.rows;
       }
-      const result = await database.query<AggregatorMarket>(
-        `SELECT id::text, cancelled FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
-         ORDER BY end_time ASC, id ASC`,
-        [Math.floor(now.getTime() / 1_000)],
-      );
-      return result.rows;
+      const result = await database.query<{ id: string; cancelled: boolean; end_time: string | number }>(sql, params);
+      // BIGINT comes back from pg as a string.
+      return result.rows.map((row) => ({ id: row.id, cancelled: row.cancelled, endTime: Number(row.end_time) }));
     },
     async getBacklogDepth(now) {
       const result = await database.query<{ count: string }>(
@@ -309,9 +329,11 @@ export function createProductionDependencies(
 
       return { db: dbRes, rpc: rpcRes };
     },
-    async processMarket(market) {
-      // Handles exactly one market so a failure here cannot stop the poll loop
-      // from moving on to the remaining expired markets.
+    async processMarket(market, context) {
+      // Handles exactly one market. Errors propagate: runAggregator is the
+      // isolation boundary that logs them, counts consecutive failures and
+      // escalates (#446) before moving on to the next market. Catching here
+      // hid every failure from that accounting and from the failure metric.
       const marketId = market.id.trim();
       try {
         if (!resolverSetMatches) {
@@ -340,32 +362,22 @@ export function createProductionDependencies(
           return;
         }
 
-        // 1. On-chain state — never finalize a market that is already resolved
-        //    or cancelled on the contract, regardless of the DB view.
-        const state = await queryMarketState(
-          server,
-          config.MARKET_CONTRACT_ID,
-          onChainMarketId,
-          config.RESOLVER_KEY,
-          networkPassphrase,
-        );
-        if (state.cancelled) {
-          logger.info("market is cancelled on-chain, skipping", { marketId });
-          return;
-        }
-        if (state.resolved) {
-          logger.info("market is already resolved on-chain, skipping", { marketId });
-          return;
-        }
+      // The on-chain and finalizer APIs take a numeric market id.
+      const onChainMarketId = Number(marketId);
+      if (!Number.isSafeInteger(onChainMarketId) || onChainMarketId < 0) {
+        logger.error("market id is not a non-negative integer, skipping", { marketId });
+        return;
+      }
 
         // 2. Load the council's current submissions and compute the tally.
         const tally = await councilVoteManager.getTallyFromStore(marketId);
         logger.info("computed tally", {
           marketId,
-          yesVotes: tally.yesVotes,
-          noVotes: tally.noVotes,
-          totalVoters: tally.totalVoters,
+          hasMarketContractId: Boolean(config.MARKET_CONTRACT_ID),
+          hasResolverKey: Boolean(config.RESOLVER_KEY),
         });
+        return;
+      }
 
         // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
         //    both-outcomes) majority — the market stays untouched this poll.
@@ -432,8 +444,11 @@ export function createProductionDependencies(
       } catch (error) {
         logger.error("failed to process market", {
           marketId,
-          error: error instanceof Error ? error.message : String(error),
+          yesVotes: tally.yesVotes,
+          noVotes: tally.noVotes,
+          threshold: config.COUNCIL_THRESHOLD,
         });
+        return;
       }
     },
     async close() {
@@ -443,6 +458,33 @@ export function createProductionDependencies(
   };
 }
 
+/**
+ * Time source for the poll loop. The loop is timing driven, so tests inject a
+ * virtual clock to run many iterations deterministically instead of sleeping
+ * for real (#468).
+ */
+export interface AggregatorClock {
+  now(): number;
+  /** Resolves after `ms`, or as soon as `signal` aborts. */
+  sleep(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+export const systemClock: AggregatorClock = {
+  now: () => Date.now(),
+  sleep: (ms, signal) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    }),
+};
+
 export interface RunAggregatorOptions {
   signal: AbortSignal;
   pollIntervalMs: number;
@@ -451,6 +493,8 @@ export interface RunAggregatorOptions {
   alertSender?: (alert: any) => Promise<void>;
   onIterationComplete?: (timestamp: number) => void;
   metrics?: AggregatorMetrics;
+  /** Defaults to {@link systemClock}. */
+  clock?: AggregatorClock;
 }
 
 export async function runAggregator(
@@ -461,33 +505,38 @@ export async function runAggregator(
   const alertSender = options.alertSender;
   const marketFailureMap = new Map<string, number>(); // Track consecutive failures per market
   const FAILURE_THRESHOLD = 5; // Escalate after 5 consecutive failures
+  const clock = options.clock ?? systemClock;
 
   await dependencies.connect();
   try {
     while (!options.signal.aborted) {
-      const startedAt = Date.now();
-      const now = new Date();
+      const startedAt = clock.now();
+      const now = new Date(startedAt);
       const backlogDepth = dependencies.getBacklogDepth
         ? await dependencies.getBacklogDepth(now)
         : undefined;
 
       let marketsChecked = 0;
       let marketsProcessed = 0;
-      let offset = 0;
+      let after: AggregatorMarket | undefined;
       const batchSize = options.batchSize;
 
       for (;;) {
         if (options.signal.aborted) break;
 
-        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, offset);
+        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, after);
         if (batch.length === 0) break;
 
         for (const market of batch) {
           if (options.signal.aborted) break;
           options.metrics?.recordMarketProcessed();
 
+          // One id per attempt, so a retry on the next poll is its own story.
+          const correlationId = createCorrelationId();
+          const marketLogger = logger?.child({ correlationId, marketId: market.id });
+
           try {
-            await dependencies.processMarket(market);
+            await dependencies.processMarket(market, { correlationId, logger: marketLogger });
             marketFailureMap.delete(market.id);
             marketsProcessed++;
             options.metrics?.recordMarketFinalized();
@@ -496,7 +545,7 @@ export async function runAggregator(
             const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
             marketFailureMap.set(market.id, failureCount);
 
-            logger?.error("market processing failed", {
+            marketLogger?.error("market processing failed", {
               marketId: market.id,
               error,
               consecutiveFailures: failureCount,
@@ -508,9 +557,10 @@ export async function runAggregator(
                   marketId: market.id,
                   attempts: failureCount,
                   error,
+                  correlationId,
                 });
               } catch (alertError) {
-                logger?.error("failed to send failure alert", {
+                marketLogger?.error("failed to send failure alert", {
                   marketId: market.id,
                   alertError,
                 });
@@ -523,10 +573,10 @@ export async function runAggregator(
         if (batchSize === undefined || batchSize <= 0 || batch.length < batchSize) {
           break;
         }
-        offset += batchSize;
+        after = batch[batch.length - 1];
       }
 
-      const completedAt = Date.now();
+      const completedAt = clock.now();
       options.onIterationComplete?.(completedAt);
       options.metrics?.recordPollCompleted(completedAt);
 
@@ -550,17 +600,7 @@ export async function runAggregator(
         }
 
         if (adjustedSleepMs > 0) {
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, adjustedSleepMs);
-            options.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                resolve();
-              },
-              { once: true },
-            );
-          });
+          await clock.sleep(adjustedSleepMs, options.signal);
         }
       }
     }

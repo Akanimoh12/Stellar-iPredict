@@ -89,4 +89,41 @@ describe("notifyFinalized", () => {
     const [, meta] = logger.info.mock.calls[0];
     expect(meta).toMatchObject({ decision: "no" });
   });
+
+  it("carries the correlation ids in the payload, log line and x-request-id header (#467)", async () => {
+    const logger = createLogger();
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await notifyFinalized(
+      createNotification({
+        correlationId: "3f2b8c1e-0000-4000-8000-000000000001",
+        originRequestId: "req-from-backend",
+      }),
+      { webhookUrl: "https://hook.example/finalized", fetchFn: fetchFn as unknown as typeof fetch, logger },
+    );
+
+    const [, init] = fetchFn.mock.calls[0];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      correlationId: "3f2b8c1e-0000-4000-8000-000000000001",
+      originRequestId: "req-from-backend",
+    });
+    expect(init.headers).toMatchObject({ "x-request-id": "3f2b8c1e-0000-4000-8000-000000000001" });
+    expect(logger.info.mock.calls[0][1]).toMatchObject({ correlationId: "3f2b8c1e-0000-4000-8000-000000000001" });
+  });
+
+  it("leaves the payload shape unchanged when there is nothing to correlate", async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await notifyFinalized(createNotification(), {
+      webhookUrl: "https://hook.example/finalized",
+      fetchFn: fetchFn as unknown as typeof fetch,
+      logger: createLogger(),
+    });
+
+    const [, init] = fetchFn.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body).not.toHaveProperty("correlationId");
+    expect(body).not.toHaveProperty("originRequestId");
+    expect(init.headers).not.toHaveProperty("x-request-id");
+  });
 });

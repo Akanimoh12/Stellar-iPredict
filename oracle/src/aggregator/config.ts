@@ -37,6 +37,16 @@ const schema = z.object({
   /** Initial resolver key for signing finalization transactions. */
   RESOLVER_KEY: optionalEnv(z.string().min(1)),
 
+  /**
+   * Market contract finalization transactions are sent to. processMarket skips
+   * every market while this or RESOLVER_KEY is unset. Declared here because
+   * the schema strips undeclared keys, which left it permanently undefined.
+   */
+  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
+
+  /** Stellar network passphrase for signing; defaults to testnet when unset. */
+  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
+
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
 

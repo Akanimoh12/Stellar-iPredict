@@ -1,5 +1,9 @@
 # Council Flow Runbook
 
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](../../docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers exercising the council flow by hand on a local or testnet contract, not production.
+
 This runbook documents how to exercise the council resolution flow manually when a local/testnet contract environment is available.
 
 ## Prerequisites

@@ -1,5 +1,9 @@
 # Oracle Operations Runbook
 
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](../oracle/docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers a merged overview of the council and optimistic oracle runbooks.
+
 > End-to-end operational procedures for the iPredict oracle system — council
 > resolution (Phase 1.5) and optimistic oracle (Phase 2).
 >

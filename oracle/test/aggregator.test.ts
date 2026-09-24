@@ -139,6 +139,9 @@ describe("council aggregator skeleton", () => {
       if (market.id === "bad-market") {
         throw new Error("RPC failure");
       }
+      // Stop after one iteration; aborting from close() never fires, because
+      // close() only runs once the loop has already exited.
+      if (market.id === "market-3") controller.abort();
     });
     const dependencies: AggregatorDependencies = {
       connect: vi.fn(async () => undefined),
@@ -148,7 +151,7 @@ describe("council aggregator skeleton", () => {
         { id: "market-3", cancelled: false },
       ]),
       processMarket: processMarketMock,
-      close: vi.fn(async () => controller.abort()),
+      close: vi.fn(async () => undefined),
     };
 
     await runAggregator(dependencies, { signal: controller.signal, pollIntervalMs: 1 });
@@ -321,6 +324,21 @@ describe("council aggregator skeleton", () => {
       processMarket: vi.fn(async () => {
         // Schedule abort during the sleep
         setTimeout(() => controller.abort(), 50);
+      }),
+      close: vi.fn(async () => undefined),
+    };
+
+    const pollIntervalMs = 5000; // Long interval
+    await runAggregator(dependencies, {
+      signal: controller.signal,
+      pollIntervalMs,
+    });
+
+    const elapsedMs = Date.now() - startTime;
+    // Should exit promptly (within 500ms), not wait the full 5s
+    expect(elapsedMs).toBeLessThan(500);
+  });
+
   it("loads AGGREGATOR_BATCH_SIZE configuration with default and custom value", () => {
     const configDefault = loadAggregatorConfig({
       COUNCIL_SIZE: "7", COUNCIL_THRESHOLD: "4",
@@ -361,15 +379,6 @@ describe("council aggregator skeleton", () => {
       close: vi.fn(async () => undefined),
     };
 
-    const pollIntervalMs = 5000; // Long interval
-    await runAggregator(dependencies, {
-      signal: controller.signal,
-      pollIntervalMs,
-    });
-
-    const elapsedMs = Date.now() - startTime;
-    // Should exit promptly (within 500ms), not wait the full 5s
-    expect(elapsedMs).toBeLessThan(500);
     await runAggregator(dependencies, {
       signal: controller.signal,
       pollIntervalMs: 1,

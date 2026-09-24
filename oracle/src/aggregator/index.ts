@@ -12,6 +12,7 @@ import { createPostgresSubmissionStore, computeTally } from "./tally.js";
 import { selectThresholdOutcome } from "./threshold.js";
 import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
 import { finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+import { AggregatorMetrics, AggregatorMetricsServer } from "./metrics.js";
 
 
 export {
@@ -335,7 +336,6 @@ export function createProductionDependencies(
           error: error instanceof Error ? error.message : String(error),
         });
       }
-    },
     },
     async close() {
       await database.end();

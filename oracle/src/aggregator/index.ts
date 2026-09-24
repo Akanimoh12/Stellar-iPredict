@@ -7,7 +7,16 @@ import {
   startOracleMetrics,
   type OracleMetricsRuntime,
 } from "../metrics/index.js";
-import { createWebhookAlertSender } from "./alert.js";
+import {
+  createAlertRouter,
+  createWebhookAlertChannel,
+  createWebhookAlertSender,
+  type AlertChannel,
+} from "./alert.js";
+import {
+  createPostgresNotificationStore,
+  failedWebhookNotificationsTableSql,
+} from "./finalize-notifier.js";
 import { createPostgresSubmissionStore, computeTally } from "./tally.js";
 import { selectThresholdOutcome } from "./threshold.js";
 import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
@@ -219,6 +228,13 @@ export function createProductionDependencies(
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
+      try {
+        await database.query(failedWebhookNotificationsTableSql);
+      } catch (err) {
+        logger.warn("could not ensure failed_webhook_notifications table", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
     },
     async listExpiredUnresolvedMarkets(now, limit, after) {
@@ -373,7 +389,17 @@ export function createProductionDependencies(
         outcome,
         [...tally.votes],
         networkPassphrase,
-        { webhookUrl: config.FINALIZE_WEBHOOK_URL, fetchFn: overrides.fetchFn, logger },
+        {
+          webhookUrl: config.FINALIZE_WEBHOOK_URL,
+          // Issue #461: sign each delivery with HMAC-SHA256.
+          webhookSigningSecret: config.WEBHOOK_SIGNING_SECRET,
+          // Issue #460: bounded retries with backoff.
+          maxAttempts: config.FINALIZE_WEBHOOK_MAX_ATTEMPTS,
+          // Issue #460: persist exhausted notifications to dead-letter table.
+          store: createPostgresNotificationStore(database),
+          fetchFn: overrides.fetchFn,
+          logger,
+        },
         { correlationId, originRequestId, logger },
       );
       logger.info("market finalized", { marketId, decision: outcome, txHash });
@@ -599,11 +625,30 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
       }
     }
 
+    // Issue #462: build the multi-channel alert router with cooldown and routing.
+    const alertChannels: AlertChannel[] = [];
+    if (config.ALERT_WEBHOOK_URL) {
+      alertChannels.push(
+        createWebhookAlertChannel({
+          name: "webhook",
+          webhookUrl: config.ALERT_WEBHOOK_URL,
+          minSeverity: "SEV3",
+          logger,
+        }),
+      );
+    }
+    const alertSender = createAlertRouter({
+      channels: alertChannels,
+      logger,
+      cooldownMs: config.ALERT_COOLDOWN_MS,
+    });
+
     await runAggregator(dependencies, {
       signal: controller.signal,
       pollIntervalMs: config.POLL_INTERVAL_MS,
       batchSize: config.AGGREGATOR_BATCH_SIZE,
       logger,
+      alertSender,
       metrics: aggregatorMetrics,
       onIterationComplete: (timestamp) => {
         lastPollCompletedAt = timestamp;

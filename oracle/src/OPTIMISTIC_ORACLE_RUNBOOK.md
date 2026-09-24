@@ -1,5 +1,9 @@
 # Optimistic Oracle Runbook
 
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](../docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers the bonded optimistic oracle: submit, challenge and finalize.
+
 This runbook documents the end-to-end operational procedures for the iPredict
 optimistic oracle: **submit**, **challenge**, and **finalize** operations. It
 is the primary reference for operators, on-call engineers, and council members

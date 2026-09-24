@@ -168,7 +168,7 @@ POSTed to `ALERT_WEBHOOK_URL` when set:
 
 | Alert `type` | Raised when |
 |---|---|
-| `oracle.monitor.market_stuck` | A market is unresolved `STUCK_MARKET_HOURS` past expiry |
+| `oracle.monitor.market_stuck` | A market is unresolved `STUCK_MARKET_HOURS` past expiry — see the [Stuck Market Runbook](../oracle/docs/STUCK_MARKET_RUNBOOK.md) |
 | `oracle.monitor.submission_new` | A new bonded submission appears |
 | `oracle.monitor.dispute_escalated` | A dispute escalates to council |
 | `oracle.monitor.bond_below_minimum` | A submission is bonded under `SUBMITTER_BOND_XLM` |

@@ -234,8 +234,10 @@ export class BacklogWorld {
 
     const hash = tx.hash().toString("hex");
     market.chain = { ...market.chain, resolved: true, outcome };
-    // The indexer catches up straight away: the markets row flips to resolved
-    // while the aggregator is still working through the rest of its backlog.
+    // The markets row flips to resolved while the aggregator is still working
+    // through the rest of its backlog — the worst case for paging. (In
+    // production the indexer only does this for oracle/finalized events;
+    // resolve_market emits none. See STUCK_MARKET_RUNBOOK.md, cause C8.)
     market.db.resolved = true;
     this.transactions.push({ marketId: market.id, outcome, hash });
     return { status: "PENDING", hash };

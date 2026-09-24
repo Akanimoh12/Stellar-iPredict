@@ -9,7 +9,12 @@ import compress from "@fastify/compress";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
 import { healthRoutes, markShuttingDown } from "./api/health.js";
-import { DEFAULT_CORS_ORIGINS, parseCorsOrigins } from "./lib/cors.js";
+import {
+  DEFAULT_CORS_ORIGINS,
+  parseCorsOrigins,
+  validateCorsAllowlist,
+  validateCorsOrigin,
+} from "./lib/cors.js";
 import { registerErrorHandler, registerNotFoundHandler } from "./lib/errors.js";
 import {
   REQUEST_ID_HEADER,
@@ -28,7 +33,12 @@ import { registerCancellationHook } from "./lib/cancellation.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
-export { DEFAULT_CORS_ORIGINS, parseCorsOrigins };
+export {
+  DEFAULT_CORS_ORIGINS,
+  parseCorsOrigins,
+  validateCorsAllowlist,
+  validateCorsOrigin,
+};
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -37,6 +47,27 @@ declare module "fastify" {
   }
 }
 
+
+/** Default global request body limit (16 KiB), matching the largest legitimate JSON request (issue #473). */
+export const DEFAULT_BODY_LIMIT = 16 * 1024;
+
+/**
+ * Default connection timeout in milliseconds (10s) — issue #474.
+ * Closes stalled or inactive sockets before request headers are sent.
+ */
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 10000;
+
+/**
+ * Default request timeout in milliseconds (30s) — issue #474.
+ * Sets the maximum allowed time for receiving the complete HTTP request from a client.
+ *
+ * Dependency on database statement_timeout:
+ * Server-side request timeouts cut off slow clients and trigger socket closure, which
+ * fires `registerCancellationHook` and cancels queries via `queryWithCancel` (`pg_cancel_backend`).
+ * This pairs directly with Postgres's `STATEMENT_TIMEOUT_MS` (db/pool.ts) to guarantee
+ * that database connections are released and not held indefinitely by stalled clients.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
 export interface ServerConfig {
   port: number;
@@ -47,11 +78,24 @@ export interface ServerConfig {
 
 export interface BuildServerOptions {
   corsOrigins?: string[];
+  /**
+   * Whether to allow credentials (cookies, ambient HTTP authorization).
+   * Defaults to false: the API is bearer-token and API-key authenticated.
+   * Enabling credentials alongside a permissive or wildcard origin entry will fail startup.
+   */
+  corsCredentials?: boolean;
   /** Overrides the logger config; tests pass a stream to capture output. */
   logger?: FastifyServerOptions["logger"];
-  pool?: Pool;
+  /** Required PostgreSQL connection pool (issue #471). */
+  pool: Pool;
   /** Redis client for cache-aside reads. When omitted, routes hit the DB directly. */
   redis?: Redis;
+  /** Global request body limit in bytes. Defaults to 16 KiB (issue #473). */
+  bodyLimit?: number;
+  /** Connection timeout in milliseconds. Defaults to 10s (issue #474). */
+  connectionTimeout?: number;
+  /** Request timeout in milliseconds. Defaults to 30s (issue #474). */
+  requestTimeout?: number;
 }
 
 export interface GracefulShutdownOptions {
@@ -71,10 +115,15 @@ export interface GracefulShutdownOptions {
 /** Default drain timeout — comfortably inside a typical 30s orchestrator grace period. */
 export const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
 
-export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
+export function buildServer(options: BuildServerOptions): FastifyInstance {
   const databasePool = options.pool;
   const redis = options.redis;
-  const allowedOrigins = options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS);
+  const corsCredentials = options.corsCredentials ?? false;
+  const allowedOrigins =
+    options.corsOrigins ?? parseCorsOrigins(process.env.CORS_ORIGINS, { credentials: corsCredentials });
+
+  // Validate allowed origins against credentials and format rules at startup
+  validateCorsAllowlist(allowedOrigins, { credentials: corsCredentials });
 
   const server = Fastify({
     logger: options.logger ?? createLoggerOptions(),
@@ -82,6 +131,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     // The onResponse hook in registerRequestLogging is the single per-request
     // log line; Fastify's built-in pair would just duplicate it.
     disableRequestLogging: true,
+    bodyLimit: options.bodyLimit ?? DEFAULT_BODY_LIMIT,
+    connectionTimeout: options.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+    requestTimeout: options.requestTimeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
   });
 
   // Independent record of every route ever registered, regardless of where in
@@ -149,6 +201,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
 
 
   // CORS: allowlist only, never a reflected wildcard.
+  // Security rationale (issue #472):
+  // Credentials (cookies / HTTP auth headers) are disabled by default (`corsCredentials: false`).
+  // The API is bearer-token and API-key authenticated via request headers, so cookies
+  // and ambient credentials are not required. Disabling credentials eliminates the risk of
+  // cross-origin credential theft and CSRF-style credential-leaking attacks.
   server.register(cors, {
     origin(origin, callback) {
       // No Origin header — curl, health checks, server-to-server. Not a browser
@@ -171,7 +228,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       "X-RateLimit-Reset",
       "Retry-After",
     ],
-    credentials: true,
+    credentials: corsCredentials,
     maxAge: 86400,
   });
 

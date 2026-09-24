@@ -90,7 +90,7 @@ describe("POST /api/oracle/submit (legacy)", () => {
     submissions = [];
     app = Fastify();
     registerErrorHandler(app);
-    registerOracleRoutes(app, undefined, mockDb);
+    registerOracleRoutes(app, mockDb);
   });
 
   it("returns 401 when ORACLE_API_KEY is unset in the environment", async () => {
@@ -377,7 +377,7 @@ describe("POST /api/oracle/submit — outcome validation (issue #650)", () => {
     submissions = [];
     app = Fastify();
     registerErrorHandler(app);
-    registerOracleRoutes(app, undefined, mockDb);
+    registerOracleRoutes(app, mockDb);
   });
 
   it("rejects an outcome outside the permitted set with 400", async () => {

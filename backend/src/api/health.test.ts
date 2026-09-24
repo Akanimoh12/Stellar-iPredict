@@ -14,6 +14,7 @@ import { pingDb } from "@/db/health";
 import { pingRedis } from "@/db/redis";
 import { buildServer } from "@/server";
 import { markShuttingDown, resetShuttingDownForTests } from "./health.js";
+import { createFakePool } from "../test/fakePool.js";
 
 const pingDbMock = vi.mocked(pingDb);
 const pingRedisMock = vi.mocked(pingRedis);
@@ -21,7 +22,7 @@ const pingRedisMock = vi.mocked(pingRedis);
 let server: FastifyInstance | undefined;
 
 function makeServer(): FastifyInstance {
-  server = buildServer({ corsOrigins: [] });
+  server = buildServer({ corsOrigins: [], pool: createFakePool() });
   return server;
 }
 

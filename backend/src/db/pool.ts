@@ -15,6 +15,17 @@ const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
   process.env.DB_SLOW_QUERY_THRESHOLD_MS ?? "200",
   10,
 );
+/**
+ * Statement timeout for Postgres sessions (30s default).
+ *
+ * Pairing with Fastify server request timeout (issue #474):
+ * Fastify's `requestTimeout` closes the HTTP connection when a client is slow.
+ * Server-side timeouts alone do not cancel an in-flight query; the database connection
+ * stays busy until the query finishes or its own `statement_timeout` fires.
+ * This pairs with `queryWithCancel` (which cancels queries on client disconnect)
+ * and `STATEMENT_TIMEOUT_MS` below (which acts as the hard safety net on the database side
+ * preventing runaway queries from exhausting the connection pool).
+ */
 const STATEMENT_TIMEOUT_MS = Number.parseInt(
   process.env.DB_STATEMENT_TIMEOUT_MS ?? "30000",
   10,

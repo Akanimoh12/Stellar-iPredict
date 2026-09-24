@@ -17,7 +17,9 @@ export const unauthorized = (message = "Unauthorized") => new HttpError(401, "UN
 export const forbidden = (message = "Forbidden") => new HttpError(403, "FORBIDDEN", message);
 export const notFound = (message = "Not found") => new HttpError(404, "NOT_FOUND", message);
 export const methodNotAllowed = (message = "Method not allowed") => new HttpError(405, "METHOD_NOT_ALLOWED", message);
+export const requestTimeout = (message = "Request timeout") => new HttpError(408, "REQUEST_TIMEOUT", message);
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
+export const payloadTooLarge = (message = "Payload too large") => new HttpError(413, "PAYLOAD_TOO_LARGE", message);
 
 export interface ErrorResponse { error: { code: string; message: string; requestId: string } }
 
@@ -31,9 +33,17 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
   if (error instanceof HttpError) return { statusCode: error.statusCode, code: error.code, message: error.message };
   if (isDependencyUnavailable(error)) return { statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" };
   const maybeStatus = (error as FastifyErrorLike).statusCode;
+  const rawCode = (error as FastifyErrorLike).code;
+
+  if (rawCode === "FST_ERR_CTP_BODY_TOO_LARGE" || maybeStatus === 413) {
+    return { statusCode: 413, code: "PAYLOAD_TOO_LARGE", message: error.message || "Payload too large" };
+  }
+  if (rawCode === "FST_ERR_REQ_TIMEOUT" || maybeStatus === 408) {
+    return { statusCode: 408, code: "REQUEST_TIMEOUT", message: error.message || "Request timeout" };
+  }
+
   const statusCode = typeof maybeStatus === "number" && maybeStatus >= 400 && maybeStatus < 500 ? maybeStatus : 500;
   if (statusCode < 500) {
-    const rawCode = (error as FastifyErrorLike).code;
     const code = rawCode === "FST_ERR_VALIDATION" ? "BAD_REQUEST" : (rawCode ?? "BAD_REQUEST");
     return { statusCode, code, message: error.message || "Request failed" };
   }

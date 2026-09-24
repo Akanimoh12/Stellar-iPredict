@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "@/server";
 import { DOCS_ROUTE, OPENAPI_VERSION, buildOpenApiDocument } from "@/api/openapi";
+import { createFakePool } from "../test/fakePool.js";
 
 interface OpenApiDocument {
   openapi: string;
@@ -13,7 +14,7 @@ interface OpenApiDocument {
 let server: FastifyInstance | undefined;
 
 async function fetchSpec(): Promise<OpenApiDocument> {
-  server = buildServer({ corsOrigins: [] });
+  server = buildServer({ corsOrigins: [], pool: createFakePool() });
 
   const res = await server.inject({ method: "GET", url: DOCS_ROUTE });
 
@@ -49,7 +50,7 @@ describe("buildOpenApiDocument", () => {
 
 describe("GET /api/docs", () => {
   it("serves the spec as JSON", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
 
     const res = await server.inject({ method: "GET", url: DOCS_ROUTE });
 
@@ -80,7 +81,7 @@ describe("GET /api/docs", () => {
   });
 
   it("carries the security headers applied to every route", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
 
     const res = await server.inject({ method: "GET", url: DOCS_ROUTE });
 
@@ -95,7 +96,7 @@ describe("GET /api/docs", () => {
     // the regression test: a route registered ahead of registerOpenApi again
     // (or a brand-new plugin registered in the wrong spot) shows up as a
     // route present in `registeredRoutes` but missing from `spec.paths`.
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
 
     const routeTable = server.registeredRoutes;
     expect(routeTable.length).toBeGreaterThan(0);

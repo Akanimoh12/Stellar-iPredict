@@ -22,6 +22,8 @@ export interface OpenApiOptions {
 const DESCRIPTION = [
   "REST API serving market, bet, leaderboard and stats data to the iPredict",
   "frontend, read from an indexed PostgreSQL copy of on-chain Soroban state.",
+  "Global request body limit is 16 KiB; requests exceeding this limit are rejected with 413 Payload Too Large.",
+  "Server connection timeout is 10s and request timeout is 30s, paired with database statement timeouts to prevent connection exhaustion.",
 ].join(" ");
 
 /** Base document; paths are filled in by @fastify/swagger from route schemas. */

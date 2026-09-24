@@ -20,6 +20,7 @@ import type { Redis } from "ioredis";
 import { getOrSet } from "../src/cache/cacheAside.js";
 import { statsKey } from "../src/cache/cacheKeys.js";
 import { createTestRedis } from "../src/test/fakeRedis.js";
+import { createFakePool } from "../src/test/fakePool.js";
 
 // PostgreSQL is unreachable for every suite in this file.
 vi.mock("../src/db/pool.js", () => ({
@@ -88,7 +89,11 @@ describe("health checks when dependencies are down", () => {
   });
 
   it("/readyz reports 503 not-ready when both DB and Redis are down", async () => {
-    const server = buildServer({ corsOrigins: [], logger: false });
+    const server = buildServer({
+      corsOrigins: [],
+      logger: false,
+      pool: createFakePool(() => { throw new Error("ECONNREFUSED"); }),
+    });
     try {
       const res = await server.inject({ method: "GET", url: "/readyz" });
       expect(res.statusCode).toBe(503);
@@ -102,7 +107,11 @@ describe("health checks when dependencies are down", () => {
   });
 
   it("/healthz liveness stays 200 even when everything is down", async () => {
-    const server = buildServer({ corsOrigins: [], logger: false });
+    const server = buildServer({
+      corsOrigins: [],
+      logger: false,
+      pool: createFakePool(() => { throw new Error("ECONNREFUSED"); }),
+    });
     try {
       const res = await server.inject({ method: "GET", url: "/healthz" });
       expect(res.statusCode).toBe(200);

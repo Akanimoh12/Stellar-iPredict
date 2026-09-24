@@ -5,6 +5,7 @@ import {
   Networks,
   nativeToScVal,
   rpc,
+  scValToNative,
   TransactionBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
@@ -248,7 +249,10 @@ export async function queryMarketState(
     throw new Error("Simulation returned no result");
   }
 
-  const market = response.result.retval ? (response.result.retval as any) : undefined;
+  // The contract's Market struct arrives as an ScVal map keyed by field name;
+  // reading fields off the raw ScVal yields undefined, which made every market
+  // look open and let already-resolved or cancelled ones be sent a resolution.
+  const market = response.result.retval ? scValToNative(response.result.retval) : undefined;
   if (!market || typeof market !== "object") {
     throw new Error("Malformed market simulation result");
   }

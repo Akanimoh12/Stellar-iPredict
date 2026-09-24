@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { Networks } from "@stellar/stellar-sdk";
 import { loadAggregatorConfig } from "../src/aggregator/config.js";
-import { runAggregator, type AggregatorDependencies } from "../src/aggregator/index.js";
+import {
+  createProductionDependencies,
+  runAggregator,
+  type AggregatorClock,
+  type AggregatorDependencies,
+  type AggregatorMarket,
+} from "../src/aggregator/index.js";
+import { createLogger } from "../src/log.js";
+import { BacklogWorld, votes, type BacklogMarket } from "./fixtures/market-backlog.js";
 
 describe("council aggregator skeleton", () => {
   it("loads and validates council configuration", () => {
@@ -361,9 +370,9 @@ describe("council aggregator skeleton", () => {
     const batch1 = [{ id: "1", cancelled: false }, { id: "2", cancelled: false }];
     const batch2 = [{ id: "3", cancelled: false }];
     
-    const listSpy = vi.fn(async (_now: Date, _limit?: number, offset?: number) => {
-      if (offset === 0) return batch1;
-      if (offset === 2) return batch2;
+    const listSpy = vi.fn(async (_now: Date, _limit?: number, after?: AggregatorMarket) => {
+      if (after === undefined) return batch1;
+      if (after.id === "2") return batch2;
       return [];
     });
 
@@ -385,8 +394,221 @@ describe("council aggregator skeleton", () => {
       batchSize: 2,
     });
 
-    expect(listSpy).toHaveBeenNthCalledWith(1, expect.any(Date), 2, 0);
-    expect(listSpy).toHaveBeenNthCalledWith(2, expect.any(Date), 2, 2);
+    expect(listSpy).toHaveBeenNthCalledWith(1, expect.any(Date), 2, undefined);
+    // Each page resumes after the last market of the previous one.
+    expect(listSpy).toHaveBeenNthCalledWith(2, expect.any(Date), 2, batch1[1]);
     expect(processedIds).toEqual(["1", "2", "3"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Simulated multi-market backlog (#468)
+// ---------------------------------------------------------------------------
+
+const T0 = Date.UTC(2026, 8, 1); // virtual start of the run
+const T0_S = T0 / 1_000;
+const POLL_MS = 60_000;
+const HOUR_S = 3_600;
+
+/** Controllable clock: `sleep` advances virtual time instantly, never really waiting. */
+function virtualClock(start: number): AggregatorClock {
+  let now = start;
+  return {
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms;
+    },
+  };
+}
+
+function open(): Pick<BacklogMarket, "db" | "chain"> {
+  return {
+    db: { resolved: false, cancelled: false },
+    chain: { resolved: false, cancelled: false, outcome: false },
+  };
+}
+
+/** One market per state the loop has to handle, in expiry order. */
+function buildBacklog(): BacklogMarket[] {
+  const expired = (hoursAgo: number) => T0_S - hoursAgo * HOUR_S;
+  return [
+    // First in line, so everything after it proves the loop carries on past an error.
+    { id: "101", scenario: "persistent RPC failure", endTime: expired(10), ...open(), votes: votes(true, 5),
+      fault: { stage: "simulate", remaining: Number.POSITIVE_INFINITY, message: "rpc unavailable" } },
+    { id: "102", scenario: "YES quorum", endTime: expired(9), ...open(), votes: [...votes(true, 5), ...votes(false, 1, 5)] },
+    { id: "103", scenario: "NO quorum", endTime: expired(8), ...open(), votes: [...votes(false, 4), ...votes(true, 1, 4)] },
+    { id: "104", scenario: "insufficient votes", endTime: expired(7), ...open(), votes: [...votes(true, 2), ...votes(false, 1, 2)] },
+    { id: "105", scenario: "transient send failure", endTime: expired(6), ...open(), votes: votes(true, 4),
+      fault: { stage: "send", remaining: 1, message: "503 Service Unavailable" } },
+    { id: "106", scenario: "cancelled on-chain, indexer lagging", endTime: expired(5), ...open(),
+      chain: { resolved: false, cancelled: true, outcome: false }, votes: votes(true, 4) },
+    { id: "107", scenario: "resolved on-chain, indexer lagging", endTime: expired(4), ...open(),
+      chain: { resolved: true, cancelled: false, outcome: true }, votes: votes(true, 4) },
+    { id: "108", scenario: "quorum arrives after first poll", endTime: expired(3), ...open(), votes: votes(true, 3) },
+    { id: "109", scenario: "cancelled in DB", endTime: expired(3), db: { resolved: false, cancelled: true },
+      chain: { resolved: false, cancelled: true, outcome: false }, votes: votes(true, 4) },
+    { id: "110", scenario: "resolved in DB", endTime: expired(3), db: { resolved: true, cancelled: false },
+      chain: { resolved: true, cancelled: false, outcome: true }, votes: votes(true, 4) },
+    // Expires between the second and third poll.
+    { id: "111", scenario: "expires mid-run", endTime: T0_S + 90, ...open(), votes: votes(true, 4) },
+    { id: "112", scenario: "YES quorum (filler)", endTime: expired(2), ...open(), votes: votes(true, 4) },
+    { id: "113", scenario: "YES quorum (filler)", endTime: expired(2), ...open(), votes: votes(true, 7) },
+    { id: "114", scenario: "NO quorum (filler)", endTime: expired(1), ...open(), votes: votes(false, 4) },
+  ];
+}
+
+interface BacklogRun {
+  /** Market ids processMarket was called with, per iteration (1-based). */
+  attempts: Map<number, string[]>;
+  /** Market ids the expiry query would return at the start of each iteration. */
+  eligible: Map<number, string[]>;
+  alerts: Array<{ marketId: string; attempts: number }>;
+}
+
+async function runBacklog(
+  world: BacklogWorld,
+  iterations: number,
+  betweenIterations: (completed: number) => void = () => {},
+): Promise<BacklogRun> {
+  const config = loadAggregatorConfig({
+    COUNCIL_SIZE: "7",
+    COUNCIL_THRESHOLD: "4",
+    DATABASE_URL: "postgres://backlog.invalid/ipredict",
+    SOROBAN_RPC_URL: "https://rpc.backlog.invalid",
+    RESOLVER_KEY: world.resolverSecret,
+    MARKET_CONTRACT_ID: world.contractId,
+    NETWORK_PASSPHRASE: Networks.TESTNET,
+  });
+  const logger = createLogger({ level: "error", sink: () => {} });
+  const clock = virtualClock(T0);
+  const deps = createProductionDependencies(config, logger, { database: world.pool(), server: world.server() });
+
+  const run: BacklogRun = { attempts: new Map(), eligible: new Map(), alerts: [] };
+  let iteration = 1;
+
+  const list = deps.listExpiredUnresolvedMarkets.bind(deps);
+  deps.listExpiredUnresolvedMarkets = async (now, ...rest) => {
+    if (!run.eligible.has(iteration)) {
+      run.eligible.set(iteration, world.eligibleAt(Math.floor(now.getTime() / 1_000)).map((m) => m.id));
+    }
+    return list(now, ...rest);
+  };
+  const processMarket = deps.processMarket.bind(deps);
+  deps.processMarket = async (market, ...rest) => {
+    run.attempts.set(iteration, [...(run.attempts.get(iteration) ?? []), market.id]);
+    return processMarket(market, ...rest);
+  };
+
+  const controller = new AbortController();
+  await runAggregator(deps, {
+    signal: controller.signal,
+    pollIntervalMs: POLL_MS,
+    batchSize: 3,
+    logger,
+    clock,
+    alertSender: async (alert) => {
+      run.alerts.push({ marketId: alert.marketId, attempts: alert.attempts });
+    },
+    onIterationComplete: () => {
+      betweenIterations(iteration);
+      if (iteration >= iterations) controller.abort();
+      iteration += 1;
+    },
+  });
+  return run;
+}
+
+describe("aggregator loop against a simulated multi-market backlog (#468)", () => {
+  const ITERATIONS = 6;
+
+  async function runScenario() {
+    const world = new BacklogWorld(buildBacklog());
+    const run = await runBacklog(world, ITERATIONS, (completed) => {
+      // The fourth YES vote for market 108 lands after the first poll.
+      if (completed === 1) world.addVotes("108", votes(true, 1, 3));
+    });
+    return { world, run };
+  }
+
+  const finalizedIn = (run: BacklogRun, id: string) =>
+    [...run.attempts.entries()].filter(([, ids]) => ids.includes(id)).map(([n]) => n);
+
+  it("drives every market to its correct terminal state", async () => {
+    const { world } = await runScenario();
+
+    const expectedDecisions: Record<string, string> = {
+      "102": "yes", "103": "no", "105": "yes", "108": "yes",
+      "111": "yes", "112": "yes", "113": "yes", "114": "no",
+    };
+    const decisions = Object.fromEntries([...world.finalized.values()].map((row) => [row.marketId, row.decision]));
+    expect(decisions).toEqual(expectedDecisions);
+
+    // Exactly one on-chain resolution per finalized market — no double submits.
+    expect(world.transactions.map((tx) => tx.marketId).sort()).toEqual(Object.keys(expectedDecisions).sort());
+    for (const [id, decision] of Object.entries(expectedDecisions)) {
+      expect(world.market(id).chain, `${id} (${world.market(id).scenario})`).toMatchObject({
+        resolved: true,
+        outcome: decision === "yes",
+      });
+    }
+
+    // The on-chain state check stops the aggregator before it ever sends a
+    // resolution for a market the contract already considers closed.
+    expect(world.rejected).toEqual([]);
+
+    // Everything else is left exactly as it was.
+    for (const id of ["101", "104", "106", "107", "109", "110"]) {
+      expect(world.finalized.has(id), `${id} (${world.market(id).scenario})`).toBe(false);
+    }
+    expect(world.market("104").chain.resolved).toBe(false);
+    expect(world.market("106").chain).toMatchObject({ cancelled: true, resolved: false });
+  });
+
+  it("finalizes a transiently failing market on a later iteration", async () => {
+    const { world, run } = await runScenario();
+
+    // Failed in the first poll, retried and finalized in the second, then gone.
+    expect(finalizedIn(run, "105")).toEqual([1, 2]);
+    expect(world.finalized.get("105")?.decision).toBe("yes");
+    expect(run.alerts.some((alert) => alert.marketId === "105")).toBe(false);
+  });
+
+  it("finalizes markets whose quorum or expiry arrives mid-run", async () => {
+    const { run } = await runScenario();
+
+    expect(finalizedIn(run, "108")).toEqual([1, 2]);
+    expect(finalizedIn(run, "111")).toEqual([3]);
+  });
+
+  it("escalates a persistently failing market without starving the rest", async () => {
+    const { run } = await runScenario();
+
+    expect(finalizedIn(run, "101")).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(run.alerts.filter((a) => a.marketId === "101").map((a) => a.attempts)).toEqual([5, 6]);
+    expect(run.alerts.every((a) => a.marketId === "101")).toBe(true);
+  });
+
+  it("attempts every eligible market in every iteration, errors included", async () => {
+    const { run } = await runScenario();
+
+    expect(run.eligible.size).toBe(ITERATIONS);
+    for (let n = 1; n <= ITERATIONS; n++) {
+      // Markets finalized mid-iteration drop out of the query, and one fails
+      // up front; neither may cause a later market to be skipped.
+      expect(run.attempts.get(n) ?? [], `iteration ${n}`).toEqual(run.eligible.get(n));
+    }
+    // The DB-cancelled and DB-resolved markets are never touched.
+    const touched = new Set([...run.attempts.values()].flat());
+    expect(touched.has("109")).toBe(false);
+    expect(touched.has("110")).toBe(false);
+  });
+
+  it("is deterministic across runs", async () => {
+    const first = await runScenario();
+    const second = await runScenario();
+
+    expect(second.run.attempts).toEqual(first.run.attempts);
+    expect(second.run.alerts).toEqual(first.run.alerts);
+    expect([...second.world.finalized.keys()]).toEqual([...first.world.finalized.keys()]);
   });
 });

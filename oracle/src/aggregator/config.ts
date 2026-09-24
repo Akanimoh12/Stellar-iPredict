@@ -48,6 +48,28 @@ const schema = z.object({
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
 
+  /** Optional webhook URL for aggregator alert notifications (issue #462). */
+  ALERT_WEBHOOK_URL: optionalEnv(z.string().url()),
+
+  /**
+   * HMAC-SHA256 signing secret for finalization webhook deliveries (issue #461).
+   * When set, each delivery includes `X-Signature` and `X-Timestamp` headers.
+   * Keep this value distinct from API keys; rotate via a `_FILE` indirection.
+   */
+  WEBHOOK_SIGNING_SECRET: optionalEnv(z.string().min(1)),
+
+  /**
+   * Maximum total delivery attempts (initial + retries) for the finalization
+   * webhook (issue #460). Defaults to 5.
+   */
+  FINALIZE_WEBHOOK_MAX_ATTEMPTS: positiveInteger.default(5),
+
+  /**
+   * Milliseconds before the same (severity, marketId) alert is re-delivered
+   * (issue #462). Set to 0 to disable cooldown. Defaults to 15 minutes.
+   */
+  ALERT_COOLDOWN_MS: z.coerce.number().int().min(0).default(15 * 60 * 1_000),
+
   SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
   SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
   /** Optimistic oracle — submitter bond in XLM. */

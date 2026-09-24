@@ -161,7 +161,7 @@ export function createStellarSubmitter(options: {
         "resolve_market",
         new Address(caller).toScVal(),
         nativeToScVal(BigInt(marketId), { type: "u64" }),
-        nativeToScVal(outcome, { type: "bool" }),
+        nativeToScVal(outcome),
       );
 
       const tx = new TransactionBuilder(sourceAccount, { fee: "100000", networkPassphrase })

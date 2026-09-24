@@ -89,14 +89,18 @@ Pick an open issue labelled `area:oracle`, claim it, branch off
 
 ### Aggregator image runbook
 
-Build the production aggregator image from the `oracle/` directory. The
-Dockerfile lives under `src/aggregator/` so the build context can still
-include `package-lock.json`, `tsconfig.json`, and the full source tree.
+Build the production aggregator image from the repository root. The
+Dockerfile remains under `oracle/src/aggregator/`, but the root build context
+is required because the oracle imports the `@ipredict/shared` workspace.
 
 ```bash
-cd oracle
-docker build -f src/aggregator/Dockerfile -t ipredict-oracle-aggregator:local .
+docker build -f oracle/src/aggregator/Dockerfile -t ipredict-oracle-aggregator:local .
 ```
+
+The image runs as the non-root `aggregator` user. Its Docker healthcheck calls
+`/health/ready` on `HEALTH_PORT` (9103 by default), so a stale poll loop or an
+unready DB/RPC dependency marks the container unhealthy; Prometheus metrics
+remain on port 9102.
 
 Run the image with the same environment variables documented in
 `oracle/.env.example`.

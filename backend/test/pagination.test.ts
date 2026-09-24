@@ -34,11 +34,14 @@ describe("parsePagination — valid input", () => {
     expect(parsePagination({ limit: 25, offset: 0 })).toEqual({ limit: 25, offset: 0 });
   });
 
-  it("clamps an over-large limit to maxLimit but leaves offset unbounded", () => {
-    expect(parsePagination({ limit: "1000", offset: "1000000" })).toEqual({
+  it("clamps an over-large limit and rejects an offset beyond the global maximum", () => {
+    expect(parsePagination({ limit: "1000", offset: "10000" })).toEqual({
       limit: 100,
-      offset: 1_000_000,
+      offset: 10_000,
     });
+    expect(() => parsePagination({ limit: "1000", offset: "1000000" })).toThrow(
+      "Use cursor-based pagination for deeper results",
+    );
   });
 
   it("truncates fractional values (parseInt semantics)", () => {
@@ -81,20 +84,16 @@ describe("parsePagination — edge cases (issue #242)", () => {
     expect(parsePagination({ offset: "0" }).offset).toBe(0);
   });
 
-  it("clamps a huge but finite numeric string; offset stays a positive number", () => {
-    const huge = `1${"0".repeat(20)}`; // 1e20 — well past MAX_SAFE_INTEGER, still finite
-    const result = parsePagination({ limit: huge, offset: huge });
-    expect(result.limit).toBe(100); // clamped to maxLimit
-    expect(result.offset).toBe(1e20);
+  it("clamps a huge limit but rejects a huge offset", () => {
+    const huge = `1${"0".repeat(20)}`;
+    expect(parsePagination({ limit: huge }).limit).toBe(100);
+    expect(() => parsePagination({ offset: huge })).toThrow("exceeds the maximum");
   });
 
-  it("documents the parseInt overflow: a digit string past Number.MAX_VALUE yields Infinity", () => {
-    // parseInt of a ~400-digit string overflows to Infinity, which passes the
-    // `> 0` / `>= 0` guards. A caller wanting a hard cap on offset would need
-    // its own bound — flagged here so a future change is a deliberate one.
+  it("rejects an overflowing offset while still clamping an overflowing limit", () => {
     const overflow = "9".repeat(400);
-    expect(parsePagination({ limit: overflow }).limit).toBe(100); // Math.min(Infinity, 100)
-    expect(parsePagination({ offset: overflow }).offset).toBe(Number.POSITIVE_INFINITY);
+    expect(parsePagination({ limit: overflow }).limit).toBe(100);
+    expect(() => parsePagination({ offset: overflow })).toThrow("exceeds the maximum");
   });
 
   it("handles Infinity / NaN number inputs by falling back", () => {

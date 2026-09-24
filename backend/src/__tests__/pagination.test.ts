@@ -96,10 +96,15 @@ describe("Pagination Helper", () => {
       expect(parsePagination({ limit: Number.MAX_SAFE_INTEGER }).limit).toBe(100);
     });
 
-    it("accepts very large offset values", () => {
+    it("rejects offsets above the global maximum", () => {
       expect(parsePagination({ offset: "1000" }).offset).toBe(1000);
-      expect(parsePagination({ offset: "999999" }).offset).toBe(999999);
-      expect(parsePagination({ offset: Number.MAX_SAFE_INTEGER }).offset).toBe(Number.MAX_SAFE_INTEGER);
+      expect(parsePagination({ offset: "10000" }).offset).toBe(10000);
+      expect(() => parsePagination({ offset: "10001" })).toThrow(
+        "Use cursor-based pagination for deeper results",
+      );
+      expect(() => parsePagination({ offset: Number.MAX_SAFE_INTEGER })).toThrow(
+        "exceeds the maximum",
+      );
     });
 
     // Missing values

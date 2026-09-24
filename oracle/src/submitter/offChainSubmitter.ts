@@ -121,7 +121,7 @@ export class OffChainSubmitterService {
       "submit_outcome",
       new Address(caller).toScVal(),
       nativeToScVal(BigInt(marketId), { type: "u64" }),
-      nativeToScVal(outcome, { type: "bool" }),
+      nativeToScVal(outcome),
       nativeToScVal(bond, { type: "i128" }),
     );
 

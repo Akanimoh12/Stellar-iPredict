@@ -765,3 +765,59 @@ describe("correlation ids across the finalization path (#467)", () => {
     expect(attempt.every((l) => l.marketId === "201")).toBe(true);
   });
 });
+
+describe("aggregator graceful shutdown drain", () => {
+  it("lets the in-flight market finish after shutdown and starts no new market", async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    const inFlight = new Promise<void>((resolve) => { release = resolve; });
+    const processMarket = vi.fn(async (market: AggregatorMarket) => {
+      if (market.id === "one") await inFlight;
+    });
+    const dependencies: AggregatorDependencies = {
+      connect: vi.fn(async () => undefined),
+      listExpiredUnresolvedMarkets: vi.fn(async () => [
+        { id: "one", cancelled: false },
+        { id: "two", cancelled: false },
+      ]),
+      processMarket,
+      close: vi.fn(async () => undefined),
+    };
+
+    const run = runAggregator(dependencies, {
+      signal: controller.signal,
+      pollIntervalMs: 1,
+      shutdownGraceMs: 100,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    await run;
+
+    expect(processMarket).toHaveBeenCalledTimes(1);
+    expect(processMarket.mock.calls[0][0]).toMatchObject({ id: "one" });
+    expect(dependencies.close).toHaveBeenCalledOnce();
+  });
+
+  it("stops waiting after the configured shutdown grace period", async () => {
+    const controller = new AbortController();
+    const dependencies: AggregatorDependencies = {
+      connect: vi.fn(async () => undefined),
+      listExpiredUnresolvedMarkets: vi.fn(async () => [{ id: "stuck", cancelled: false }]),
+      processMarket: vi.fn(() => new Promise<void>(() => undefined)),
+      close: vi.fn(async () => undefined),
+    };
+
+    const run = runAggregator(dependencies, {
+      signal: controller.signal,
+      pollIntervalMs: 1,
+      shutdownGraceMs: 10,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+    await run;
+
+    expect(dependencies.close).toHaveBeenCalledOnce();
+  });
+});

@@ -6,10 +6,14 @@ import { getLeaderboard, getLeaderboardTotal } from "../db/leaderboard.js";
 import { getOrSet } from "../cache/cacheAside.js";
 import { cacheKey, CACHE_TTLS } from "../cache/cacheKeys.js";
 import { cacheControlPublic } from "../cache/cacheControl.js";
+import { MAX_PAGINATION_LIMIT, MAX_PAGINATION_OFFSET } from "../lib/pagination.js";
 
 const leaderboardQuerySchema = z.object({
-  offset: z.coerce.number().int().min(0).default(0),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).max(
+    MAX_PAGINATION_OFFSET,
+    `offset must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results`,
+  ).default(0),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGINATION_LIMIT).default(20),
   sort: z.enum(["points", "bets"]).default("points"),
 });
 
@@ -86,8 +90,8 @@ export function registerLeaderboardRoutes(
         querystring: {
           type: "object",
           properties: {
-            offset: { type: "integer", minimum: 0, description: "Pagination offset" },
-            limit: { type: "integer", minimum: 1, maximum: 100, description: "Page size" },
+            offset: { type: "integer", minimum: 0, description: `Pagination offset (maximum ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results)` },
+            limit: { type: "integer", minimum: 1, maximum: MAX_PAGINATION_LIMIT, description: `Page size (maximum ${MAX_PAGINATION_LIMIT})` },
             sort: { type: "string", enum: ["points", "bets"], description: "Sort field" },
           },
         },
@@ -127,7 +131,9 @@ export function registerLeaderboardRoutes(
       if (!parsed.success) {
         return reply.status(400).send({
           code: "BAD_REQUEST",
-          message: "Invalid leaderboard query parameters",
+          message:
+            parsed.error.issues[0]?.message ??
+            "Invalid leaderboard query parameters",
           issues: parsed.error.issues,
         });
       }

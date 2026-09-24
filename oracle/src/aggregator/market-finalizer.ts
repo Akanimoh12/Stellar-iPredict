@@ -31,7 +31,7 @@ export class MarketAlreadyFinalizedError extends Error {
 }
 
 function boolVal(value: boolean): xdr.ScVal {
-  return nativeToScVal(value, { type: "bool" });
+  return nativeToScVal(value);
 }
 
 function u64Val(value: number | bigint): xdr.ScVal {
@@ -201,6 +201,7 @@ export async function finalizeMarketDecision(
   networkPassphrase: string = Networks.TESTNET,
   notifierOptions?: FinalizeNotifierOptions,
   onCommitted?: (finalizedAt: Date) => void,
+  trace?: FinalizeTrace,
 ): Promise<string> {
   const txHash = await submitResolutionTransaction(
     server,

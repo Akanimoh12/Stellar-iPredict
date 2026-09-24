@@ -30,8 +30,8 @@ name: ipredict
 # Compose builds it once because the `image:` tag matches.
 x-oracle-image: &oracle-image
   build:
-    context: ../oracle
-    dockerfile: src/aggregator/Dockerfile
+    context: ..
+    dockerfile: oracle/src/aggregator/Dockerfile
   image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-oracle:${ORACLE_IMAGE_TAG:-local}"
 
 x-logging: &logging

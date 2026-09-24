@@ -115,7 +115,7 @@ export class CoinGeckoAdapter implements DataAdapter {
       const body = (await response.json()) as CoinGeckoPriceResponse;
       raw = body;
 
-      const coinData = body[symbol];
+      const coinData = (body as CoinGeckoPriceResponse)[symbol];
       if (!coinData) {
         throw new Error(`CoinGeckoAdapter received no data for symbol ${symbol}`);
       }

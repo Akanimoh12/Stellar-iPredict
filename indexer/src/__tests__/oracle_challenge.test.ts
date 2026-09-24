@@ -132,7 +132,9 @@ describe("handleOracleEscalatedEvent", () => {
     expect(db.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("WHERE market_id = $1 AND status = 'challenged'"),
-      [42, "3000000000", new Date(1_700_000_000_000), new Date(1_700_259_200_000)],
+      // total_bond is a GENERATED column (submitter_bond + challenger_bond,
+      // migration 0015) and is therefore never written by the handler.
+      [42, new Date(1_700_000_000_000), new Date(1_700_259_200_000)],
     );
   });
 

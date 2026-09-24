@@ -465,6 +465,37 @@ describe("Integration: GET /api/markets/:id/odds", () => {
     });
   });
 
+  it("handles amounts exceeding Number.MAX_SAFE_INTEGER without precision loss (Issue #487)", async () => {
+    // Both total_yes and total_no exceed Number.MAX_SAFE_INTEGER
+    const market = makeMarketRow({
+      id: 12,
+      total_yes: "10000000000000000.0000000",
+      total_no: "30000000000000000.0000000",
+    });
+    const queryMock = vi.fn().mockResolvedValue({ rows: [market] });
+    const server = await buildTestServer({ query: queryMock });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/markets/12/odds",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body).toEqual({
+      market_id: 12,
+      total_yes: "10000000000000000.0000000",
+      total_no: "30000000000000000.0000000",
+      total_pool: "40000000000000000.0000000",
+      yes_odds: 0.25,
+      no_odds: 0.75,
+      implied_probability: {
+        yes: 0.25,
+        no: 0.75,
+      },
+    });
+  });
+
   it("returns 404 for non-existent market", async () => {
     const queryMock = vi.fn().mockResolvedValue({ rows: [] });
     const server = await buildTestServer({ query: queryMock });

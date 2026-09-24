@@ -173,7 +173,7 @@ describe("backend smoke test", () => {
         server.inject({
           method: "POST",
           url: "/api/oracle/submit",
-          headers: { authorization: "Bearer test-oracle-api-key" },
+          headers: { authorization: `Bearer ${process.env.ORACLE_API_KEY ?? "test-oracle-secret-key-123"}` },
           payload: {
             marketId: 1,
             outcome: true,

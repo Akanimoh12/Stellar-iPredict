@@ -3,6 +3,49 @@ import { config } from "./config/index.js";
 import { pool } from "./db.js";
 import { insertProcessedEvent } from "./handlers/idempotency.js";
 
+/**
+ * Backfill as a recovery path.
+ *
+ * Most database state (markets, bets, resolutions) derives from on-chain events
+ * and can be rebuilt by replaying them with `runBackfill()`. This is the
+ * **secondary** recovery path — the primary one is restoring a database backup
+ * (see `docs/DEPLOYMENT-GUIDE.md` § "Backup verification" and § "Disaster
+ * recovery").
+ *
+ * The hard limit is RPC event retention: `getEvents` only serves events for a
+ * bounded window (see `START_LEDGER` / the provider's retention). State older
+ * than that window is **not** reconstructible from chain — for that data the
+ * backup is load-bearing. `getBackfillCoverage()` reports where that boundary
+ * currently sits for a given database.
+ */
+export interface BackfillCoverage {
+  earliestLedger: number | null;
+  latestLedger: number | null;
+  eventCount: number;
+  /** Distinct markets seen in the events table. */
+  marketCount: number;
+}
+
+export async function getBackfillCoverage(
+  db: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: any[] }> } = pool,
+): Promise<BackfillCoverage> {
+  const { rows } = await db.query(
+    `SELECT
+       MIN(ledger_seq)::bigint          AS earliest,
+       MAX(ledger_seq)::bigint          AS latest,
+       COUNT(*)::bigint                 AS events,
+       COUNT(DISTINCT market_id)::bigint AS markets
+     FROM events`,
+  );
+  const r = rows[0] ?? {};
+  return {
+    earliestLedger: r.earliest === null || r.earliest === undefined ? null : Number(r.earliest),
+    latestLedger: r.latest === null || r.latest === undefined ? null : Number(r.latest),
+    eventCount: Number(r.events ?? 0),
+    marketCount: Number(r.markets ?? 0),
+  };
+}
+
 // Helper to detect 429 Rate Limit error
 export function isRateLimitError(err: any): boolean {
   if (!err) return false;
@@ -33,13 +76,13 @@ export async function fetchWithRetry<T>(
 // Ensure the dead-letter table exists
 async function ensureDeadLetterTable(): Promise<void> {
   await pool.query(
-    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPZ NOT NULL DEFAULT NOWO()\n    )`
+    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n    )`
   );
 }
 
 // Insert a decoding failure into the dead-letter table
 async function insertDeadLetterEvent(
-  event: rpc.Api.Event,
+  event: rpc.Api.EventResponse,
   eventIndex: number,
   err: any
 ): Promise<void> {
@@ -47,7 +90,7 @@ async function insertDeadLetterEvent(
     const topic_b64 = event.topic.map((t: any) => t.toXDR("base64"));
     const value_b64 = event.value.toXDR("base64");
     await pool.query(
-      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4::pgostges,$UN$(migration)),
+      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4,$5,$6)`,
       [
         event.ledger,
         event.txHash,
@@ -132,7 +175,7 @@ export async function runBackfill(): Promise<number> {
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
   console.log(`[backfill] Fetching current network head ledger...`);
-  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () {
+  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
     return await server.getLatestLedger();
   });
   const headLedger = latestLedgerResponse.sequence;
@@ -161,7 +204,7 @@ export async function runBackfill(): Promise<number> {
       `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
     );
 
-    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>Async (): Promise<rpc.Api.GetEventsResponse> {
+    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
       return await server.getEvents(request);
     });
     const events = response.events || [];

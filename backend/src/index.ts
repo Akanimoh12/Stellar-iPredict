@@ -5,6 +5,7 @@
  */
 
 import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
+import { loadConfig } from "./config/index.js";
 import { startServer } from "./server.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -17,6 +18,12 @@ async function main(): Promise<void> {
   // never names or values.
   const secrets = await loadSecrets();
   console.info(`[ipredict-backend] secrets: ${summariseSecretsLoad(secrets)}`);
+
+  // Validate configuration eagerly at startup so a misconfigured server fails
+  // fast with a clear error. The `config` module itself is lazy (it must not
+  // throw on import so test files that never touch the database can load);
+  // this call surfaces config errors before the listener opens.
+  loadConfig();
 
   await startServer({ port: PORT, host: HOST });
 }

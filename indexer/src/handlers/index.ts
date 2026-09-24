@@ -3,6 +3,7 @@ import { handleFeeWithdrawn, FEES_WITHDRAWN_TOPIC } from "./fee_withdrawn.js";
 import { handleOracleSubmission, ORACLE_SUBMISSION_TOPIC } from "./oracle_submission.js";
 import { handleRewardPoints, REWARD_POINTS_TOPIC } from "./reward_points.js";
 import { handleTokenMint, TOKEN_MINT_TOPIC } from "./token_mint.js";
+import { handleTokenTransfer, TOKEN_TRANSFER_TOPIC } from "./token.js";
 import type { DecodedEvent, EventHandler, HandlerContext } from "./types.js";
 
 export const eventHandlers = {
@@ -11,6 +12,7 @@ export const eventHandlers = {
   [ORACLE_SUBMISSION_TOPIC]: handleOracleSubmission,
   [REWARD_POINTS_TOPIC]: handleRewardPoints,
   [TOKEN_MINT_TOPIC]: handleTokenMint,
+  [TOKEN_TRANSFER_TOPIC]: handleTokenTransfer,
 } satisfies Record<string, EventHandler>;
 
 export type EventTopic = keyof typeof eventHandlers;
@@ -47,3 +49,4 @@ export { decodeFeeWithdrawn, handleFeeWithdrawn, FEES_WITHDRAWN_TOPIC } from "./
 export { decodeOracleSubmission, handleOracleSubmission, ORACLE_SUBMISSION_TOPIC } from "./oracle_submission.js";
 export { decodeRewardPoints, handleRewardPoints, REWARD_POINTS_TOPIC } from "./reward_points.js";
 export { decodeTokenMint, handleTokenMint, TOKEN_MINT_TOPIC } from "./token_mint.js";
+export { decodeTokenTransfer, handleTokenTransfer, TOKEN_TRANSFER_TOPIC } from "./token.js";

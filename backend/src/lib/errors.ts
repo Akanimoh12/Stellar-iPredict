@@ -1,7 +1,9 @@
+import { REQUEST_ID_HEADER } from "./log.js";
+
 export interface FastifyErrorLike extends Error { statusCode?: number; code?: string }
 export interface FastifyReplyLike { status(code: number): FastifyReplyLike; header(name: string, value: string): FastifyReplyLike; send(payload: unknown): unknown }
 export interface FastifyInstanceLike { setErrorHandler(handler: typeof errorHandler): void }
-export interface FastifyRequestLike { method: string; url: string }
+export interface FastifyRequestLike { method: string; url: string; id?: string }
 
 export class HttpError extends Error {
   constructor(public readonly statusCode: number, public readonly code: string, message: string) {
@@ -15,16 +17,33 @@ export const unauthorized = (message = "Unauthorized") => new HttpError(401, "UN
 export const forbidden = (message = "Forbidden") => new HttpError(403, "FORBIDDEN", message);
 export const notFound = (message = "Not found") => new HttpError(404, "NOT_FOUND", message);
 export const methodNotAllowed = (message = "Method not allowed") => new HttpError(405, "METHOD_NOT_ALLOWED", message);
+export const requestTimeout = (message = "Request timeout") => new HttpError(408, "REQUEST_TIMEOUT", message);
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
+export const payloadTooLarge = (message = "Payload too large") => new HttpError(413, "PAYLOAD_TOO_LARGE", message);
 
-export interface ErrorResponse { error: { code: string; message: string } }
+export interface ErrorResponse { error: { code: string; message: string; requestId: string } }
 
-function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: string; message: string } {
+const DEPENDENCY_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004", "08006", "08007", "57P01"]);
+export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolean {
+  const code = (error as FastifyErrorLike).code;
+  return typeof code === "string" && DEPENDENCY_CODES.has(code.toUpperCase());
+}
+
+export function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: string; message: string } {
   if (error instanceof HttpError) return { statusCode: error.statusCode, code: error.code, message: error.message };
+  if (isDependencyUnavailable(error)) return { statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" };
   const maybeStatus = (error as FastifyErrorLike).statusCode;
+  const rawCode = (error as FastifyErrorLike).code;
+
+  if (rawCode === "FST_ERR_CTP_BODY_TOO_LARGE" || maybeStatus === 413) {
+    return { statusCode: 413, code: "PAYLOAD_TOO_LARGE", message: error.message || "Payload too large" };
+  }
+  if (rawCode === "FST_ERR_REQ_TIMEOUT" || maybeStatus === 408) {
+    return { statusCode: 408, code: "REQUEST_TIMEOUT", message: error.message || "Request timeout" };
+  }
+
   const statusCode = typeof maybeStatus === "number" && maybeStatus >= 400 && maybeStatus < 500 ? maybeStatus : 500;
   if (statusCode < 500) {
-    const rawCode = (error as FastifyErrorLike).code;
     const code = rawCode === "FST_ERR_VALIDATION" ? "BAD_REQUEST" : (rawCode ?? "BAD_REQUEST");
     return { statusCode, code, message: error.message || "Request failed" };
   }
@@ -32,9 +51,12 @@ function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: 
 }
 
 
-export function errorHandler(error: FastifyErrorLike, _request: FastifyRequestLike, reply: FastifyReplyLike): void {
+export function errorHandler(error: FastifyErrorLike, request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);
-  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message } } satisfies ErrorResponse);
+  const requestId = request.id ?? "unknown";
+  if (mapped.statusCode === 503) reply.header("Retry-After", "5");
+  reply.header(REQUEST_ID_HEADER, requestId);
+  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message, requestId } } satisfies ErrorResponse);
 }
 
 export function registerErrorHandler(app: FastifyInstanceLike): void {

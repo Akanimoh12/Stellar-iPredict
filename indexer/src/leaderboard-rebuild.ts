@@ -16,6 +16,21 @@
  * - Truncates the leaderboard table (or upserts on conflict)
  * - Logs progress and completion with structured JSON
  * - Handles errors gracefully — logs and continues per user, never crashes indexer
+ *
+ * ## Role in disaster recovery (issue #648)
+ *
+ * The `leaderboard` table is **fully reconstructible** from the `events` table:
+ * it is a pure fold over events and holds no independent state. Recovery order
+ * after a total loss:
+ *
+ *   1. `indexer … --backfill`  — repopulate `events` (+ markets/bets) from chain,
+ *      bounded by RPC event retention (`getBackfillCoverage()` in backfill.ts).
+ *   2. `npm run rebuild:leaderboard`  — this job, folding `events` → `leaderboard`.
+ *
+ * `rebuildLeaderboardTable()` returns `durationMs` so a DR drill can record how
+ * long step 2 takes. The full reconstructible/not-reconstructible inventory and
+ * the end-to-end procedure live in `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+ * recovery".
  */
 
 export interface EventLogRow {
@@ -39,6 +54,13 @@ export interface LeaderboardSnapshot {
   players: LeaderboardRow[];
   eventCount: number;
   lastLedgerSeq: number | null;
+  /**
+   * Wall-clock ms for the rebuild. Set by `rebuildLeaderboardTable()` (not by
+   * the pure `buildLeaderboardSnapshot()`). Feeds the measured rebuild time in
+   * the disaster-recovery plan — see `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+   * recovery".
+   */
+  durationMs?: number;
 }
 
 export interface Queryable {
@@ -302,10 +324,24 @@ export function buildLeaderboardSnapshot(events: EventLogRow[]): LeaderboardSnap
   };
 }
 
+/**
+ * Calculate the maximum number of rows per batch, accounting for Postgres's
+ * 65535 parameter limit and the number of columns per row.
+ *
+ * @param columnsPerRow Number of columns in each row
+ * @param safetyMargin Number of parameters to reserve as buffer (default 10)
+ * @returns Maximum rows that can be inserted in a single statement
+ */
+function calculateRowsPerBatch(columnsPerRow: number, safetyMargin = 10): number {
+  const MAX_PARAMS = 65535;
+  return Math.floor((MAX_PARAMS - safetyMargin) / columnsPerRow);
+}
+
 export async function rebuildLeaderboardTable(
   db: Queryable,
   options: RebuildOptions = {}
 ): Promise<LeaderboardSnapshot> {
+  const startedAt = Date.now();
   const queryParts = [
     "SELECT id, ledger_seq, event_type, market_id, actor, payload",
     "FROM events",
@@ -332,41 +368,59 @@ export async function rebuildLeaderboardTable(
 
   const snapshot = buildLeaderboardSnapshot(events);
   if (options.dryRun) {
-    return snapshot;
+    return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
   await db.query("DELETE FROM leaderboard");
 
   if (snapshot.players.length === 0) {
-    return snapshot;
+    return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
-  const values: unknown[] = [];
-  const placeholders = snapshot.players.map((player, index) => {
-    const offset = index * 5;
-    values.push(
-      player.address,
-      player.displayName || null,
-      player.points,
-      player.wonBets,
-      player.lostBets
-    );
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
-  });
+  // Start transaction for atomic rebuild
+  await db.query("BEGIN");
 
-  await db.query(
-    [
-      "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
-      `VALUES ${placeholders.join(", ")}`,
-      "ON CONFLICT (address) DO UPDATE SET",
-      "  display_name = EXCLUDED.display_name,",
-      "  points = EXCLUDED.points,",
-      "  won_bets = EXCLUDED.won_bets,",
-      "  lost_bets = EXCLUDED.lost_bets,",
-      "  updated_at = NOW()",
-    ].join(" "),
-    values
-  );
+  try {
+    const COLUMNS_PER_ROW = 5; // address, display_name, points, won_bets, lost_bets
+    const rowsPerBatch = calculateRowsPerBatch(COLUMNS_PER_ROW);
 
-  return snapshot;
+    // Process players in batches
+    for (let i = 0; i < snapshot.players.length; i += rowsPerBatch) {
+      const batch = snapshot.players.slice(i, Math.min(i + rowsPerBatch, snapshot.players.length));
+
+      const values: unknown[] = [];
+      const placeholders = batch.map((player, index) => {
+        const offset = index * COLUMNS_PER_ROW;
+        values.push(
+          player.address,
+          player.displayName || null,
+          player.points,
+          player.wonBets,
+          player.lostBets
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
+      });
+
+      await db.query(
+        [
+          "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
+          `VALUES ${placeholders.join(", ")}`,
+          "ON CONFLICT (address) DO UPDATE SET",
+          "  display_name = EXCLUDED.display_name,",
+          "  points = EXCLUDED.points,",
+          "  won_bets = EXCLUDED.won_bets,",
+          "  lost_bets = EXCLUDED.lost_bets,",
+          "  updated_at = NOW()",
+        ].join(" "),
+        values
+      );
+    }
+
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  }
+
+  return { ...snapshot, durationMs: Date.now() - startedAt };
 }

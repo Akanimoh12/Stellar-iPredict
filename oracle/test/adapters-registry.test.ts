@@ -58,4 +58,18 @@ describe("AdapterRegistry", () => {
 
     expect(registry.list()).toEqual([binance, cmc]);
   });
+
+  it("prioritizes adapters matching market metadata tags", () => {
+    const registry = new AdapterRegistry();
+    const binance = createStubAdapter("binance", "crypto");
+    const cmc = { ...createStubAdapter("coinmarketcap", "crypto"), tags: ["cmc-custom"] };
+    registry.register(binance);
+    registry.register(cmc);
+
+    const marketWithIdTag = createMarket({ tags: ["coinmarketcap"] });
+    expect(registry.adaptersFor(marketWithIdTag).map((a) => a.id)).toEqual(["coinmarketcap", "binance"]);
+
+    const marketWithCustomTag = createMarket({ tags: ["cmc-custom"] });
+    expect(registry.adaptersFor(marketWithCustomTag).map((a) => a.id)).toEqual(["coinmarketcap", "binance"]);
+  });
 });

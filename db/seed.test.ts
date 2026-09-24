@@ -21,9 +21,14 @@ describe("runSeed", () => {
     expect(allSql).toContain("CREATE TABLE IF NOT EXISTS markets");
     expect(allSql).toContain("CREATE TABLE IF NOT EXISTS bets");
     expect(allSql).toContain("CREATE TABLE IF NOT EXISTS leaderboard");
+    expect(allSql).toContain("CREATE TABLE IF NOT EXISTS oracle_submissions");
+    expect(allSql).toContain("CREATE TABLE IF NOT EXISTS oracle_disputes");
+    expect(allSql).toContain("CREATE TABLE IF NOT EXISTS council_votes");
     expect(allSql).toContain("ON CONFLICT (id) DO UPDATE");
     expect(allSql).toContain("ON CONFLICT (market_id, bettor) DO UPDATE");
     expect(allSql).toContain("ON CONFLICT (address) DO UPDATE");
+    expect(allSql).toContain("ON CONFLICT (market_id) DO UPDATE");
+    expect(allSql).toContain("ON CONFLICT (market_id, member) DO UPDATE");
   });
 
   it("rolls back on error", async () => {

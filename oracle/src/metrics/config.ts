@@ -24,7 +24,7 @@ const booleanish = z.preprocess((value) => {
   if (["1", "true", "yes", "on"].includes(normalised)) return true;
   if (["0", "false", "no", "off"].includes(normalised)) return false;
   return normalised;
-}, z.boolean());
+}, z.boolean().default(true));
 
 const schema = z.object({
   /** Set to false to run the aggregator with no HTTP listener at all. */

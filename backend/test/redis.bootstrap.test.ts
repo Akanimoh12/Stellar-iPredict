@@ -161,8 +161,9 @@ describe("FakeRedis bootstrap", () => {
 
   it("keeps the app bootable when connected through buildServer", async () => {
     const { buildServer } = await import("../src/server.js");
+    const { createFakePool } = await import("../src/test/fakePool.js");
     const redis = fresh();
-    const server = buildServer({ corsOrigins: [], logger: false, redis: redis as never });
+    const server = buildServer({ corsOrigins: [], logger: false, redis: redis as never, pool: createFakePool() });
     try {
       await server.ready();
       const res = await server.inject({ method: "GET", url: "/healthz" });

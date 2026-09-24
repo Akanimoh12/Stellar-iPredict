@@ -25,6 +25,50 @@ function leaderboardQueryKey(
   return cacheKey("leaderboard", `${sort}:${limit}:${offset}`);
 }
 
+const leaderboardResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    players: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          address: { type: "string" },
+          display_name: { type: ["string", "null"] },
+          points: { type: "string" },
+          won_bets: { type: "number" },
+          lost_bets: { type: "number" },
+          updated_at: { type: "string" },
+        },
+        required: [
+          "address",
+          "display_name",
+          "points",
+          "won_bets",
+          "lost_bets",
+          "updated_at",
+        ],
+      },
+    },
+    total: { type: "number" },
+  },
+  required: ["players", "total"],
+} as const;
+
+const leaderboardErrorResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    code: { type: "string" },
+    message: { type: "string" },
+    issues: { type: "array" },
+    requestId: { type: "string" },
+  },
+  required: ["code", "message", "requestId"],
+} as const;
+
 export function registerLeaderboardRoutes(
   server: FastifyInstance,
   pool: Pool,

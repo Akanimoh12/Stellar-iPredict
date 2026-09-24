@@ -51,16 +51,9 @@ Secret handling rules (enforced by convention, not by tooling):
   (`pendingKeys`) so in-flight transactions signed with it still land, then
   `revokePending()` once the transition is confirmed complete.
 
-### Known gap: `ORACLE_API_KEY` has an insecure default
+### `ORACLE_API_KEY` Authentication
 
-`backend/src/api/oracle.ts` falls back to the literal string
-`"test-oracle-api-key"` when `ORACLE_API_KEY` is unset. In production this
-means the oracle submission endpoint is either correctly guarded by a real
-key, or — if the operator forgets to set it — guarded by a publicly-known
-constant, not disabled. This is why `ORACLE_API_KEY` is one of the compose
-`${VAR:?message}` required variables (see
-[`BACKEND_DEPLOYMENT.md`](BACKEND_DEPLOYMENT.md#step-1-configure-secrets)):
-Compose refuses to start rather than silently accepting the default.
+`backend/src/api/oracle.ts` strictly validates `ORACLE_API_KEY` at startup via Zod schema and runtime checks, failing closed when the variable is unset. Oracle submissions are rejected unless authenticated by a valid key. `ORACLE_API_KEY` is configured as a required variable in configuration and compose.
 
 ## Bond mechanics (economic security)
 

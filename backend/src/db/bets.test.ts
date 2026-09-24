@@ -47,4 +47,27 @@ describe('getBetsByBettor', () => {
     // Verify the returned shapes exactly match
     expect(result).toEqual(mockRows);
   });
+
+  it('preserves exact string amounts larger than Number.MAX_SAFE_INTEGER without precision loss', async () => {
+    const hugeAmountStr = '10000000000000000000.1234567';
+    const mockRow: BetRow = {
+      market_id: '99',
+      bettor: 'GBETTOR_LARGE_INTEGER_ADDRESS',
+      net_amount: hugeAmountStr,
+      gross_amount: hugeAmountStr,
+      is_yes: true,
+      claimed: false,
+      created_at: new Date(),
+    };
+
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [mockRow] })
+    } as unknown as Pool;
+
+    const result = await getBetsByBettor(mockPool, 'GBETTOR_LARGE_INTEGER_ADDRESS');
+    expect(result[0].net_amount).toBe(hugeAmountStr);
+    expect(result[0].gross_amount).toBe(hugeAmountStr);
+    expect(typeof result[0].net_amount).toBe('string');
+  });
 });
+

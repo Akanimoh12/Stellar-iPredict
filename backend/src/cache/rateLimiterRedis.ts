@@ -18,7 +18,14 @@
 
 import type { Redis } from "ioredis";
 import { cacheKey } from "./cacheKeys.js";
-import type { RateLimitResult, RateLimitStore } from "./rateLimiter.js";
+import { SlidingWindowStore, type RateLimitResult, type RateLimitStore } from "./rateLimiter.js";
+
+export type RedisFailurePolicy = "fallback" | "closed" | "open";
+export interface RedisSlidingWindowStoreOptions {
+  failurePolicy?: RedisFailurePolicy;
+  fallbackStore?: SlidingWindowStore;
+  onDegraded?: (error: unknown) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Lua script
@@ -103,9 +110,16 @@ const RATE_LIMIT_ENTITY = "ratelimit";
  */
 export class RedisSlidingWindowStore implements RateLimitStore {
   private readonly redis: Redis;
+  private readonly failurePolicy: RedisFailurePolicy;
+  private readonly fallbackStore: SlidingWindowStore;
+  private readonly onDegraded: (error: unknown) => void;
+  private degraded = false;
 
-  constructor(redis: Redis) {
+  constructor(redis: Redis, options: RedisSlidingWindowStoreOptions = {}) {
     this.redis = redis;
+    this.failurePolicy = options.failurePolicy ?? "fallback";
+    this.fallbackStore = options.fallbackStore ?? new SlidingWindowStore();
+    this.onDegraded = options.onDegraded ?? ((error) => console.warn("[rate-limit] Redis unavailable", error));
   }
 
   /**
@@ -134,21 +148,15 @@ export class RedisSlidingWindowStore implements RateLimitStore {
     const redisKey = cacheKey(RATE_LIMIT_ENTITY, key);
 
     // ioredis returns the Lua array as an array of numbers.
-    const result = (await this.redis.eval(
-      SLIDING_WINDOW_SCRIPT,
-      1,
-      redisKey,
-      now,
-      windowMs,
-      limit,
-      member
-    )) as [number, number, number];
-
-    return {
-      allowed: result[0] === 1,
-      remaining: result[1],
-      resetMs: result[2],
-    };
+    try {
+      const result = (await this.redis.eval(SLIDING_WINDOW_SCRIPT, 1, redisKey, now, windowMs, limit, member)) as [number, number, number];
+      return { allowed: result[0] === 1, remaining: result[1], resetMs: result[2] };
+    } catch (error) {
+      if (!this.degraded) { this.degraded = true; this.onDegraded(error); }
+      if (this.failurePolicy === "closed") return { allowed: false, remaining: 0, resetMs: 1_000 };
+      if (this.failurePolicy === "open") return { allowed: true, remaining: limit, resetMs: windowMs };
+      return this.fallbackStore.increment(key, limit, windowSec);
+    }
   }
 
   /**
@@ -157,6 +165,6 @@ export class RedisSlidingWindowStore implements RateLimitStore {
    * in `db/redis.ts`.
    */
   async destroy(): Promise<void> {
-    // intentionally empty
+    this.fallbackStore.destroy();
   }
 }

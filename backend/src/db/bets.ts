@@ -1,13 +1,16 @@
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import type { BetRow } from "./types.js";
 import type { Queryable } from "./markets.js";
+
+// Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
+types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** A single bet placed by a user on a market (in-memory store shape). */
 export interface Bet {
   address: string;
-  amount: number;
+  amount: number | string;
   isYes: boolean;
   claimed: boolean;
 }

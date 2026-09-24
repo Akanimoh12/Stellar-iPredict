@@ -2,6 +2,47 @@ import { computeTally, type MarketTally, type QueryablePool } from "./tally.js";
 import type { CouncilVote } from "./threshold.js";
 
 /**
+ * Retention policy for council audit data (issue #646).
+ *
+ * Council votes, finalized `oracle_submissions` and `oracle_disputes` are
+ * **audit-class**, not operational: they are the record of how a market
+ * resolved and who decided it. A dispute or legal inquiry about a resolution
+ * can surface long after the event, so this window is set deliberately long
+ * and independently of the operational purge — `enforce_data_retention()`
+ * never touches these tables.
+ *
+ * `RETENTION_YEARS` is a placeholder for a legal/compliance decision; bump it
+ * there, not by ad-hoc deletion. The canonical policy lives in
+ * `db/migrations/0018_data_retention.sql` and docs/DATA-RETENTION.md.
+ */
+export const COUNCIL_AUDIT_RETENTION = {
+  class: "audit" as const,
+  retentionYears: 7,
+  /** Purge is a manual, reviewed operation — there is no automatic job. */
+  automaticEnforcement: false,
+} as const;
+
+/**
+ * Whether an audit record finalized at `finalizedAt` is old enough to be
+ * *eligible* for deletion under the retention window. Even when this returns
+ * `true`, removal is a manual, reviewed step — nothing calls it from a job.
+ * Returns `false` for a missing/invalid timestamp so an unknown record is
+ * never treated as purgeable.
+ */
+export function isCouncilAuditRecordPurgeable(
+  finalizedAt: string | null | undefined,
+  now: Date = new Date(),
+  retentionYears: number = COUNCIL_AUDIT_RETENTION.retentionYears,
+): boolean {
+  if (!finalizedAt) return false;
+  const finalized = new Date(finalizedAt);
+  if (Number.isNaN(finalized.getTime())) return false;
+  const cutoff = new Date(now);
+  cutoff.setFullYear(cutoff.getFullYear() - retentionYears);
+  return finalized < cutoff;
+}
+
+/**
  * A single, self-contained audit record for one finalized market: the council
  * votes that were cast, the derived tally, and the decision that was recorded.
  *

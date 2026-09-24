@@ -184,7 +184,7 @@ describe("db query layer", () => {
 
     const db = makeQueryable(async (sql, values) => {
       if (sql.includes("INSERT INTO oracle_submissions")) {
-        expect(values).toEqual([5, "G" + "E".repeat(55), "yes", "1000"]);
+        expect(values).toEqual([5, "G" + "E".repeat(55), "yes", "1000", null, null]);
         return { rows: [submission] };
       }
 
@@ -203,8 +203,23 @@ describe("db query layer", () => {
   });
 
   it("returns the current global stats snapshot", async () => {
-    await expect(getGlobalStats()).resolves.toEqual({
+    const db = makeQueryable(async (sql) => {
+      expect(sql).toContain("FROM markets");
+      return {
+        rows: [
+          {
+            total_markets: "0",
+            total_volume: "0",
+            total_users: "0",
+            total_bets: "0",
+          },
+        ],
+      };
+    });
+
+    await expect(getGlobalStats(db)).resolves.toEqual({
       totalMarkets: 0,
+      totalVolume: "0",
       volume: 0n,
       totalUsers: 0,
       totalBets: 0,

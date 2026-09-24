@@ -7,9 +7,12 @@ vi.mock("../db/bets.js", () => ({ getBetsByBettor: vi.fn() }));
 vi.mock("../db/pool.js", () => ({ pool: { query: poolQueryMock } }));
 
 import { buildServer } from "../server.js";
+import { createFakePool } from "../test/fakePool.js";
 import {
   RouteTable,
   createNotFoundHandler,
+  errorHandler,
+  mapError,
   normalizePath,
   type FastifyReplyLike,
 } from "./errors.js";
@@ -61,6 +64,66 @@ describe("normalizePath", () => {
 
   it("keeps the root path", () => {
     expect(normalizePath("/")).toBe("/");
+  });
+});
+
+describe("dependency errors", () => {
+  it("maps driver connection failures to 503 without leaking details", () => {
+    const mapped = mapError(Object.assign(new Error("password=secret host=db"), { code: "ECONNREFUSED" }));
+    expect(mapped).toEqual({ statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" });
+  });
+
+  it("adds Retry-After to dependency failures", () => {
+    const reply = makeReply();
+    errorHandler(Object.assign(new Error("db details"), { code: "57P01" }), { method: "GET", url: "/", id: "req-1" }, reply);
+    expect(reply.statusCode).toBe(503);
+    expect(reply.headers["Retry-After"]).toBe("5");
+    expect(reply.payload).not.toMatchObject({ error: { message: "db details" } });
+  });
+
+  it("keeps application bugs at 500", () => {
+    expect(mapError(new Error("bug"))).toMatchObject({ statusCode: 500, code: "INTERNAL_SERVER_ERROR" });
+  });
+
+  it("maps Fastify payload too large errors to 413 PAYLOAD_TOO_LARGE", () => {
+    const error = Object.assign(new Error("request body larger than max allowable size"), {
+      code: "FST_ERR_CTP_BODY_TOO_LARGE",
+      statusCode: 413,
+    });
+    expect(mapError(error)).toEqual({
+      statusCode: 413,
+      code: "PAYLOAD_TOO_LARGE",
+      message: "request body larger than max allowable size",
+    });
+  });
+
+  it("maps Fastify request timeout errors to 408 REQUEST_TIMEOUT", () => {
+    const error = Object.assign(new Error("request timed out"), {
+      code: "FST_ERR_REQ_TIMEOUT",
+      statusCode: 408,
+    });
+    expect(mapError(error)).toEqual({
+      statusCode: 408,
+      code: "REQUEST_TIMEOUT",
+      message: "request timed out",
+    });
+  });
+});
+
+describe("errorHandler request id", () => {
+  it("includes the request id in the body and the response header", () => {
+    const reply = makeReply();
+    errorHandler(new Error("bug"), { method: "GET", url: "/", id: "req-42" }, reply);
+
+    expect(reply.payload).toMatchObject({ error: { requestId: "req-42" } });
+    expect(reply.headers["x-request-id"]).toBe("req-42");
+  });
+
+  it("falls back to 'unknown' when the request carries no id", () => {
+    const reply = makeReply();
+    errorHandler(new Error("bug"), { method: "GET", url: "/" }, reply);
+
+    expect(reply.payload).toMatchObject({ error: { requestId: "unknown" } });
   });
 });
 
@@ -147,16 +210,18 @@ afterEach(async () => {
 
 describe("unknown routes on the built server", () => {
   it("returns the error envelope for an unknown path", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "GET", url: "/does-not-exist" });
 
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("NOT_FOUND");
+    expect(res.json().error.requestId).toBeTruthy();
+    expect(res.headers["x-request-id"]).toBe(res.json().error.requestId);
   });
 
   it("returns 405 for a known path called with the wrong method", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "DELETE", url: "/healthz" });
 
@@ -166,7 +231,7 @@ describe("unknown routes on the built server", () => {
   });
 
   it("still serves the route it knows", async () => {
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
 
     const res = await server.inject({ method: "GET", url: "/healthz" });
 

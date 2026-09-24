@@ -17,12 +17,19 @@ import {
   cumulativeCounts,
   DEFAULT_BUCKETS,
   registerMetricsHook,
+  registerMetricsEndpoint,
   recordError,
   getErrorCount,
   getErrorCounts,
   resetErrorCounts,
+  recordStatus,
+  getStatusCounts,
+  resetStatusCounts,
+  isMetricsRequestAuthorized,
+  METRICS_TOKEN_HEADER,
 } from "../metrics.js";
 import { buildServer } from "@/server";
+import { createFakePool } from "../test/fakePool.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -314,7 +321,7 @@ describe("registerMetricsHook (Fastify integration)", () => {
   beforeEach(() => {
     resetHistogram();
     resetErrorCounts();
-    server = buildServer({ corsOrigins: [] });
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
   });
 
   afterEach(async () => {
@@ -416,6 +423,94 @@ describe("registerMetricsHook (standalone)", () => {
     const Fastify = (await import("fastify")).default;
     const app = Fastify({ logger: false });
     expect(() => registerMetricsHook(app)).not.toThrow();
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status code counter API — issue #492
+// ---------------------------------------------------------------------------
+describe("recordStatus + getStatusCounts", () => {
+  beforeEach(() => resetStatusCounts());
+  afterEach(() => resetStatusCounts());
+
+  it("returns an empty array when nothing has been recorded", () => {
+    expect(getStatusCounts()).toEqual([]);
+  });
+
+  it("counts responses per route and status code", () => {
+    recordStatus("GET", "/api/markets", 200);
+    recordStatus("GET", "/api/markets", 200);
+    recordStatus("GET", "/api/markets", 404);
+
+    const counts = getStatusCounts();
+    expect(counts).toContainEqual({ route: "GET /api/markets", statusCode: 200, count: 2 });
+    expect(counts).toContainEqual({ route: "GET /api/markets", statusCode: 404, count: 1 });
+  });
+
+  it("keeps cardinality bounded to route templates, not raw paths", async () => {
+    const server = buildServer({ corsOrigins: [] });
+    await server.inject({ method: "GET", url: "/api/markets/1" });
+    await server.inject({ method: "GET", url: "/api/markets/2" });
+
+    const counts = getStatusCounts().filter((c) => c.route.includes("/api/markets/:id"));
+    expect(counts.length).toBe(1);
+    await server.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Metrics endpoint access control — issue #492
+// ---------------------------------------------------------------------------
+describe("isMetricsRequestAuthorized", () => {
+  it("denies when no token is configured", () => {
+    expect(isMetricsRequestAuthorized("anything", undefined)).toBe(false);
+  });
+
+  it("denies a missing header", () => {
+    expect(isMetricsRequestAuthorized(undefined, "secret")).toBe(false);
+  });
+
+  it("denies a mismatched token", () => {
+    expect(isMetricsRequestAuthorized("wrong", "secret")).toBe(false);
+  });
+
+  it("allows a matching token", () => {
+    expect(isMetricsRequestAuthorized("secret", "secret")).toBe(true);
+  });
+});
+
+describe("registerMetricsEndpoint access control (Fastify integration)", () => {
+  it("returns 404 for an unauthenticated scrape", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: "secret" });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics" });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("returns 404 when no token is configured at all", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: undefined });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics", headers: { [METRICS_TOKEN_HEADER]: "anything" } });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("serves metrics when the token matches", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: "secret" });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics", headers: { [METRICS_TOKEN_HEADER]: "secret" } });
+    expect(res.statusCode).toBe(200);
     await app.close();
   });
 });

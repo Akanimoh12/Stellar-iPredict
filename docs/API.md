@@ -24,7 +24,7 @@ PostgreSQL copy of on-chain state (written by the
 
 ### Versioning
 
-- Operational endpoints (`/healthz`, `/readyz`, `/api/docs`) are **unversioned**.
+- Operational endpoints (`/healthz`, `/readyz`, `/status`, `/api/docs`) are **unversioned**.
 - Feature routes are served under **`/api/v1`** (mounted in
   `backend/src/api/index.ts` as `API_PREFIX = /api/v1`). Route files declare
   paths relative to the version, so `profile/:address` resolves to
@@ -61,6 +61,7 @@ no such route is currently registered, so no endpoint requires a token today.
 
 - `GET /healthz` — liveness probe
 - `GET /readyz` — readiness probe (DB + Redis)
+- `GET /status` — public status feed for a status page
 - `GET /api/docs` — OpenAPI 3.1 specification (JSON)
 - `GET /api/markets` — list markets (filter/sort/paginate)
 - `GET /api/markets/:id` — market detail
@@ -112,6 +113,73 @@ reachable. Returns `200` when both are healthy and `503` otherwise.
 | Status | Condition |
 |--------|-----------|
 | 503 | Either `db.ok` or `redis.ok` is `false`. Body: `{ "status": "not ready", "checks": { "db": { "ok": false, "error": "..." }, "redis": { ... } } }` |
+
+---
+
+### GET /status
+
+**Description:** Public status feed for an external status page: API health,
+indexer progress, and the most recently resolved market.
+
+Unlike `/readyz`, this endpoint is meant to be published. It carries **no error
+strings, hostnames, connection details, or user addresses** — a failing
+dependency reports `ok: false` and nothing more. The detailed reason stays in
+`/readyz`, which is an internal probe.
+
+It **always returns `200`**, including during an outage; a status page must stay
+readable when things are broken. Read the `status` field, not the HTTP code:
+
+| `status` | Meaning |
+|----------|---------|
+| `ok` | Everything is working. |
+| `degraded` | Serving traffic, but the cache is down or the indexer is behind, so market data may be stale. |
+| `down` | PostgreSQL is unreachable; the API cannot serve real data. |
+
+`indexer.lagSeconds` is the age of the newest indexed event, not the gap to the
+chain head — it needs no RPC call, so the feed stays cheap. The indexer is
+reported as `ok: false` once that exceeds **300 seconds**, and when nothing has
+been indexed yet (in which case the ledger and lag fields are `null` rather than
+a fabricated zero).
+
+**Authentication:** none.
+
+**Query Parameters:** none.
+
+**Caching:** responses carry
+`Cache-Control: public, max-age=15, stale-while-revalidate=30` and are cached in
+Redis for 15s, so a polling status page and any CDN in front of it are cheap.
+`generatedAt` is the real observation time and may trail the request by up to
+the TTL.
+
+**Response** `200 OK`:
+```json
+{
+  "status": "ok",
+  "generatedAt": "2026-01-02T03:04:05.000Z",
+  "api": {
+    "ok": true,
+    "db":    { "ok": true, "latencyMs": 2 },
+    "redis": { "ok": true, "latencyMs": 1 }
+  },
+  "indexer": {
+    "ok": true,
+    "lastIndexedLedger": 5150,
+    "lastEventAt": "2026-01-02T03:03:55.000Z",
+    "lagSeconds": 10
+  },
+  "lastResolvedMarket": {
+    "id": 42,
+    "question": "Will it rain tomorrow?",
+    "outcome": "yes",
+    "resolvedAt": "2026-01-02T02:00:00.000Z"
+  }
+}
+```
+
+`lastResolvedMarket` is `null` when no market has resolved yet.
+
+**Error Responses:** none — failures are reported in the body as `degraded` or
+`down`.
 
 ---
 

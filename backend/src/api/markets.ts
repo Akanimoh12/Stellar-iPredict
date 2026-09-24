@@ -1,13 +1,20 @@
-import { createHash } from "node:crypto";
-
 import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { z } from "zod";
 
 import { badRequest, notFound } from "../lib/errors.js";
-import { getMarketById, getMarkets, type Queryable, type MarketCategory } from "../db/markets.js";
+import { stroopsToXlm, xlmToStroops } from "../lib/amount.js";
+import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
+import {
+  getMarketById,
+  getMarkets,
+  getResolutionDelayStatus,
+  type Queryable,
+  type MarketCategory,
+} from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
+import { queryWithCancel, type CancellablePool } from "../db/pool.js";
 import {
   marketKey,
   marketsListKey,
@@ -28,39 +35,6 @@ const MARKETS_ACTIVE_TTL = CACHE_TTLS.marketsActive;
 const MARKETS_DEFAULT_TTL = CACHE_TTLS.marketsAll;
 const BETS_TTL = CACHE_TTLS.bets;
 const ODDS_TTL = CACHE_TTLS.odds;
-
-/**
- * Strong ETag for a JSON-serialisable payload — a quoted sha1 hex digest of
- * its canonical `JSON.stringify` form, per RFC 7232 §2.3.
- */
-export function computeEtag(payload: unknown): string {
-  const hash = createHash("sha1").update(JSON.stringify(payload)).digest("hex");
-  return `"${hash}"`;
-}
-
-/**
- * Whether an `If-None-Match` request header matches `etag`.
- *
- * The header may carry a comma-separated list and/or the `*` wildcard
- * (RFC 7232 §3.2); a weak comparison (leading `W/`) is treated as a match
- * since we only ever compare full representations here.
- */
-export function matchesIfNoneMatch(
-  header: string | string[] | undefined,
-  etag: string
-): boolean {
-  if (!header) {
-    return false;
-  }
-
-  const values = Array.isArray(header) ? header : [header];
-  return values.some((value) =>
-    value
-      .split(",")
-      .map((candidate) => candidate.trim())
-      .some((candidate) => candidate === "*" || candidate === etag || candidate === `W/${etag}`)
-  );
-}
 
 export function parsePositiveInteger(value: string): number | null {
   if (!/^\d+$/.test(value)) {
@@ -193,16 +167,46 @@ const errorResponseSchema = {
       properties: {
         code: { type: "string" },
         message: { type: "string" },
+        requestId: { type: "string" },
       },
-      required: ["code", "message"],
+      required: ["code", "message", "requestId"],
     },
   },
   required: ["error"],
 } as const;
 
+/**
+ * Wraps `db` so its queries are cancelled (see db/pool.ts `queryWithCancel`)
+ * if `signal` aborts before they resolve — i.e. the client disconnected.
+ *
+ * Only ever used for these GET routes: each issues its own standalone,
+ * read-only query outside of any transaction, so abandoning one mid-flight
+ * can never leave a transaction half-committed. `db` is only a real
+ * cancellable Postgres pool in production (it needs `.connect()` for the
+ * pg_cancel_backend dance); unit tests inject a bare `{ query }` fake, which
+ * this passes through untouched.
+ */
+function withCancellation(
+  db: Queryable,
+  signal: AbortSignal | undefined,
+  route: string,
+): Queryable {
+  if (
+    !signal ||
+    typeof (db as unknown as Partial<CancellablePool>).connect !== "function"
+  ) {
+    return db;
+  }
+  const cancellablePool = db as unknown as CancellablePool;
+  return {
+    query: (text: string, values?: unknown[]) =>
+      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }),
+  };
+}
+
 export function createMarketsRoutes(
   app: FastifyInstance,
-  db?: Queryable,
+  db: Queryable,
   redis?: Redis
 ): void {
   // ── GET /api/markets ──────────────────────────────────────────────────────
@@ -281,6 +285,7 @@ export function createMarketsRoutes(
             code: "BAD_REQUEST",
             message: "Invalid query parameters",
             issues: parsed.error.issues,
+            requestId: request.id,
           },
         });
       }
@@ -290,12 +295,17 @@ export function createMarketsRoutes(
       const key = marketsListKey(filter, category, sort, page, limit);
       const ttl =
         filter === "active" ? MARKETS_ACTIVE_TTL : MARKETS_DEFAULT_TTL;
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets",
+      );
 
             const result = redis
         ? await getOrSet(redis, key, ttl, () =>
-            getMarkets({ filter, category, sort, page, limit }, db)
+            getMarkets({ filter, category, sort, page, limit }, cancellableDb)
           )
-        : await getMarkets({ filter, category, sort, page, limit }, db);
+        : await getMarkets({ filter, category, sort, page, limit }, cancellableDb);
 
       const body = {
         markets: result.rows,
@@ -313,6 +323,53 @@ export function createMarketsRoutes(
       }
 
       return reply.status(200).send(body);
+    }
+  );
+
+  // ── GET /api/markets/resolution-status ────────────────────────────────────
+  // Issue #645: honest, user-facing signal that market resolution is running
+  // late (usually an oracle-aggregator outage). Static path — Fastify matches
+  // it ahead of `/api/markets/:id`.
+  app.get(
+    "/api/markets/resolution-status",
+    {
+      schema: {
+        summary: "Whether market resolution is currently delayed",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: {
+                type: "string",
+                enum: ["on_time", "delayed", "stalled"],
+                description:
+                  "on_time: resolutions current. delayed: some markets overdue. stalled: overdue for a long time — assume an outage.",
+              },
+              overdueMarkets: { type: "number" },
+              oldestOverdueSeconds: { type: ["number", "null"] },
+              delayedMarketIds: { type: "array", items: { type: "number" } },
+              graceSeconds: { type: "number" },
+              checkedAt: { type: "string" },
+            },
+            required: [
+              "status",
+              "overdueMarkets",
+              "oldestOverdueSeconds",
+              "delayedMarketIds",
+              "graceSeconds",
+              "checkedAt",
+            ],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const status = await getResolutionDelayStatus(db);
+      // Short cache — this is a coarse signal and the query hits `markets`.
+      reply.header("Cache-Control", "public, max-age=30");
+      return reply.status(200).send(status);
     }
   );
 
@@ -364,26 +421,41 @@ export function createMarketsRoutes(
           throw notFound("Market not found");
         }
 
-        const totalYes = Number(market.total_yes) || 0;
-        const totalNo = Number(market.total_no) || 0;
-        const totalPool = totalYes + totalNo;
+        let yesStroops = 0n;
+        let noStroops = 0n;
+        try {
+          if (market.total_yes) yesStroops = xlmToStroops(market.total_yes);
+        } catch {
+          yesStroops = 0n;
+        }
+        try {
+          if (market.total_no) noStroops = xlmToStroops(market.total_no);
+        } catch {
+          noStroops = 0n;
+        }
+
+        const totalPoolStroops = yesStroops + noStroops;
+        const totalPool = stroopsToXlm(totalPoolStroops);
 
         let yesOdds: number;
         let noOdds: number;
 
-        if (totalPool <= 0) {
+        if (totalPoolStroops <= 0n) {
           yesOdds = 0.5;
           noOdds = 0.5;
         } else {
-          yesOdds = Number((totalYes / totalPool).toFixed(4));
-          noOdds = Number((totalNo / totalPool).toFixed(4));
+          const SCALE = 1_000_000_000n;
+          const yesRatio = Number((yesStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          const noRatio = Number((noStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          yesOdds = Number(yesRatio.toFixed(4));
+          noOdds = Number(noRatio.toFixed(4));
         }
 
         return {
           market_id: market.id,
           total_yes: market.total_yes,
           total_no: market.total_no,
-          total_pool: totalPool.toFixed(7),
+          total_pool: totalPool,
           yes_odds: yesOdds,
           no_odds: noOdds,
           implied_probability: {
@@ -439,7 +511,12 @@ export function createMarketsRoutes(
         throw badRequest("id must be a positive integer");
       }
 
-      const loader = () => getMarketById(id, db);
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id",
+      );
+      const loader = () => getMarketById(id, cancellableDb);
       const market = redis
         ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, loader)
         : await loader();
@@ -549,8 +626,14 @@ export function createMarketsRoutes(
       const page = Math.max(1, query.page ?? 1);
       const limit = Math.min(100, Math.max(1, query.limit ?? 50));
 
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id/bets",
+      );
+
       // Verify the market exists before returning bets.
-      const marketLoader = () => getMarketById(id, db);
+      const marketLoader = () => getMarketById(id, cancellableDb);
       const market = redis
         ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, marketLoader)
         : await marketLoader();
@@ -559,7 +642,7 @@ export function createMarketsRoutes(
         throw notFound("Market not found");
       }
 
-      if (!db) {
+      if (!cancellableDb) {
         throw badRequest("Database not available");
       }
 
@@ -568,7 +651,7 @@ export function createMarketsRoutes(
       // For other pages the key includes the page/limit so they get their own
       // cache entries — still subject to the same 30s TTL.
       const key = betsKey(id);
-      const loader = () => getBetsByMarketFromDb(id, page, limit, db);
+      const loader = () => getBetsByMarketFromDb(id, page, limit, cancellableDb);
 
       reply.header("Cache-Control", cacheControlPublic(BETS_TTL));
       return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();

@@ -19,8 +19,8 @@
  * When N concurrent callers request the same key that isn't cached yet,
  * only the first caller invokes the loader.  Every other caller waits for
  * that same in-flight promise, so the loader runs exactly once per cache
- * miss regardless of concurrency.  This is implemented with a simple
- * `Map<string, Promise>` scoped to each `getOrSet` call.
+ * miss regardless of concurrency. This is process-local; deployments with
+ * several instances need distributed coordination for a global guarantee.
  *
  * ## Serialisation
  *

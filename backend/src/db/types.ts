@@ -71,7 +71,7 @@ export type OracleSubmissionStatus =
  */
 export interface OracleSubmissionRow {
   id: number;
-  market_id: number;
+  market_id: string; // BIGINT (issue #407), always read back as ::text
   submitter: string;
   outcome: string;
   bond_amount: string; // NUMERIC as string

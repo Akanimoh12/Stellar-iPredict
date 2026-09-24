@@ -20,6 +20,15 @@ export interface PersistentFailureAlert {
 
 export type AlertSender = (alert: PersistentFailureAlert) => Promise<void>;
 
+export interface AmbiguousTallyAlert {
+  marketId: string;
+  yesVotes: number;
+  noVotes: number;
+  threshold: number;
+}
+
+export type AmbiguousTallyAlertSender = (alert: AmbiguousTallyAlert) => Promise<void>;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -100,6 +109,43 @@ export function createWebhookAlertSender(
       logger?.error("failed to deliver alert webhook", {
         marketId: alert.marketId,
         severity,
+        error,
+      });
+    }
+  };
+}
+
+/** Escalates an ambiguous tally once it has been durably recorded. */
+export function createAmbiguousTallyAlertSender(
+  webhookUrl: string | undefined,
+  logger?: Logger,
+  fetchImpl: typeof fetch = fetch,
+): AmbiguousTallyAlertSender {
+  return async (alert) => {
+    const payload = {
+      type: "oracle.aggregator.ambiguous_tally",
+      severity: "SEV1" as const,
+      ...alert,
+    };
+    if (!webhookUrl) {
+      logger?.error("ambiguous council tally requires manual review", payload);
+      return;
+    }
+    try {
+      const response = await fetchImpl(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        logger?.error("ambiguous tally alert webhook returned non-2xx", {
+          marketId: alert.marketId,
+          status: response.status,
+        });
+      }
+    } catch (error) {
+      logger?.error("failed to deliver ambiguous tally alert webhook", {
+        marketId: alert.marketId,
         error,
       });
     }

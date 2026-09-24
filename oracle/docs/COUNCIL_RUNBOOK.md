@@ -221,6 +221,32 @@ for each expired_unresolved_market {
 
 ### Safety Mechanisms
 
+### Ambiguous Tallies and Manual Review
+
+`selectThresholdOutcome` returns `null` when both YES and NO reach the
+configured threshold. This should be impossible with the strict-majority
+configuration, so it is treated as a SEV1 defence-in-depth incident rather
+than resolved arbitrarily.
+
+The aggregator inserts the market into `oracle_ambiguous_tallies`, emits one
+`oracle.aggregator.ambiguous_tally` alert for that market, and excludes the
+market from subsequent polling. The unique market key and `alert_claimed_at`
+make the escalation durable and once-only across restarts. An operator must
+investigate the council votes and clear the record after correction:
+
+```sql
+SELECT * FROM oracle_ambiguous_tallies
+WHERE status = 'manual_review'
+ORDER BY first_seen_at;
+
+UPDATE oracle_ambiguous_tallies
+SET status = 'cleared', alert_claimed_at = NULL
+WHERE market_id = '<market-id>';
+```
+
+Clearing is deliberately manual: it is only safe after the contradictory
+votes or configuration invariant has been understood and corrected.
+
 1. **Minimum Submissions** (`MIN_REQUIRED_SUBMISSIONS`):
    - Prevents finalization based on incomplete data
    - Default: 4 (threshold value) — balanced safety
@@ -262,6 +288,12 @@ CREATE TABLE council_votes (
 CREATE INDEX idx_council_votes_market ON council_votes(market_id);
 CREATE INDEX idx_council_votes_submitted ON council_votes(submitted_at DESC);
 ```
+
+### `oracle_ambiguous_tallies` Table
+
+This table is the durable manual-review queue for impossible split tallies.
+`manual_review` rows are excluded from aggregator polling until an operator clears
+them.
 
 ### Query Examples
 

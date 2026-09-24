@@ -183,6 +183,7 @@ export async function finalizeMarketDecision(
   councilVotes: CouncilVote[],
   networkPassphrase: string = Networks.TESTNET,
   notifierOptions?: FinalizeNotifierOptions,
+  onCommitted?: (finalizedAt: Date) => void,
 ): Promise<string> {
   const txHash = await submitResolutionTransaction(
     server,
@@ -205,6 +206,14 @@ export async function finalizeMarketDecision(
   console.info(
     `Persisted finalized decision for market ${marketId} with tx_hash=${txHash} and decision=${decisionLabel(decision)}`,
   );
+
+  // Metrics are observational. They must never turn a committed finalization
+  // into a failed market-processing attempt.
+  try {
+    onCommitted?.(new Date());
+  } catch (error) {
+    console.warn(`Failed to record post-commit finalization metric for market ${marketId}`, error);
+  }
 
   // Best-effort side effect — a webhook failure must not undo the finalization.
   await notifyFinalized(
@@ -259,4 +268,32 @@ export async function queryMarketState(
     cancelled: Boolean((market as { cancelled?: unknown }).cancelled),
     endTime: Number((market as { end_time?: unknown }).end_time ?? 0),
   };
+}
+
+/** Reads the contract's enumerable resolver registry for configuration checks. */
+export async function queryRegisteredResolvers(
+  server: rpc.Server,
+  contractId: string,
+  resolverSecret: string,
+  networkPassphrase: string = Networks.TESTNET,
+): Promise<string[]> {
+  const signer = Keypair.fromSecret(resolverSecret);
+  const sourceAccount = await server.getAccount(signer.publicKey());
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: "100",
+    networkPassphrase,
+  })
+    .addOperation(new Contract(contractId).call("get_resolvers"))
+    .setTimeout(30)
+    .build();
+
+  const response = await server.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(response)) {
+    throw new Error(`Resolver registry simulation failed: ${JSON.stringify(response)}`);
+  }
+  if (!response.result?.retval) throw new Error("Resolver registry returned no result");
+
+  const values = response.result.retval.vec();
+  if (!values) throw new Error("Resolver registry returned a non-vector result");
+  return values.map((value) => Address.fromScVal(value).toString());
 }

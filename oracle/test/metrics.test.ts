@@ -3,9 +3,32 @@ import {
   AggregatorMetrics,
   ORACLE_RESOLUTION_LAG_H_METRIC,
   assessAggregatorAvailability,
+  createPostgresResolutionMetricStore,
 } from "../src/aggregator/metrics.js";
+import type { QueryablePool } from "../src/aggregator/tally.js";
 
 describe("AggregatorMetrics", () => {
+  it("writes resolution observations idempotently to Postgres", async () => {
+    const queries: { sql: string; params?: unknown[] }[] = [];
+    const pool: QueryablePool = {
+      async query(sql, params) {
+        queries.push({ sql, params });
+        return { rows: [] };
+      },
+    };
+
+    await createPostgresResolutionMetricStore(pool).recordResolution({
+      marketId: "42",
+      endTime: 1_000_000,
+      resolvedAt: 1_007_200,
+      lagHours: 2,
+    });
+
+    expect(queries[0].sql).toContain("oracle_resolution_lag");
+    expect(queries[0].sql).toContain("ON CONFLICT (market_id) DO NOTHING");
+    expect(queries[0].params).toEqual(["42", 1_000_000, 1_007_200, 2]);
+  });
+
   it("records a resolution and exposes lag in hours", () => {
     const metrics = new AggregatorMetrics();
     const endTime = 1_000_000;

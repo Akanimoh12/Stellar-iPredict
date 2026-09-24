@@ -90,6 +90,7 @@ pub enum DataKey {
     BettorCount(u64),
     BettorAt(u64, u32),
     Resolver(Address),
+    Resolvers,
     FeeRecipient(Address),
     HasReferrer(Address),
     RateWindow,            // packed u64: high32=window_start_hi, low32=count
@@ -328,6 +329,12 @@ impl PredictionMarketContract {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
         let key = DataKey::Resolver(resolver);
+        let mut resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
+        if !resolvers.iter().any(|current| current == resolver) {
+            resolvers.push_back(resolver.clone());
+            env.storage().instance().set(&DataKey::Resolvers, &resolvers);
+        }
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
         Ok(())
@@ -337,11 +344,26 @@ impl PredictionMarketContract {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
         env.storage().persistent().remove(&DataKey::Resolver(resolver));
+        let resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
+        let mut remaining = Vec::new(&env);
+        for current in resolvers.iter() {
+            if current != resolver {
+                remaining.push_back(current);
+            }
+        }
+        env.storage().instance().set(&DataKey::Resolvers, &remaining);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
 
     pub fn is_resolver(env: Env, resolver: Address) -> bool {
         env.storage().persistent().get(&DataKey::Resolver(resolver)).unwrap_or(false)
+    }
+
+    /// Returns the resolver set used by the oracle aggregator for startup and
+    /// periodic configuration validation.
+    pub fn get_resolvers(env: Env) -> Vec<Address> {
+        env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env))
     }
 
     // ── Fee Recipient Management ──────────────────────────────────────────

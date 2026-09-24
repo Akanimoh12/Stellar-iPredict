@@ -6,6 +6,7 @@ import {
 } from "../src/aggregator/threshold.js";
 import { computeTally } from "../src/aggregator/tally.js";
 import { CouncilVoteManager } from "../src/aggregator/council-votes.js";
+import type { SubmissionStore } from "../src/aggregator/tally.js";
 
 const yes = (member: string): CouncilVote => ({ member, outcome: true });
 const no = (member: string): CouncilVote => ({ member, outcome: false });
@@ -133,5 +134,29 @@ describe("CouncilVoteManager", () => {
   it("rejects a blank council member", () => {
     const mgr = new CouncilVoteManager();
     expect(() => mgr.submitVote("   ", true)).toThrow("Council member is required");
+  });
+
+  it("uses the durable store for market tallies and replaces a member vote", async () => {
+    const votes = new Map<string, boolean>();
+    const store: SubmissionStore = {
+      async recordSubmission(_marketId, member, outcome) {
+        votes.set(member, outcome);
+      },
+      async getSubmissions() {
+        return [...votes.entries()].map(([member, outcome]) => ({ member, outcome }));
+      },
+    };
+    const manager = new CouncilVoteManager(store);
+
+    await manager.submitVoteToStore("42", "alice", true);
+    await manager.submitVoteToStore("42", "alice", false);
+    await manager.submitVoteToStore("42", "bob", true);
+
+    await expect(manager.getTallyFromStore("42")).resolves.toMatchObject({
+      yesVotes: 1,
+      noVotes: 1,
+      totalVoters: 2,
+    });
+    await expect(manager.getAgreedOutcomeFromStore("42", 2)).resolves.toBeNull();
   });
 });

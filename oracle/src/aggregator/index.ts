@@ -7,11 +7,22 @@ import {
   startOracleMetrics,
   type OracleMetricsRuntime,
 } from "../metrics/index.js";
-import { createWebhookAlertSender } from "./alert.js";
-import { createPostgresSubmissionStore, computeTally } from "./tally.js";
+import { createAmbiguousTallyAlertSender } from "./alert.js";
+import { createPostgresSubmissionStore } from "./tally.js";
+import { CouncilVoteManager } from "./council-votes.js";
 import { selectThresholdOutcome } from "./threshold.js";
 import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
-import { finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+import { finalizeMarketDecision, queryMarketState, queryRegisteredResolvers } from "./market-finalizer.js";
+import {
+  compareCouncilResolvers,
+  loadCouncilConfig,
+  type CouncilConfig,
+} from "../config/council.js";
+import {
+  AggregatorMetrics,
+  AggregatorMetricsServer,
+  createPostgresResolutionMetricStore,
+} from "./metrics.js";
 
 
 export {
@@ -51,6 +62,7 @@ export {
   AggregatorMetricsServer,
   DEFAULT_LAG_BUCKETS_HOURS,
   ORACLE_RESOLUTION_LAG_H_METRIC,
+  createPostgresResolutionMetricStore,
   type AggregatorMetricsServerOptions,
   type AggregatorMetricsSnapshot,
   type NamedMetric,
@@ -80,7 +92,12 @@ export {
   type ResolveMarketResult,
 } from "../submitter/resolveMarket.js";
 export { CouncilVoteManager } from "./council-votes.js";
-export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+export {
+  MarketAlreadyFinalizedError,
+  finalizeMarketDecision,
+  queryMarketState,
+  queryRegisteredResolvers,
+} from "./market-finalizer.js";
 
 export {
   OffChainSubmitterService,
@@ -184,22 +201,67 @@ export interface AggregatorDependencies {
 export function createProductionDependencies(
   config: AggregatorConfig,
   logger: Logger = createLogger({ level: config.LOG_LEVEL }),
-  overrides: { database?: Pool; server?: rpc.Server } = {},
+  overrides: {
+    database?: Pool;
+    server?: rpc.Server;
+    council?: CouncilConfig;
+    onAmbiguousTally?: (alert: { marketId: string; yesVotes: number; noVotes: number; threshold: number }) => Promise<void>;
+  } = {},
 ): AggregatorDependencies {
   const database = overrides.database ?? new Pool({ connectionString: config.DATABASE_URL });
   const server = overrides.server ?? new rpc.Server(config.SOROBAN_RPC_URL);
-  const submissionStore = createPostgresSubmissionStore(database);
+  const councilVoteManager = new CouncilVoteManager(createPostgresSubmissionStore(database));
+  const resolutionMetricStore = createPostgresResolutionMetricStore(database);
   const networkPassphrase = config.NETWORK_PASSPHRASE ?? Networks.TESTNET;
+  let resolverSetMatches = overrides.council === undefined;
+
+  // A stale council file should not take the whole oracle offline, but it must
+  // never be allowed to submit a resolution that the contract will reject.
+  async function refreshResolverSet(): Promise<void> {
+    if (!overrides.council || !config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
+      resolverSetMatches = true;
+      return;
+    }
+
+    try {
+      const onChainResolvers = await queryRegisteredResolvers(
+        server,
+        config.MARKET_CONTRACT_ID,
+        config.RESOLVER_KEY,
+        networkPassphrase,
+      );
+      const report = compareCouncilResolvers(overrides.council, onChainResolvers);
+      resolverSetMatches = report.matches;
+      if (!report.matches) {
+        logger.error("council resolver configuration diverges from on-chain registry", {
+          missingOnChain: report.missingOnChain,
+          unconfiguredOnChain: report.unconfiguredOnChain,
+        });
+      } else {
+        logger.info("council resolver configuration matches on-chain registry");
+      }
+    } catch (error) {
+      resolverSetMatches = false;
+      logger.warn("unable to validate council resolver configuration", { error });
+    }
+  }
+
   return {
     async connect() {
       await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
+      await refreshResolverSet();
       logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
     },
     async listExpiredUnresolvedMarkets(now, limit, offset = 0) {
+      await refreshResolverSet();
       if (limit !== undefined && limit > 0) {
         const result = await database.query<AggregatorMarket>(
           `SELECT id::text, cancelled FROM markets
            WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+             AND NOT EXISTS (
+               SELECT 1 FROM oracle_ambiguous_tallies a
+               WHERE a.market_id = markets.id AND a.status = 'manual_review'
+             )
            ORDER BY end_time ASC, id ASC
            LIMIT $2 OFFSET $3`,
           [Math.floor(now.getTime() / 1_000), limit, offset],
@@ -217,7 +279,11 @@ export function createProductionDependencies(
     async getBacklogDepth(now) {
       const result = await database.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE`,
+         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
+           AND NOT EXISTS (
+             SELECT 1 FROM oracle_ambiguous_tallies a
+             WHERE a.market_id = markets.id AND a.status = 'manual_review'
+           )`,
         [Math.floor(now.getTime() / 1_000)],
       );
       return parseInt(result.rows[0]?.count ?? "0", 10);
@@ -248,6 +314,9 @@ export function createProductionDependencies(
       // from moving on to the remaining expired markets.
       const marketId = market.id.trim();
       try {
+        if (!resolverSetMatches) {
+          throw new Error("council resolver configuration does not match the on-chain registry");
+        }
         // Defensive: the expiry query already filters these out, but a market
         // can be cancelled or resolved between the query and this call.
         if (market.cancelled) {
@@ -290,8 +359,7 @@ export function createProductionDependencies(
         }
 
         // 2. Load the council's current submissions and compute the tally.
-        const votes = await submissionStore.getSubmissions(marketId);
-        const tally = computeTally(marketId, votes);
+        const tally = await councilVoteManager.getTallyFromStore(marketId);
         logger.info("computed tally", {
           marketId,
           yesVotes: tally.yesVotes,
@@ -301,14 +369,36 @@ export function createProductionDependencies(
 
         // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
         //    both-outcomes) majority — the market stays untouched this poll.
-        const outcome = selectThresholdOutcome(votes, config.COUNCIL_THRESHOLD, logger, marketId);
+        const outcome = selectThresholdOutcome(tally.votes, config.COUNCIL_THRESHOLD, logger, marketId);
         if (outcome === null) {
-          logger.warn("threshold not met, market left unresolved", {
+          const recorded = await database.query(
+            `INSERT INTO oracle_ambiguous_tallies (market_id, yes_votes, no_votes, threshold)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (market_id) DO UPDATE
+               SET status = 'manual_review',
+                   yes_votes = EXCLUDED.yes_votes,
+                   no_votes = EXCLUDED.no_votes,
+                   threshold = EXCLUDED.threshold,
+                   last_seen_at = NOW(),
+                   alert_claimed_at = NOW()
+             WHERE oracle_ambiguous_tallies.status = 'cleared'
+             RETURNING market_id`,
+            [marketId, tally.yesVotes, tally.noVotes, config.COUNCIL_THRESHOLD],
+          );
+          logger.error("ambiguous council tally, market held for manual review", {
             marketId,
             yesVotes: tally.yesVotes,
             noVotes: tally.noVotes,
             threshold: config.COUNCIL_THRESHOLD,
           });
+          if (recorded.rows.length > 0) {
+            await overrides.onAmbiguousTally?.({
+              marketId,
+              yesVotes: tally.yesVotes,
+              noVotes: tally.noVotes,
+              threshold: config.COUNCIL_THRESHOLD,
+            });
+          }
           return;
         }
 
@@ -327,6 +417,16 @@ export function createProductionDependencies(
           outcome,
           [...tally.votes],
           networkPassphrase,
+          undefined,
+          (finalizedAt) => {
+            const resolvedAt = Math.floor(finalizedAt.getTime() / 1_000);
+            const lagHours = (resolvedAt - state.endTime) / 3_600;
+            void resolutionMetricStore
+              .recordResolution({ marketId, endTime: state.endTime, resolvedAt, lagHours })
+              .catch((error: unknown) => {
+                logger.warn("failed to persist resolution metric", { marketId, error });
+              });
+          },
         );
         logger.info("market finalized", { marketId, decision: outcome, txHash });
       } catch (error) {
@@ -335,7 +435,6 @@ export function createProductionDependencies(
           error: error instanceof Error ? error.message : String(error),
         });
       }
-    },
     },
     async close() {
       await database.end();
@@ -473,6 +572,7 @@ export async function runAggregator(
 export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = loadAggregatorConfig(env);
   const logger = createLogger({ level: config.LOG_LEVEL, bindings: { service: "oracle-aggregator" } });
+  const councilConfig = loadCouncilConfig(env);
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
@@ -484,7 +584,10 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   let lastPollCompletedAt: number | null = null;
   const aggregatorMetrics = new AggregatorMetrics();
 
-  const dependencies = createProductionDependencies(config, logger);
+  const dependencies = createProductionDependencies(config, logger, {
+    council: councilConfig,
+    onAmbiguousTally: createAmbiguousTallyAlertSender(config.FINALIZE_WEBHOOK_URL, logger),
+  });
 
   try {
     try {

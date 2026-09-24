@@ -24,6 +24,7 @@
  */
 
 import type { Redis } from "ioredis";
+import { getCircuitBreaker } from "./circuitBreaker.js";
 import {
   marketKey,
   marketsAllKey,
@@ -51,17 +52,72 @@ import {
  * await invalidate(redis, marketsAllKey(), marketsActiveKey());
  * ```
  *
- * @param redis  An ioredis client (or any object with a `del` method).
+  * @param redis  An ioredis client (or any object with a `del` method).
  * @param keys   One or more cache keys to delete.
  * @returns      The number of keys actually deleted (forwarded from Redis).
+ *
+ * ## Failure handling
+ *
+ * When Redis is unavailable the circuit breaker is open and the call
+ * returns `0` without touching the network.  When Redis is reachable but
+ * the DEL command itself rejects, the error is logged (rate-limited to
+ * avoid log spam during outages) and `0` is returned — a failed
+ * invalidation means the next reader gets a stale entry for at most one
+ * TTL, which is acceptable degradation under outage conditions (issue #481).
  */
+// Rate-limited logger — prevents log spam during sustained Redis outages.
+// Logs at most once per CACHE_FAILURE_LOG_INTERVAL_MS, but counts total failures.
+export let cacheFailureLogCount = 0;
+const CACHE_FAILURE_LOG_INTERVAL_MS = 30_000;
+let lastCacheFailureLog = 0;
+
+/**
+ * Log a cache failure, rate-limited to avoid log spam during outages.
+ * Exported so tests can reset the counter and verify behaviour (#481).
+ */
+export function logCacheFailure(error: unknown): void {
+  cacheFailureLogCount++;
+  const now = Date.now();
+  if (now - lastCacheFailureLog >= CACHE_FAILURE_LOG_INTERVAL_MS) {
+    lastCacheFailureLog = now;
+    console.warn(
+      `[cache] failure #${cacheFailureLogCount} ` +
+        `(error: ${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+}
+
+/** Reset the rate-limited failure logger — for tests only. */
+export function resetFailureLogger(): void {
+  cacheFailureLogCount = 0;
+  lastCacheFailureLog = 0;
+}
+
 export async function invalidate(
   redis: Pick<Redis, "del">,
   ...keys: string[]
 ): Promise<number> {
   if (keys.length === 0) return 0;
-  // ioredis accepts (key, ...keys) or (keys[]) — spread works for both.
-  return (redis.del as (...args: string[]) => Promise<number>)(...keys);
+
+  const circuit = getCircuitBreaker();
+  if (!circuit.canAttempt()) {
+    return 0;
+  }
+
+  try {
+    // Await the DEL call so that rejections are caught and the circuit
+    // breaker is updated only after Redis has actually responded (#481).
+    const count = await (redis.del as (...args: string[]) => Promise<number>)(
+      ...keys,
+    );
+    circuit.recordSuccess();
+    return count;
+  } catch (error) {
+    circuit.recordFailure();
+    logCacheFailure(error);
+    // Swallowed — next read will refresh from the DB within one TTL.
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------

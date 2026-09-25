@@ -775,3 +775,20 @@ Market ID: 123
 **Last Updated:** July 29, 2026  
 **Version:** Phase 1.5  
 **Status:** Active
+
+
+## Resolver key source and scheduled rotation
+
+Production aggregators should source the resolver signing key from a secret-manager mounted file instead of placing the key directly in the process environment. Set `RESOLVER_KEY_FILE=/run/secrets/resolver_key`; the environment `RESOLVER_KEY` fallback is intended for local development. Retrieval failure is a startup error, and key material must never be logged.
+
+A safe rotation keeps the outgoing and incoming resolvers valid simultaneously for an overlap window:
+
+1. Provision the incoming secret through the configured secret manager and update the mounted file.
+2. Register the incoming resolver on chain **before** making it the preferred signing key.
+3. Promote it locally while retaining the outgoing resolver in the authorized set.
+4. Perform a real signed resolver verification operation with the incoming key. Do not retire the old key based only on configuration validation.
+5. Keep both keys valid for the configured overlap window (for example `RESOLVER_ROTATION_OVERLAP_MS=300000`).
+6. Retire the outgoing resolver only after verification succeeds and the overlap completes.
+7. If registration or verification fails, restore the previous active key and leave it authorized. Do not proceed with retirement.
+
+`ResolverRotationScheduler` implements this ordering and supports a recurring schedule. The rotation interval should be longer than the overlap window; `RESOLVER_ROTATION_INTERVAL_MS` and `RESOLVER_ROTATION_OVERLAP_MS` should be set according to the deployment's key-management policy.

@@ -160,6 +160,18 @@ export function getCacheHitRate(): number {
   return computeHitRate(totals.hits, totals.misses);
 }
 
+/** Per-namespace hit rates, keyed by namespace name. Never empty — each known
+ * namespace always appears, even with NaN when no lookups have occurred. */
+export function getPerNamespaceHitRates(): ReadonlyRecord<CacheNamespace, number> {
+  const stats = getCacheStats();
+  const result: Record<CacheNamespace, number> = {};
+  for (const ns of CACHE_NAMESPACES) {
+    result[ns] = stats.byNamespace.find((s) => s.namespace === ns)?.hitRate ?? NaN;
+  }
+  result["other"] = stats.byNamespace.find((s) => s.namespace === "other")?.hitRate ?? NaN;
+  return result as ReadonlyRecord<CacheNamespace, number>;
+}
+
 /** Reset every counter. Used by tests and by rolling-window metric resets. */
 export function resetCacheStats(): void {
   totals = { hits: 0, misses: 0 };
@@ -215,6 +227,12 @@ export function serializeCacheMetrics(): string {
     lines.push("# TYPE cache_namespace_misses_total counter");
     for (const entry of stats.byNamespace) {
       lines.push(`cache_namespace_misses_total{namespace="${entry.namespace}"} ${entry.misses}`);
+    }
+
+    lines.push("# HELP cache_namespace_hit_rate Ratio of hits to lookups per namespace");
+    lines.push("# TYPE cache_namespace_hit_rate gauge");
+    for (const entry of stats.byNamespace) {
+      lines.push(`cache_namespace_hit_rate{namespace="${entry.namespace}"} ${formatValue(entry.hitRate)}`);
     }
   }
 

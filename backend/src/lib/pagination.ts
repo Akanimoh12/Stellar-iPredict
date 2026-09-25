@@ -1,3 +1,6 @@
+export const MAX_PAGINATION_LIMIT = 100;
+export const MAX_PAGINATION_OFFSET = 10_000;
+
 export interface PaginationParams {
   limit: number;
   offset: number;
@@ -36,7 +39,8 @@ export interface PaginatedResponse<T> {
 export function parsePagination(
   query: Record<string, unknown>,
   defaultLimit = 20,
-  maxLimit = 100
+  maxLimit = MAX_PAGINATION_LIMIT,
+  maxOffset = MAX_PAGINATION_OFFSET
 ): PaginationParams {
   let limit = defaultLimit;
   let offset = 0;
@@ -51,6 +55,11 @@ export function parsePagination(
   if (query && query.offset !== undefined && query.offset !== null) {
     const parsedOffset = parseInt(String(query.offset), 10);
     if (!Number.isNaN(parsedOffset) && parsedOffset >= 0) {
+      if (parsedOffset > maxOffset) {
+        throw new RangeError(
+          `Pagination offset ${parsedOffset} exceeds the maximum ${maxOffset}. Use cursor-based pagination for deeper results.`,
+        );
+      }
       offset = parsedOffset;
     }
   }

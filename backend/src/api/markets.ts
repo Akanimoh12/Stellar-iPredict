@@ -23,6 +23,7 @@ import {
   CACHE_TTLS,
 } from "../cache/cacheKeys.js";
 import { cacheControlPublic } from "../cache/cacheControl.js";
+import { MAX_PAGINATION_LIMIT, MAX_PAGINATION_OFFSET } from "../lib/pagination.js";
 
 type MarketParams = {
   id: string;
@@ -77,17 +78,28 @@ const categorySchema = z
     message: "Invalid category. Must be one of: Crypto, Sports, Politics, Entertainment, Science",
   });
 
-const marketsQuerySchema = z.object({
-  filter: z
-    .enum(["active", "resolved", "ended", "cancelled", "all"])
-    .default("all"),
-  category: categorySchema,
-  sort: z
-    .enum(["newest", "volume", "ending_soon", "bettors"])
-    .default("newest"),
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-});
+const marketsQuerySchema = z
+  .object({
+    filter: z
+      .enum(["active", "resolved", "ended", "cancelled", "all"])
+      .default("all"),
+    category: categorySchema,
+    sort: z
+      .enum(["newest", "volume", "ending_soon", "bettors"])
+      .default("newest"),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(MAX_PAGINATION_LIMIT).default(20),
+  })
+  .superRefine(({ page, limit }, ctx) => {
+    const offset = (page - 1) * limit;
+    if (offset > MAX_PAGINATION_OFFSET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["page"],
+        message: `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+      });
+    }
+  });
 
 const marketResponseSchema = {
   type: "object",
@@ -237,13 +249,13 @@ export function createMarketsRoutes(
             page: {
               type: "integer",
               minimum: 1,
-              description: "Page number (1-indexed)",
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
             },
             limit: {
               type: "integer",
               minimum: 1,
-              maximum: 100,
-              description: "Results per page",
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
             },
           },
         },
@@ -283,7 +295,8 @@ export function createMarketsRoutes(
         return reply.status(400).send({
           error: {
             code: "BAD_REQUEST",
-            message: "Invalid query parameters",
+            message:
+              parsed.error.issues[0]?.message ?? "Invalid query parameters",
             issues: parsed.error.issues,
             requestId: request.id,
           },
@@ -554,13 +567,13 @@ export function createMarketsRoutes(
             page: {
               type: "integer",
               minimum: 1,
-              description: "Page number (1-indexed)",
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
             },
             limit: {
               type: "integer",
               minimum: 1,
-              maximum: 100,
-              description: "Results per page",
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
             },
           },
         },
@@ -624,7 +637,13 @@ export function createMarketsRoutes(
 
       const query = request.query as { page?: number; limit?: number };
       const page = Math.max(1, query.page ?? 1);
-      const limit = Math.min(100, Math.max(1, query.limit ?? 50));
+      const limit = Math.min(MAX_PAGINATION_LIMIT, Math.max(1, query.limit ?? 50));
+      const offset = (page - 1) * limit;
+      if (offset > MAX_PAGINATION_OFFSET) {
+        throw badRequest(
+          `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+        );
+      }
 
       const cancellableDb = withCancellation(
         db,

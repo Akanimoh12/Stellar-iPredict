@@ -41,7 +41,7 @@ export class FinalizationOutcomeMismatchError extends Error {
 }
 
 function boolVal(value: boolean): xdr.ScVal {
-  return nativeToScVal(value, { type: "bool" });
+  return nativeToScVal(value);
 }
 
 function u64Val(value: number | bigint): xdr.ScVal {

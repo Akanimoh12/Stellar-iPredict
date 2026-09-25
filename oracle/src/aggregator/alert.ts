@@ -166,8 +166,9 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
 
     if (eligible.length === 0) {
       const line = "persistent submit failure (no alert channel configured for severity)";
-      if (severity === "SEV1") logger?.error(line, payload);
-      else logger?.warn(line, payload);
+      const logFields = { ...payload };
+      if (severity === "SEV1") logger?.error(line, logFields);
+      else logger?.warn(line, logFields);
       return;
     }
 

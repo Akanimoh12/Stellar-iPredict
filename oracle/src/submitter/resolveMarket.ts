@@ -223,6 +223,15 @@ export function createStellarSubmitter(options: {
   return {
     async submitResolution(marketId, outcome) {
       const caller = resolverKeypair.publicKey();
+      const sourceAccount = await server.getAccount(caller);
+
+      const contract = new Contract(contractId);
+      const operation = contract.call(
+        "resolve_market",
+        new Address(caller).toScVal(),
+        nativeToScVal(BigInt(marketId), { type: "u64" }),
+        nativeToScVal(outcome),
+      );
       let lastError: unknown;
 
       for (let rebuildAttempt = 1; rebuildAttempt <= maxRebuildAttempts; rebuildAttempt += 1) {

@@ -14,8 +14,6 @@ const schema = z.object({
   COUNCIL_THRESHOLD: positiveInteger.default(4),
   DATABASE_URL: z.string().min(1),
   SOROBAN_RPC_URL: z.string().url(),
-  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
-  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
   LOG_LEVEL: z.string().min(1).default("info"),
 
@@ -24,9 +22,12 @@ const schema = z.object({
 
   /** Health server options (Issue #449). */
   HEALTH_ENABLED: z.coerce.boolean().default(true),
-  HEALTH_PORT: positiveInteger.default(9102),
+  HEALTH_PORT: positiveInteger.default(9103),
   HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
   MAX_POLL_STALE_MS: positiveInteger.default(30_000),
+
+  /** Maximum time to drain an in-flight market after SIGTERM/SIGINT. */
+  SHUTDOWN_GRACE_MS: positiveInteger.default(20_000),
 
   /** Fraction (0–1) of dissenting votes that triggers a conflict flag. */
   CONFLICT_THRESHOLD: unitFraction.default(0.3),
@@ -104,5 +105,12 @@ const schema = z.object({
 
 export type AggregatorConfig = z.infer<typeof schema>;
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
-  return schema.parse(env);
+  const result = schema.safeParse(env);
+  if (!result.success) {
+    const details = result.error.issues
+      .map((issue) => `  ${issue.path.join(".") || "config"}: ${issue.message}`)
+      .join("\n");
+    throw new Error(`[ipredict-oracle] invalid configuration:\n${details}`);
+  }
+  return result.data;
 }

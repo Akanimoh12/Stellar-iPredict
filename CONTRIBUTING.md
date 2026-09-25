@@ -35,8 +35,11 @@ happens on the **`implementation-drips`** branch — not `main`.
    - Link the issue (`Closes #123`).
    - Make sure `npm run typecheck` and `npm test` pass in the package you touched.
 
-> There is **no CI/GitHub Actions** on this branch yet — checks are manual.
-> Please run typecheck/tests locally before requesting review.
+> **Automated CI Checks:** Every pull request targeting `implementation-drips` (or any feature branch) is automatically checked by GitHub Actions:
+> - **Node Services (`backend`, `oracle`, `indexer`, `db`):** Typecheck & test jobs run against isolated PostgreSQL 16 and Redis service containers.
+> - **Migration Testing & Idempotency (`db`):** Applies all SQL migrations in order against a clean Postgres container and re-runs to verify clean idempotency.
+> - **Code Linting:** Required lint check enforces code quality across all Node packages.
+> - **Dependency Vulnerability Scan:** Automated `npm audit` security scans check lockfiles for high-severity vulnerabilities on PRs and daily schedule.
 
 ### Pre-PR verification script
 

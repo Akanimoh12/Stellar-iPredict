@@ -14,7 +14,8 @@
     "schema:dump": "tsx scripts/schema-dump.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "pg": "^8.12.0"

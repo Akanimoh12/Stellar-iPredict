@@ -2,13 +2,15 @@ name: iPredict CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, implementation-drips]
   pull_request:
-    branches: [main]
+    branches: ['*']
+  schedule:
+    - cron: '0 2 * * *'
 
 jobs:
-  # ── Job 1: Frontend lint, test, and build ──────────────────────────────────
-  lint-test-build:
+  # ─── Job 1: Frontend lint, test, and build ──────────────────────────────────
+  frontend-check:
     name: Frontend (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
@@ -30,6 +32,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Run lint
+        working-directory: frontend
+        run: npm run lint
+
       - name: Run tests
         working-directory: frontend
         run: npm test
@@ -46,7 +52,7 @@ jobs:
           path: frontend/.next
           retention-days: 7
 
-  # ── Job 2: Rust contract check & test ──────────────────────────────────────
+  # ─── Job 2: Rust contract check & test ──────────────────────────────────────
   contract-check:
     name: Contracts (Rust)
     runs-on: ubuntu-latest
@@ -77,3 +83,248 @@ jobs:
       - name: Run contract tests
         working-directory: contracts
         run: cargo test --workspace
+
+  # ─── Job 3: Backend Node package check ─────────────────────────────────────
+  backend-check:
+    name: Backend API (Node 20)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install root and shared dependencies
+        run: npm ci
+
+      - name: Typecheck backend
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Run backend tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+          REDIS_URL: redis://localhost:6379
+        run: npm test
+
+  # ─── Job 4: Oracle Node package check ───────────────────────────────────────
+  oracle-check:
+    name: Oracle (Node 20)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck oracle
+        working-directory: oracle
+        run: npm run typecheck
+
+      - name: Run oracle tests
+        working-directory: oracle
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm test
+
+  # ─── Job 5: Indexer Node package check ──────────────────────────────────────
+  indexer-check:
+    name: Indexer (Node 20)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck indexer
+        working-directory: indexer
+        run: npm run typecheck
+
+      - name: Run indexer tests
+        working-directory: indexer
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+          REDIS_URL: redis://localhost:6379
+        run: npm test
+
+  # ─── Job 6: Database package & Migration Idempotency check ───────────────────
+  db-migrations-check:
+    name: DB & Migration Runner (Postgres 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck db
+        working-directory: db
+        run: npm run typecheck
+
+      - name: Run db tests
+        working-directory: db
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm test
+
+      - name: Apply database migrations (Run 1)
+        working-directory: db
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm run migrate
+
+      - name: Verify migration idempotency (Run 2)
+        working-directory: db
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm run migrate
+
+  # ─── Job 7: Node packages lint check ───────────────────────────────────────
+  node-lint:
+    name: Node Packages Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint across all Node packages
+        run: npm run lint
+
+  # ─── Job 8: Dependency Vulnerability Scan ───────────────────────────────────
+  vulnerability-scan:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run dependency vulnerability scan (Backend, Oracle, Indexer, DB, Frontend, Shared)
+        run: |
+          npm audit --audit-level=high || true
+          for dir in backend oracle indexer db shared frontend; do
+            if [ -d "$dir" ] && [ -f "$dir/package.json" ]; then
+              echo "Auditing $dir..."
+              (cd "$dir" && npm audit --audit-level=high) || exit 1
+            fi
+          done

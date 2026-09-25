@@ -2,7 +2,7 @@
   "name": "ipredict-indexer",
   "version": "0.1.0",
   "private": true,
-  "description": "iPredict Soroban event indexer — writes on-chain events to PostgreSQL",
+  "description": "iPredict Soroban event indexer \u2014 writes on-chain events to PostgreSQL",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -16,7 +16,8 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit",
     "rebuild:leaderboard": "tsx src/leaderboard-rebuild.job.ts",
-    "backfill:bet-count": "tsx src/backfill-bet-count.ts"
+    "backfill:bet-count": "tsx src/backfill-bet-count.ts",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@ipredict/shared": "*",

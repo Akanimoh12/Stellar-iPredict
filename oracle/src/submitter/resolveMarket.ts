@@ -45,6 +45,39 @@ export interface ResolveMarketDependencies {
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BACKOFF_MS = 1_000;
 
+export type ResolutionSubmissionFailureKind =
+  | "expired"
+  | "sequence"
+  | "ambiguous"
+  | "rejected";
+
+export class ResolutionSubmissionError extends Error {
+  constructor(
+    public readonly kind: ResolutionSubmissionFailureKind,
+    message: string,
+    public readonly txHash?: string,
+  ) {
+    super(message);
+    this.name = "ResolutionSubmissionError";
+  }
+
+  get mayHaveLanded(): boolean {
+    return this.kind === "ambiguous";
+  }
+}
+
+export function classifyResolutionFailure(value: unknown): ResolutionSubmissionFailureKind {
+  const text =
+    value instanceof Error
+      ? value.message
+      : typeof value === "string"
+        ? value
+        : JSON.stringify(value);
+  if (/expired|tx_too_late|too[ _-]?late|ledger.*bound/i.test(text)) return "expired";
+  if (/tx_bad_seq|bad[ _-]?seq|sequence/i.test(text)) return "sequence";
+  return "rejected";
+}
+
 /**
  * Submits the final `resolve_market` transaction for a market once council
  * threshold has been reached.
@@ -117,6 +150,31 @@ export async function resolveMarketOnChain(
     } catch (error) {
       lastError = error;
       deps.onRetry?.(trimmedId, attempt, error);
+
+      // A timeout or other ambiguous result may have landed. Re-check durable
+      // state before any retry so we never double-resolve after losing the RPC
+      // confirmation response.
+      if (
+        error instanceof ResolutionSubmissionError &&
+        error.mayHaveLanded &&
+        (await deps.isAlreadyResolved(trimmedId))
+      ) {
+        if (!error.txHash) return null;
+        const resolvedAt = Math.floor(Date.now() / 1_000);
+        let lagHours: number | undefined;
+        if (deps.metrics && endTime !== undefined) {
+          lagHours = deps.metrics.recordResolution(trimmedId, endTime, resolvedAt).lagHours;
+        }
+        const recovered: ResolveMarketResult = {
+          marketId: trimmedId,
+          outcome,
+          txHash: error.txHash,
+          ...(lagHours !== undefined ? { lagHours } : {}),
+        };
+        await deps.recordResult(recovered);
+        return recovered;
+      }
+
       if (attempt < maxRetries) {
         await new Promise((resolve) => setTimeout(resolve, attempt * retryBackoffMs));
       }
@@ -139,8 +197,15 @@ export function createStellarSubmitter(options: {
   contractId: string;
   networkPassphrase: string;
   resolverKeypair: Keypair;
+  maxRebuildAttempts?: number;
 }): OnChainSubmitter {
-  const { server, contractId, networkPassphrase, resolverKeypair } = options;
+  const {
+    server,
+    contractId,
+    networkPassphrase,
+    resolverKeypair,
+    maxRebuildAttempts = 3,
+  } = options;
 
   async function pollUntilTerminal(hash: string): Promise<rpc.Api.GetTransactionResponse> {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
@@ -148,7 +213,11 @@ export function createStellarSubmitter(options: {
       if (response.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) return response;
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
-    throw new Error(`resolve_market confirmation timed out for tx ${hash}`);
+    throw new ResolutionSubmissionError(
+      "ambiguous",
+      `resolve_market confirmation timed out for tx ${hash}`,
+      hash,
+    );
   }
 
   return {
@@ -163,29 +232,96 @@ export function createStellarSubmitter(options: {
         nativeToScVal(BigInt(marketId), { type: "u64" }),
         nativeToScVal(outcome),
       );
+      let lastError: unknown;
 
-      const tx = new TransactionBuilder(sourceAccount, { fee: "100000", networkPassphrase })
-        .addOperation(operation)
-        .setTimeout(300)
-        .build();
+      for (let rebuildAttempt = 1; rebuildAttempt <= maxRebuildAttempts; rebuildAttempt += 1) {
+        try {
+          // Fetching the source account inside the loop is deliberate: every
+          // rebuild receives a fresh sequence number and a fresh ledger bound.
+          const sourceAccount = await server.getAccount(caller);
+          const operation = new Contract(contractId).call(
+            "resolve_market",
+            new Address(caller).toScVal(),
+            nativeToScVal(BigInt(marketId), { type: "u64" }),
+            nativeToScVal(outcome),
+          );
 
-      const prepared = await server.prepareTransaction(tx);
-      prepared.sign(resolverKeypair);
+          const tx = new TransactionBuilder(sourceAccount, {
+            fee: "100000",
+            networkPassphrase,
+          })
+            .addOperation(operation)
+            .setTimeout(300)
+            .build();
 
-      const sendResponse = await server.sendTransaction(prepared);
-      if (sendResponse.status === "ERROR") {
-        throw new Error(`resolve_market rejected for market ${marketId}: ${sendResponse.status}`);
+          const prepared = await server.prepareTransaction(tx);
+          prepared.sign(resolverKeypair);
+
+          const sendResponse = await server.sendTransaction(prepared);
+          if (sendResponse.status === "TRY_AGAIN_LATER") {
+            throw new ResolutionSubmissionError(
+              "ambiguous",
+              `resolve_market network response was inconclusive for market ${marketId}`,
+            );
+          }
+          if (sendResponse.status === "ERROR") {
+            const kind = classifyResolutionFailure(sendResponse);
+            throw new ResolutionSubmissionError(
+              kind,
+              `resolve_market rejected for market ${marketId}: ${JSON.stringify(sendResponse)}`,
+            );
+          }
+
+          const confirmation = await pollUntilTerminal(sendResponse.hash);
+          if (confirmation.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+            return sendResponse.hash;
+          }
+
+          const kind = classifyResolutionFailure(confirmation);
+          if (
+            (kind === "expired" || kind === "sequence") &&
+            rebuildAttempt < maxRebuildAttempts
+          ) {
+            lastError = new ResolutionSubmissionError(
+              kind,
+              `resolve_market ${kind} failure; rebuilding transaction`,
+              sendResponse.hash,
+            );
+            continue;
+          }
+
+          throw new ResolutionSubmissionError(
+            kind,
+            `resolve_market failed on-chain for market ${marketId}: ${confirmation.status}`,
+            sendResponse.hash,
+          );
+        } catch (error) {
+          lastError = error;
+          const kind =
+            error instanceof ResolutionSubmissionError
+              ? error.kind
+              : classifyResolutionFailure(error);
+
+          if (
+            (kind === "expired" || kind === "sequence") &&
+            rebuildAttempt < maxRebuildAttempts
+          ) {
+            continue;
+          }
+
+          if (error instanceof ResolutionSubmissionError) throw error;
+          throw new ResolutionSubmissionError(
+            kind,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
-      if (sendResponse.status === "TRY_AGAIN_LATER") {
-        throw new Error(`resolve_market: network busy for market ${marketId}`);
-      }
 
-      const confirmation = await pollUntilTerminal(sendResponse.hash);
-      if (confirmation.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-        throw new Error(`resolve_market failed on-chain for market ${marketId}: ${confirmation.status}`);
-      }
-
-      return sendResponse.hash;
+      throw new Error(
+        `resolve_market exhausted ${maxRebuildAttempts} rebuild attempt(s): ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+      );
     },
   };
 }

@@ -2,7 +2,7 @@
   "name": "ipredict-oracle",
   "version": "0.1.0",
   "private": true,
-  "description": "iPredict oracle — council aggregator, data adapters, submitter, monitor",
+  "description": "iPredict oracle \u2014 council aggregator, data adapters, submitter, monitor",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -18,7 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check:sdk-version": "node ../scripts/check-sdk-version.js"
+    "check:sdk-version": "node ../scripts/check-sdk-version.js",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@ipredict/shared": "*",

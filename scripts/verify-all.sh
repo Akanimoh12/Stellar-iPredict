@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Services to check ─────────────────────────────────────────────────────────
-SERVICES=("backend" "indexer" "oracle")
+SERVICES=("backend" "db" "indexer" "oracle")
 
 echo -e "${BOLD}iPredict — Pre-PR Verification${NC}"
 echo -e "Branch: implementation-drips (no CI)"

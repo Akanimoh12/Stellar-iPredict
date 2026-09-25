@@ -4,6 +4,7 @@
   "private": true,
   "workspaces": [
     "backend",
+    "db",
     "indexer",
     "oracle",
     "shared"
@@ -11,6 +12,8 @@
   "scripts": {
     "build": "npm run build --workspace=@ipredict/shared && npm run build --workspaces --if-present",
     "typecheck": "npm run build --workspace=@ipredict/shared && npm run typecheck --workspaces --if-present",
-    "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present"
+    "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",
+    "audit": "npx audit-ci --config ./audit-ci.jsonc"
   }
 }

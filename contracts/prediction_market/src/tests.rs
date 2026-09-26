@@ -1737,3 +1737,241 @@ fn test_finalize_releases_bond_on_cancelled_market() {
     assert!(market.cancelled);
     assert!(!market.resolved);
 }
+
+// ── 74. Bond settlement arithmetic: escrow always nets to zero (submitter wins)
+
+#[test]
+fn test_bond_arithmetic_submitter_wins_nets_to_zero() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 100_0000000);
+    let challenger = funded_user(&t, 250_0000000);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &100_0000000);
+    t.client.challenge(&challenger, &m.id, &250_0000000);
+
+    let fees_before = t.client.get_accumulated_fees();
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+    let fees_after = t.client.get_accumulated_fees();
+
+    let submitter_payout = t.xlm.balance(&submitter);
+    let challenger_payout = t.xlm.balance(&challenger);
+    let protocol_credit = fees_after - fees_before;
+
+    // Escrow nets to zero: submitter gets their bond + half of challenger bond
+    // Remainder goes to protocol fees (including 10% council fee)
+    assert_eq!(
+        submitter_payout + challenger_payout + protocol_credit,
+        100_0000000 + 250_0000000
+    );
+}
+
+// ── 75. Bond settlement arithmetic: escrow always nets to zero (disputer wins)
+
+#[test]
+fn test_bond_arithmetic_disputer_wins_nets_to_zero() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 150_0000000);
+    let challenger = funded_user(&t, 300_0000000);
+
+    t.client.submit_outcome(&submitter, &m.id, &false, &150_0000000);
+    t.client.challenge(&challenger, &m.id, &300_0000000);
+
+    let fees_before = t.client.get_accumulated_fees();
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+    let fees_after = t.client.get_accumulated_fees();
+
+    let submitter_payout = t.xlm.balance(&submitter);
+    let challenger_payout = t.xlm.balance(&challenger);
+    let protocol_credit = fees_after - fees_before;
+
+    // Escrow nets to zero: disputer gets both bonds minus 10% council fee on loser bond
+    assert_eq!(
+        submitter_payout + challenger_payout + protocol_credit,
+        150_0000000 + 300_0000000
+    );
+}
+
+// ── 76. Bond settlement: boundary case with minimal bonds
+
+#[test]
+fn test_bond_arithmetic_minimal_bonds() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 100_0000000);
+    let challenger = funded_user(&t, 200_0000000);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &100_0000000);
+    t.client.challenge(&challenger, &m.id, &200_0000000);
+
+    let fees_before = t.client.get_accumulated_fees();
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+    let fees_after = t.client.get_accumulated_fees();
+
+    let submitter_payout = t.xlm.balance(&submitter);
+    let challenger_payout = t.xlm.balance(&challenger);
+    let protocol_credit = fees_after - fees_before;
+
+    assert_eq!(
+        submitter_payout + challenger_payout + protocol_credit,
+        100_0000000 + 200_0000000
+    );
+}
+
+// ── 77. Bond settlement: boundary case with large bonds
+
+#[test]
+fn test_bond_arithmetic_large_bonds() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 10_000_0000000);
+    let challenger = funded_user(&t, 25_000_0000000);
+
+    t.client.submit_outcome(&submitter, &m.id, &false, &10_000_0000000);
+    t.client.challenge(&challenger, &m.id, &25_000_0000000);
+
+    let fees_before = t.client.get_accumulated_fees();
+    t.client.resolve_challenge(&t.admin, &m.id, &false);
+    let fees_after = t.client.get_accumulated_fees();
+
+    let submitter_payout = t.xlm.balance(&submitter);
+    let challenger_payout = t.xlm.balance(&challenger);
+    let protocol_credit = fees_after - fees_before;
+
+    assert_eq!(
+        submitter_payout + challenger_payout + protocol_credit,
+        10_000_0000000 + 25_000_0000000
+    );
+}
+
+// ── 78. Bond settlement: bonds differing by one stroops
+
+#[test]
+fn test_bond_arithmetic_unit_difference() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 100_0000000);
+    let challenger = funded_user(&t, 100_0000001);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &100_0000000);
+    t.client.challenge(&challenger, &m.id, &100_0000001);
+
+    let fees_before = t.client.get_accumulated_fees();
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+    let fees_after = t.client.get_accumulated_fees();
+
+    let submitter_payout = t.xlm.balance(&submitter);
+    let challenger_payout = t.xlm.balance(&challenger);
+    let protocol_credit = fees_after - fees_before;
+
+    assert_eq!(
+        submitter_payout + challenger_payout + protocol_credit,
+        100_0000000 + 100_0000001
+    );
+}
+
+// ── 79. Council fee calculation is consistent and documented
+
+#[test]
+fn test_council_fee_calculation_is_10_percent() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, 1_000_0000000);
+    let challenger = funded_user(&t, 2_000_0000000);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &1_000_0000000);
+    t.client.challenge(&challenger, &m.id, &2_000_0000000);
+
+    t.client.resolve_challenge(&t.admin, &m.id, &false);
+
+    let fees = t.client.get_accumulated_fees();
+    // Council fee on loser (submitter) bond: 10% of 1_000_0000000 = 100_0000000
+    assert_eq!(fees, 100_0000000);
+}
+
+// ── 80. Concurrent operations: submission and challenge in same ledger
+
+#[test]
+fn test_concurrent_submission_and_challenge_same_ledger() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, SUB_BOND);
+    let challenger = funded_user(&t, DIS_BOND);
+
+    // Both submit in the "same" logical moment (no time advance)
+    t.client.submit_outcome(&submitter, &m.id, &true, &SUB_BOND);
+    t.client.challenge(&challenger, &m.id, &DIS_BOND);
+
+    let submission = t.client.get_oracle_submission(&m.id);
+    assert_eq!(submission.state, OracleState::Escalated);
+    assert_eq!(submission.challenger, Some(challenger.clone()));
+
+    // Market should escalate correctly
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+    assert_eq!(t.xlm.balance(&submitter), SUB_BOND + DIS_BOND / 2);
+}
+
+// ── 81. Concurrent operations: submission then immediate challenge
+
+#[test]
+fn test_concurrent_submission_then_immediate_challenge() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, SUB_BOND);
+    let challenger = funded_user(&t, DIS_BOND);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &SUB_BOND);
+    advance_time(&t.env, 1); // minimal time advance
+    t.client.challenge(&challenger, &m.id, &DIS_BOND);
+
+    let submission = t.client.get_oracle_submission(&m.id);
+    assert_eq!(submission.state, OracleState::Escalated);
+}
+
+// ── 82. Concurrent operations: market cancellation during submission window
+
+#[test]
+fn test_market_cancellation_during_submission_window() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, SUB_BOND);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &SUB_BOND);
+    advance_time(&t.env, 1);
+    t.client.cancel_market(&t.admin, &m.id);
+
+    let submission = t.client.get_oracle_submission(&m.id);
+    assert_eq!(submission.state, OracleState::Submitted);
+
+    // Bonds must still be released
+    advance_time(&t.env, CHALLENGE_WINDOW_SECS);
+    t.client.finalize_outcome(&m.id);
+    assert_eq!(t.xlm.balance(&submitter), SUB_BOND);
+}
+
+// ── 83. Concurrent operations: market resolution during escalation
+
+#[test]
+fn test_market_force_resolution_during_escalation() {
+    let t = setup();
+    let m = expired_market_with_bets(&t);
+    let submitter = funded_user(&t, SUB_BOND);
+    let challenger = funded_user(&t, DIS_BOND);
+
+    t.client.submit_outcome(&submitter, &m.id, &true, &SUB_BOND);
+    t.client.challenge(&challenger, &m.id, &DIS_BOND);
+
+    // Admin force-resolves out-of-band during escalation
+    t.client.resolve_market(&t.admin, &m.id, &false);
+
+    // Council can still settle bonds (market remains unresolved in oracle storage)
+    t.client.resolve_challenge(&t.admin, &m.id, &true);
+
+    // Market state is not updated by oracle (already resolved)
+    assert_eq!(t.client.get_market(&m.id).outcome, false);
+
+    // But bonds are still properly distributed
+    let challenger_payout = t.xlm.balance(&challenger);
+    assert!(challenger_payout == 0); // disputer loses
+}

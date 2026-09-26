@@ -11,9 +11,11 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/test/**"],
-      // Fail the run only when coverage is explicitly requested via
-      // `vitest run --coverage`; a plain `npm test` is unaffected.
       all: false,
+      lines: 65,
+      functions: 65,
+      branches: 55,
+      statements: 65,
     },
   },
   resolve: {

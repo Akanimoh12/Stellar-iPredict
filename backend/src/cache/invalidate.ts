@@ -179,15 +179,16 @@ export async function invalidateOnMarketResolved(
 }
 
 /**
- * Invalidate caches that become stale when a market is **cancelled**.
+ * Invalidate the leaderboard cache.
  *
- * Same scope as resolution — the market status changed and any cached lists
- * are now stale.
- *
- * Event mapping: `mkt:cancelled` → `market:{id}`, `odds:{id}`, `markets:all`,
- *                                   `markets:active`
+ * Event mapping: leaderboard updated → `ipredict:v1:leaderboard:top20`
+ * (or the current versioned key).
  */
-export async function invalidateOnMarketCancelled(
+export async function invalidateLeaderboardCache(
+  redis: Pick<Redis, "del">,
+): Promise<number> {
+  return invalidate(redis, leaderboardKey());
+}
   redis: Pick<Redis, "del">,
   marketId: number | string,
 ): Promise<number> {

@@ -51,6 +51,18 @@ export const DEFAULT_CIRCUIT_OPTIONS: CircuitBreakerOptions = {
   halfOpenSuccessThreshold: 1,
 };
 
+/**
+ * Calculates the backoff delay for HALF_OPEN state based on consecutive failures.
+ * More consecutive failures → longer backoff, preventing stampede when Redis recovers.
+ */
+export function calculateHalfOpenBackoff(
+  consecutiveFailures: number,
+  baseMs: number = 30_000,
+  multiplier: number = 1_500,
+): number {
+  return Math.min(baseMs * Math.pow(multiplier, Math.min(consecutiveFailures - 1, 5)), 300_000);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -120,13 +132,15 @@ export class RedisCircuitBreaker {
     }
 
     if (this.state === "open") {
-      if (Date.now() - (this.openedAt ?? 0) >= this.options.resetTimeoutMs) {
-        this.state = "half_open";
-        this.halfOpenSuccesses = 0;
-        return true;
-      }
-      return false;
+    const elapsed = Date.now() - (this.openedAt ?? 0);
+    const backoff = calculateHalfOpenBackoff(this.failureCount, this.options.resetTimeoutMs);
+    if (elapsed >= backoff) {
+      this.state = "half_open";
+      this.halfOpenSuccesses = 0;
+      return true;
     }
+    return false;
+  }
 
     // HALF_OPEN — allow a bounded number of probe calls.
     const threshold =

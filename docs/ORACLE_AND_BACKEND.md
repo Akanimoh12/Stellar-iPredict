@@ -137,11 +137,9 @@ oracle submission is open, the finalizers still run so bonds are never stranded
 in escrow — they simply skip the resolution step and leave the market as it is.
 
 Oracle-specific contract errors: `21` submission exists, `22` submission not
-found, `23` already challenged, `24` challenge window not elapsed, `25` bond
-transfer failed (reserved — bond escrow traps rather than returning it),
-`26` challenge window closed, `27` invalid state transition, `28` bond too
-small. Codes `21`–`25` were already declared on `implementation-drips` and keep
-their numbering and names.
+found, `23` already challenged, `24` challenge window not elapsed, `25` challenge
+window closed, `26` invalid state transition, `27` bond too small. These errors
+are reachable and documented at their definition site in the contract source.
 
 ---
 

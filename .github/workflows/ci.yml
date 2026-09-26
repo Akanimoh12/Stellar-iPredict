@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
 jobs:
   # ─── Job 1: Frontend lint, test, and build ──────────────────────────────────
   frontend-check:
@@ -19,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -46,7 +51,7 @@ jobs:
 
       - name: Upload build artifact
         if: matrix.node-version == 20
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
         with:
           name: frontend-build
           path: frontend/.next
@@ -59,15 +64,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc940cb3f9632 # v1.78.0
         with:
           targets: wasm32-unknown-unknown, wasm32v1-none
 
       - name: Cache Cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@13aacd865c20de90d75de7b05d64711245b6baab # v4.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -114,10 +119,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
           cache: npm
@@ -129,12 +134,20 @@ jobs:
         working-directory: backend
         run: npm run typecheck
 
-      - name: Run backend tests
+      - name: Run backend tests with coverage
         working-directory: backend
         env:
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
           REDIS_URL: redis://localhost:6379
-        run: npm test
+        run: npm test -- --coverage
+
+      - name: Upload backend coverage
+        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 5
 
   # ─── Job 4: Oracle Node package check ───────────────────────────────────────
   oracle-check:
@@ -157,10 +170,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
           cache: npm
@@ -172,11 +185,19 @@ jobs:
         working-directory: oracle
         run: npm run typecheck
 
-      - name: Run oracle tests
+      - name: Run oracle tests with coverage
         working-directory: oracle
         env:
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
-        run: npm test
+        run: npm test -- --coverage
+
+      - name: Upload oracle coverage
+        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        if: always()
+        with:
+          name: oracle-coverage
+          path: oracle/coverage/
+          retention-days: 5
 
   # ─── Job 5: Indexer Node package check ──────────────────────────────────────
   indexer-check:
@@ -208,10 +229,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
           cache: npm
@@ -223,12 +244,20 @@ jobs:
         working-directory: indexer
         run: npm run typecheck
 
-      - name: Run indexer tests
+      - name: Run indexer tests with coverage
         working-directory: indexer
         env:
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
           REDIS_URL: redis://localhost:6379
-        run: npm test
+        run: npm test -- --coverage
+
+      - name: Upload indexer coverage
+        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        if: always()
+        with:
+          name: indexer-coverage
+          path: indexer/coverage/
+          retention-days: 5
 
   # ─── Job 6: Database package & Migration Idempotency check ───────────────────
   db-migrations-check:
@@ -251,10 +280,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
           cache: npm
@@ -291,10 +320,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
           cache: npm
@@ -312,10 +341,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
 
       - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
         with:
           node-version: 20
 

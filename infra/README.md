@@ -107,6 +107,35 @@ processing events. During graceful shutdown, call `lock.release()` before
 closing the pool. PostgreSQL releases the lock automatically if the process or
 its dedicated connection dies, so a replacement can start without manual
 cleanup.
+### Structured Logging and Aggregation
+
+All services emit structured JSON logs to stdout, which are collected by the
+`log-collector` service using Fluent Bit. Logs include correlation IDs that
+allow tracing a single request or market processing attempt across backend, oracle,
+and indexer services.
+
+**Correlation IDs:** The `x-request-id` header carries a unique identifier:
+- **Backend → Oracle webhook:** The backend sets `x-request-id` on requests to the finalize webhook
+- **Oracle market processing:** Oracle generates a fresh correlation ID for each market, stored in `oracle_submissions.correlation_id`
+- **Cross-service queries:** A single `x-request-id` or `correlation_id` value retrieves the full processing history
+
+Field naming is consistent across services:
+- `timestamp` — ISO 8601 UTC timestamp
+- `level` — debug, info, warn, or error
+- `message` — human-readable summary
+- `requestId` / `correlationId` — tracing identifier
+- Service-specific fields as needed (e.g., `durationMs`, `statusCode`, `marketId`)
+
+**Log aggregation destination:** Logs are aggregated to the `aggregated-logs`
+volume at `/var/log/ipredict/containers.log`. In production, configure an external
+aggregator (Datadog, Splunk, CloudWatch) to consume from Docker's Fluentd socket.
+Edit [`logging/fluent-bit.conf`](logging/fluent-bit.conf) to change the destination.
+
+**Retention:** Operational logs (access logs, routine housekeeping) are retained
+for 7 days. Audit logs (oracle submissions, disputes, council votes) are retained
+for 90 days and only removed by a reviewed manual process — see
+[`docs/DATA-RETENTION.md`](../docs/DATA-RETENTION.md) for the full policy.
+
 ### Runtime and logging policy
 
 Long-running services use `restart: always` and explicit CPU and memory

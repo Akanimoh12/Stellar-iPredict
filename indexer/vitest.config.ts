@@ -10,6 +10,18 @@ export default defineConfig({
     // need a local Docker daemon. Keep the default `npm test` deterministic by
     // running them explicitly through `npm run test:integration`.
     exclude: ["src/__tests__/integration/**", "node_modules/**", "dist/**"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      reportsDirectory: "coverage",
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts", "src/__tests__/**"],
+      all: false,
+      lines: 55,
+      functions: 55,
+      branches: 45,
+      statements: 55,
+    },
     projects: [
       {
         test: {

@@ -70,6 +70,7 @@ const DISPUTER_BOND: i128  = 200_0000000; // 200 XLM — minimum disputer bond
 const CHALLENGE_WINDOW: u64 = 86_400;     // 24h to challenge a submission
 const COUNCIL_WINDOW: u64   = 259_200;    // 72h for the council to rule
 const COUNCIL_FEE_BPS: i128 = 1_000;      // 10% of the loser's bond
+const CANCELLATION_DEADLINE: u64 = 604_800; // 7d after expiry before permissionless cancellation
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -335,6 +336,13 @@ pub struct WindowUpdatedEvent {
     pub old_value:      u64,
     pub new_value:      u64,
     pub updated_at:     u64,
+}
+
+#[contractevent(topics = ["oracle", "cancelled"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCancelledEvent {
+    pub market_id:     u64,
+    pub cancelled_at:  u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -1177,6 +1185,46 @@ impl PredictionMarketContract {
             .transfer(&env.current_contract_address(), &user, &gross);
 
         Ok(gross)
+    }
+
+    pub fn cancel_unsubmitted_market(env: Env, market_id: u64) -> Result<(), MarketError> {
+        let now = env.ledger().timestamp();
+        let mut market = Self::load_market(&env, market_id)?;
+
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+
+        if now < market.end_time {
+            return Err(MarketError::MarketNotExpired);
+        }
+
+        let submission_exists = env.storage().persistent().has(&DataKey::Submission(market_id));
+        if submission_exists {
+            return Err(MarketError::SubmissionExists);
+        }
+
+        if now < market.end_time + CANCELLATION_DEADLINE {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        market.cancelled = true;
+        let mkt_key = DataKey::Market(market_id);
+        env.storage().persistent().set(&mkt_key, &market);
+        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+
+        let net_pool    = market.total_yes + market.total_no;
+        let fees_in_pool = net_pool * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS);
+        let mut acc_fees: i128 = env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0);
+        acc_fees = if fees_in_pool < acc_fees { acc_fees - fees_in_pool } else { 0 };
+        env.storage().instance().set(&DataKey::AccumulatedFees, &acc_fees);
+
+        MarketCancelledEvent {
+            market_id,
+            cancelled_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
     // ── Claim ─────────────────────────────────────────────────────────────

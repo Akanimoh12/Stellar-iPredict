@@ -1975,3 +1975,123 @@ fn test_market_force_resolution_during_escalation() {
     let challenger_payout = t.xlm.balance(&challenger);
     assert!(challenger_payout == 0); // disputer loses
 }
+
+#[test]
+fn test_cancel_unsubmitted_market_success() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000);
+    t.client.place_bet(&bob, &id, &false, &50_0000000);
+
+    let market = t.client.get_market(&id);
+    let expiry = market.end_time;
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: expiry + 604_800 + 1,
+        protocol_version: 21,
+        sequence_number: 0,
+        network_id: BytesN::from_array(&t.env, &[0; 32]),
+        base_fee: 100,
+        min_temp_entry_expiration: 16,
+        min_persistent_entry_expiration: 2592000,
+    });
+
+    t.client.cancel_unsubmitted_market(&id);
+
+    let cancelled_market = t.client.get_market(&id);
+    assert!(cancelled_market.cancelled);
+
+    let alice_before = t.xlm.balance(&alice);
+    let bob_before = t.xlm.balance(&bob);
+
+    let alice_refund = t.client.cancel_refund(&alice, &id);
+    assert_eq!(alice_refund, 100_0000000);
+
+    let bob_refund = t.client.cancel_refund(&bob, &id);
+    assert_eq!(bob_refund, 50_0000000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_cancel_unsubmitted_market_rejected_before_expiry() {
+    let t = setup();
+    let id = create_test_market(&t);
+
+    let market = t.client.get_market(&id);
+    let expiry = market.end_time;
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: expiry - 1,
+        protocol_version: 21,
+        sequence_number: 0,
+        network_id: BytesN::from_array(&t.env, &[0; 32]),
+        base_fee: 100,
+        min_temp_entry_expiration: 16,
+        min_persistent_entry_expiration: 2592000,
+    });
+
+    t.client.cancel_unsubmitted_market(&id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #21)")]
+fn test_cancel_unsubmitted_market_rejected_with_submission() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let submitter = Address::generate(&t.env);
+    fund_user(&t, &submitter, 500_0000000);
+
+    let market = t.client.get_market(&id);
+    let expiry = market.end_time;
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: expiry + 1,
+        protocol_version: 21,
+        sequence_number: 0,
+        network_id: BytesN::from_array(&t.env, &[0; 32]),
+        base_fee: 100,
+        min_temp_entry_expiration: 16,
+        min_persistent_entry_expiration: 2592000,
+    });
+
+    t.client.submit_outcome(&submitter, &id, &true, &100_0000000);
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: expiry + 604_800 + 1,
+        protocol_version: 21,
+        sequence_number: 0,
+        network_id: BytesN::from_array(&t.env, &[0; 32]),
+        base_fee: 100,
+        min_temp_entry_expiration: 16,
+        min_persistent_entry_expiration: 2592000,
+    });
+
+    t.client.cancel_unsubmitted_market(&id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_cancel_unsubmitted_market_rejected_before_deadline() {
+    let t = setup();
+    let id = create_test_market(&t);
+
+    let market = t.client.get_market(&id);
+    let expiry = market.end_time;
+
+    t.env.ledger().set(LedgerInfo {
+        timestamp: expiry + 604_800 - 1,
+        protocol_version: 21,
+        sequence_number: 0,
+        network_id: BytesN::from_array(&t.env, &[0; 32]),
+        base_fee: 100,
+        min_temp_entry_expiration: 16,
+        min_persistent_entry_expiration: 2592000,
+    });
+
+    t.client.cancel_unsubmitted_market(&id);
+}

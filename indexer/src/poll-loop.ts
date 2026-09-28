@@ -1,5 +1,6 @@
 import type { Logger } from "./log.js";
 import { metrics } from "./metrics.js";
+import { recordPollLoopProgress } from "./health.js";
 
 export interface RpcEvent {
   contractId: string;
@@ -37,6 +38,7 @@ export interface PollOnceResult {
 
 export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> {
   const { rpc, db, contractIds, defaultStartLedger = 0, logger } = config;
+  const startTime = Date.now();
 
   const checkpoint = await db.getCheckpointLedger();
   const startLedger = checkpoint !== null ? checkpoint + 1 : defaultStartLedger;
@@ -55,7 +57,14 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
   const lag = latestLedger - (checkpoint ?? defaultStartLedger);
   metrics.indexerLag.set(lag);
 
-  logger?.info("poll iteration complete", { eventsWritten: events.length, latestLedger, lag });
+  // Record poll duration
+  const durationSeconds = (Date.now() - startTime) / 1000;
+  metrics.pollDuration.observe(durationSeconds);
+
+  // Update health tracking
+  recordPollLoopProgress(latestLedger);
+
+  logger?.info("poll iteration complete", { eventsWritten: events.length, latestLedger, lag, durationSeconds });
 
   return { eventsWritten: events.length, latestLedger };
 }

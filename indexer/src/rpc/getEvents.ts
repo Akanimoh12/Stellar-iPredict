@@ -1,6 +1,8 @@
 import { rpc } from "@stellar/stellar-sdk";
 import type { RpcClient, RpcEvent } from "../poll-loop.js";
 import { metrics } from "../metrics.js";
+import { makeContractFilter } from "../contract-filter.js";
+import type { Logger } from "../log.js";
 
 export class LedgerGapError extends Error {
   constructor(public readonly startLedger: number, message: string) {
@@ -11,9 +13,13 @@ export class LedgerGapError extends Error {
 
 export class SorobanRpcClient implements RpcClient {
   private readonly server: rpc.Server;
+  private readonly contractFilter: (contractId: string) => boolean;
+  private readonly logger?: Logger;
 
-  constructor(rpcUrl: string) {
+  constructor(rpcUrl: string, allowedContractIds: string[], logger?: Logger) {
     this.server = new rpc.Server(rpcUrl);
+    this.contractFilter = makeContractFilter(allowedContractIds);
+    this.logger = logger;
   }
 
   async getEvents(opts: {
@@ -44,14 +50,28 @@ export class SorobanRpcClient implements RpcClient {
 
         latestLedger = response.latestLedger;
 
-        const mappedEvents: RpcEvent[] = (response.events as any[]).map((ev) => ({
-          contractId: ev.contractId?.toString() ?? "",
-          ledger: Number(ev.ledger),
-          type: ev.type,
-          body: ev,
-        }));
+        // Filter events BEFORE decoding to prevent processing unknown contracts
+        for (const ev of response.events as any[]) {
+          const contractId = ev.contractId?.toString() ?? "";
+          
+          // Reject events from unknown contracts
+          if (!this.contractFilter(contractId)) {
+            this.logger?.warn("rejected event from unconfigured contract", {
+              contractId,
+              ledger: Number(ev.ledger),
+              type: ev.type,
+            });
+            continue;
+          }
 
-        allEvents.push(...mappedEvents);
+          allEvents.push({
+            contractId,
+            ledger: Number(ev.ledger),
+            type: ev.type,
+            body: ev,
+          });
+        }
+
         cursor = response.cursor;
       } while (cursor);
 

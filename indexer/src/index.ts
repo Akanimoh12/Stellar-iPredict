@@ -198,6 +198,7 @@ export async function main(): Promise<void> {
 
   // Initialize metrics server
   const metricsServer = new MetricsServer();
+  await metricsServer.start();
 
   const isBackfill = process.argv.includes("--backfill");
 

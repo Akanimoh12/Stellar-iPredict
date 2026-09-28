@@ -118,6 +118,12 @@ services:
   migrate:
     profiles: ["migrate"]
     image: postgres:16-alpine
+    # This is a finite, operator-invoked job. Its successful exit status is the
+    # readiness signal, so it must not be restarted or given a long-running
+    # container healthcheck.
+    restart: "no"
+    cpus: "0.25"
+    mem_limit: 128m
     environment:
       PGHOST: postgres
       PGUSER: ${POSTGRES_USER}
@@ -209,6 +215,7 @@ services:
       POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
       EVENTS_PER_PAGE: ${EVENTS_PER_PAGE:-200}
       START_LEDGER: ${START_LEDGER:-0}
+      METRICS_PORT: "9090"
     # Exactly one. Two indexers polling the same contract would race on the
     # events table and double-count leaderboard points.
     deploy:
@@ -222,6 +229,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:9090/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     stop_grace_period: 20s
     logging: *logging
 
@@ -327,6 +344,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # The monitor has no HTTP server; verify that its Node process is alive.
+    # Postgres readiness is separately enforced by depends_on above.
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     stop_grace_period: 20s
     logging: *logging
 
@@ -368,6 +393,14 @@ services:
     volumes:
       - ./logging/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - aggregated-logs:/var/log/ipredict
+    healthcheck:
+      # The collector is PID 1; this fails if it crashes while preserving the
+      # local log driver as a fallback for its own output.
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     logging:
       driver: local
       options:

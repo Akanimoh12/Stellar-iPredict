@@ -141,6 +141,9 @@ for 90 days and only removed by a reviewed manual process — see
 Long-running services use `restart: always` and explicit CPU and memory
 ceilings. The defaults are starting points; monitor throttling, out-of-memory
 restarts, database working-set size, and indexer lag before changing them.
+The opt-in `migrate` service is intentionally different: it has a bounded
+resource allocation and `restart: "no"`, because its successful one-shot exit
+is the migration readiness signal.
 
 | Service | CPUs | Memory |
 |---|---:|---:|
@@ -726,6 +729,11 @@ The production compose file (`docker-compose.production.yml`) includes container
 dependent services (API, indexer) wait for Postgres/Redis to be ready. Health
 checks are intentionally conservative: services will retry several times before
 being considered unhealthy to avoid false starts on noisy hosts.
+
+Every long-running production service has a restart policy and healthcheck.
+The `migrate` profile is the sole exception because it is not a daemon: Compose
+waits for its successful exit after Postgres is healthy before application
+services are started.
 
 Bring the stack up with:
 

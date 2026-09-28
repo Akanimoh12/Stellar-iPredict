@@ -1,13 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import {
   reconcileBonds,
   runBondReconciliation,
+  runBondReconciliationSafe,
   recordSettlement,
   type TerminalSubmission,
   type BondSettlement,
   type BondReconciliationOptions,
 } from "../src/aggregator/bond-reconciliation.js";
+import * as alertModule from "../src/aggregator/alert.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,6 +131,88 @@ describe("runBondReconciliation", () => {
     const pool = buildPool([], []);
     const result = await runBondReconciliation(pool);
     expect(result.ranAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("calls alertBondDiscrepancy for each discrepancy (Issue #573)", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondDiscrepancy");
+    
+    const pool = buildPool(
+      [
+        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
+        { market_id: "2", submitter: "GYYY", bond_amount: "2000000000", status: "finalized", finalized_at: "2026-01-01" },
+      ],
+      [], // No settlements
+    );
+
+    await runBondReconciliation(pool);
+
+    expect(alertSpy).toHaveBeenCalledTimes(2);
+    expect(alertSpy).toHaveBeenCalledWith("1", "GXXX", 1000000000n, null, ["GXXX"]);
+    expect(alertSpy).toHaveBeenCalledWith("2", "GYYY", 2000000000n, null, ["GYYY"]);
+    
+    alertSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runBondReconciliationSafe (wrapper that alerts on failure)
+// ---------------------------------------------------------------------------
+
+describe("runBondReconciliationSafe", () => {
+  function buildPool(submissions: object[], settlements: object[]) {
+    return {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes("oracle_submissions")) return { rows: submissions };
+        if (sql.includes("bond_settlements")) return { rows: settlements };
+        return { rows: [] };
+      }),
+    };
+  }
+
+  it("returns result when reconciliation succeeds", async () => {
+    const pool = buildPool(
+      [{ market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" }],
+      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02" }],
+    );
+    
+    const result = await runBondReconciliationSafe(pool);
+    expect(result).not.toBeNull();
+    expect(result?.checkedCount).toBe(1);
+  });
+
+  it("alerts and re-throws when reconciliation fails (Issue #573)", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondReconciliationFailure");
+    const pool = {
+      query: vi.fn().mockRejectedValue(new Error("Database connection lost")),
+    };
+    
+    await expect(runBondReconciliationSafe(pool, {}, "2026-09-28T10:00:00Z")).rejects.toThrow("Database connection lost");
+    
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Database connection lost" }),
+      0,
+      "2026-09-28T10:00:00Z",
+    );
+    
+    alertSpy.mockRestore();
+  });
+
+  it("alerts with null lastSuccessfulRun when not provided", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondReconciliationFailure");
+    const pool = {
+      query: vi.fn().mockRejectedValue(new Error("Query timeout")),
+    };
+    
+    await expect(runBondReconciliationSafe(pool)).rejects.toThrow("Query timeout");
+    
+    expect(alertSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      0,
+      null,
+    );
+    
+    alertSpy.mockRestore();
   });
 });
 

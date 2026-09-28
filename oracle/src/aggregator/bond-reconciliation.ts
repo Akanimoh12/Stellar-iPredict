@@ -29,6 +29,7 @@
 
 import type { QueryablePool } from "./tally.js";
 import type { Logger } from "../log.js";
+import { alertBondDiscrepancy, alertBondReconciliationFailure } from "./alert.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -211,6 +212,16 @@ export async function runBondReconciliation(
       status: d.status,
       finalizedAt: d.finalizedAt.toISOString(),
     });
+    
+    // Alert immediately with highest severity (Issue #573)
+    alertBondDiscrepancy(
+      d.marketId,
+      d.submitter,
+      d.expectedAmount,
+      null, // actualAmount is null since there's no settlement record
+      [d.submitter], // affected party
+    );
+    
     if (onDiscrepancy) {
       await onDiscrepancy(d);
     }
@@ -222,6 +233,35 @@ export async function runBondReconciliation(
     discrepancies,
     ranAt,
   };
+}
+
+/**
+ * Safe wrapper for bond reconciliation that alerts on failure (Issue #573).
+ * 
+ * A reconciliation job that fails to run is as serious as one that finds a
+ * discrepancy - alert on both, since silence from a broken job looks identical
+ * to silence from a healthy one.
+ */
+export async function runBondReconciliationSafe(
+  pool: QueryablePool,
+  options: BondReconciliationOptions = {},
+  lastSuccessfulRun: string | null = null,
+): Promise<BondReconciliationResult | null> {
+  try {
+    return await runBondReconciliation(pool, options);
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    options.logger?.error("bond reconciliation failed", {
+      error: err.message,
+      stack: err.stack,
+    });
+    
+    // Alert on reconciliation failure (Issue #573)
+    alertBondReconciliationFailure(err, 0, lastSuccessfulRun);
+    
+    // Re-throw to maintain backward compatibility
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

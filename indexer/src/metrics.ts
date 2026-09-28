@@ -178,6 +178,9 @@ export class EventCounter {
  * `eventsByType`: Counter for events processed, broken down by event type.
  * `eventsDeadLettered`: Counter for events that failed processing.
  * `pollDuration`: Histogram tracking poll iteration duration in seconds.
+ * `deadLetterQueueDepth`: Gauge tracking the current count of unresolved
+ *   dead-letter events (issue #496). Updated by refreshDeadLetterQueueDepth.
+ *   Alerts when the value exceeds DEAD_LETTER_ALERT_THRESHOLD.
  */
 export const metrics = {
   eventsProcessed: new Counter(),
@@ -186,6 +189,7 @@ export const metrics = {
   eventsByType: new EventCounter(),
   eventsDeadLettered: new Counter(),
   pollDuration: new Histogram([0.1, 0.5, 1, 2.5, 5, 10, 30, 60]),
+  deadLetterQueueDepth: new Gauge(),
 };
 
 function escapeLabel(value: string): string {
@@ -213,6 +217,7 @@ export function serializeRpcErrors(): string {
  * - events_processed_total: counter of successfully processed events
  * - events_by_type_total: counter of events by type
  * - events_dead_lettered_total: counter of failed events
+ * - dead_letter_queue_depth: gauge of current unresolved dead-letter rows
  * - poll_duration_seconds: histogram of poll iteration duration
  * - rpc_errors_total: counter of failed RPC calls (by service + operation)
  */
@@ -243,6 +248,11 @@ export function serializeMetrics(): string {
   lines.push("# HELP events_dead_lettered_total Total number of events that failed processing");
   lines.push("# TYPE events_dead_lettered_total counter");
   lines.push(`events_dead_lettered_total ${metrics.eventsDeadLettered.get()}`);
+
+  // Dead-letter queue depth gauge (issue #496)
+  lines.push("# HELP dead_letter_queue_depth Current number of unresolved dead-letter events");
+  lines.push("# TYPE dead_letter_queue_depth gauge");
+  lines.push(`dead_letter_queue_depth ${metrics.deadLetterQueueDepth.get()}`);
 
   // Poll duration histogram
   const pollHist = metrics.pollDuration.snapshot();
@@ -278,4 +288,32 @@ export function resetMetrics(): void {
   metrics.eventsByType.reset();
   metrics.eventsDeadLettered.reset();
   metrics.pollDuration.reset();
+  metrics.deadLetterQueueDepth.reset();
+}
+
+/**
+ * Query the current unresolved dead-letter queue depth, update the
+ * `dead_letter_queue_depth` gauge, and log a warning when the depth exceeds
+ * `alertThreshold` (default: DEAD_LETTER_ALERT_THRESHOLD from deadLetter.ts).
+ *
+ * Call this from the poll loop or the reprocess runner so the gauge stays
+ * fresh without requiring a live Postgres connection in the metrics module
+ * itself (the module stays dependency-free; callers own the DB reference).
+ *
+ * Returns the current depth so callers can act on it directly.
+ */
+export async function refreshDeadLetterQueueDepth(
+  countFn: () => Promise<number>,
+  alertThreshold: number,
+  logger?: { warn(msg: string, meta?: Record<string, unknown>): void },
+): Promise<number> {
+  const depth = await countFn();
+  metrics.deadLetterQueueDepth.set(depth);
+  if (depth > alertThreshold) {
+    logger?.warn("dead-letter queue depth exceeds alert threshold", {
+      depth,
+      threshold: alertThreshold,
+    });
+  }
+  return depth;
 }

@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "rebuild:leaderboard": "tsx src/leaderboard-rebuild.job.ts",
     "backfill:bet-count": "tsx src/backfill-bet-count.ts",
+    "reprocess:dead-letter": "tsx src/reprocess-dead-letter.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

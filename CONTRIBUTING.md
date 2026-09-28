@@ -41,6 +41,28 @@ happens on the **`implementation-drips`** branch — not `main`.
 > - **Code Linting:** Required lint check enforces code quality across all Node packages.
 > - **Dependency Vulnerability Scan:** Automated `npm audit` security scans check lockfiles for high-severity vulnerabilities on PRs and daily schedule.
 
+### Database migration compatibility
+
+Database migrations are **forward-only**: the runner applies numbered `.sql`
+files and deliberately has no automatic down-migration command. Every migration
+must therefore use an expand/contract rollout so the immediately previous
+application release continues to work after the migration:
+
+1. **Expand** with additive, backwards-compatible schema changes (new table,
+   nullable column, index, or new value handled by both versions).
+2. Deploy code that can read both representations and, where needed, writes
+   both while the rollout is in progress.
+3. Deploy and observe the new release. This is the point at which a code
+   rollback remains safe.
+4. **Contract** only in a later, separately reviewed release after the previous
+   release is no longer a supported rollback target.
+
+Never rename or drop a column, tighten a constraint, or change an enum in place
+in the same release that introduces its replacement. State the rollback
+compatibility plan in the migration PR and run the staging rollback drill in
+[`docs/DEPLOYMENT-GUIDE.md`](docs/DEPLOYMENT-GUIDE.md#rollback-procedure) before
+shipping a schema-changing release.
+
 ### Pre-PR verification script
 
 Run the one-liner verification script **before opening a PR**:

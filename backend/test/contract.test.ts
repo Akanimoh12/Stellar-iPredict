@@ -60,6 +60,7 @@ function makeMarketRow(overrides: Record<string, unknown> = {}) {
     cancelled: false,
     creator: "G" + "A".repeat(55),
     bet_count: 3,
+    total_count: 1,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -81,7 +82,7 @@ function makeLeaderboardRow(overrides: Record<string, unknown> = {}) {
 function makePool(mockRows: unknown[], totalRows: unknown[] = []) {
   return {
     query: vi.fn(async (sql: string) => {
-      if (sql.includes("COUNT")) {
+      if (sql.includes("COUNT(*)::INT AS total") || (sql.includes("COUNT(*)") && !sql.includes("COUNT(*) OVER"))) {
         return { rows: totalRows.length ? totalRows : [{ total: "1" }] };
       }
       return { rows: mockRows };

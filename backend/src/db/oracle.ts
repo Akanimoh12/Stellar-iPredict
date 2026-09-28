@@ -1,3 +1,4 @@
+import type { Pool } from "pg";
 import type { Queryable } from "./markets.js";
 import type { OracleSubmissionRow } from "./types.js";
 
@@ -66,7 +67,7 @@ export async function isRegisteredProvider(
   const result = await executor.query<{ address: string }>(
     "SELECT address FROM oracle_providers WHERE active = TRUE",
   );
-  providerCache = new Set(result.rows.map((r) => r.address));
+  providerCache = new Set(result.rows.map((r: { address: string }) => r.address));
   providerCacheExpiry = Date.now() + PROVIDER_CACHE_TTL_MS;
   return providerCache.has(address);
 }

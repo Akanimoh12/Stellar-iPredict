@@ -211,8 +211,8 @@ function withCancellation(
   }
   const cancellablePool = db as unknown as CancellablePool;
   return {
-    query: (text: string, values?: unknown[]) =>
-      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }),
+    query: <T>(text: string, values?: unknown[]) =>
+      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }) as unknown as Promise<{ rows: T[] }>,
   };
 }
 

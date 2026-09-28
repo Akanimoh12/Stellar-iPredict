@@ -1,5 +1,7 @@
 
 import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
+import { config } from "./config/index.js";
+import { runBackfill } from "./backfill.js";
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
@@ -130,7 +132,7 @@ export function installGracefulShutdown(indexer: Indexer): void {
  * returns, so unit tests can exercise it without an infinite timer.
  */
 export async function startLivePolling(fromLedger: number): Promise<void> {
-  const [{ config }, { writeEventToDb }, stellar] = await Promise.all([
+  const [{ config }, { writeEventToDb: writeBackfillEvent }, stellar] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
     import("@stellar/stellar-sdk"),
@@ -151,6 +153,23 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
           startLedger: currentLedger + 1,
           limit: config.EVENTS_PER_PAGE,
         });
+
+        for (const event of response.events || []) {
+          const topics = event.topic.map((t: any) => scValToNative(t));
+          const data = scValToNative(event.value);
+          await writeBackfillEvent(event.ledger, event.txHash, topics, data);
+        }
+        currentLedger = response.latestLedger;
+      }
+    } catch (err) {
+      console.error("[live-poll] Error in polling loop:", err);
+    }
+    if (process.env.NODE_ENV === "test") {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, config.POLL_INTERVAL_MS));
+  }
+}
 
 import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
 import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";

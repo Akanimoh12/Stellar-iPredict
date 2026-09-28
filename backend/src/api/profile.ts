@@ -49,7 +49,7 @@ export const profileRoutes: FastifyPluginAsync = async (server: FastifyInstance)
             properties: {
               bets: {
                 type: "array",
-                items: { type: "object" },
+                items: { type: "object", additionalProperties: true },
               },
               points: { type: "string" },
               won_bets: { type: "number" },

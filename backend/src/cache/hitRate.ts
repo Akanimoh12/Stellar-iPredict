@@ -162,14 +162,14 @@ export function getCacheHitRate(): number {
 
 /** Per-namespace hit rates, keyed by namespace name. Never empty — each known
  * namespace always appears, even with NaN when no lookups have occurred. */
-export function getPerNamespaceHitRates(): ReadonlyRecord<CacheNamespace, number> {
+export function getPerNamespaceHitRates(): Readonly<Record<CacheNamespace, number>> {
   const stats = getCacheStats();
-  const result: Record<CacheNamespace, number> = {};
+  const result = {} as Record<CacheNamespace, number>;
   for (const ns of CACHE_NAMESPACES) {
     result[ns] = stats.byNamespace.find((s) => s.namespace === ns)?.hitRate ?? NaN;
   }
   result["other"] = stats.byNamespace.find((s) => s.namespace === "other")?.hitRate ?? NaN;
-  return result as ReadonlyRecord<CacheNamespace, number>;
+  return result;
 }
 
 /** Reset every counter. Used by tests and by rolling-window metric resets. */

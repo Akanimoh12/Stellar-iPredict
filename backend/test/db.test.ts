@@ -67,17 +67,12 @@ function makeQueryable(
 describe("db query layer", () => {
   it("gets markets with filters, sorting, and pagination", async () => {
     const row = makeMarketRow({ id: 2, category: "Crypto" });
+    const rowWithTotal = { ...row, total_count: 1 };
     const db = makeQueryable(async (sql, values) => {
-      if (sql.includes("COUNT(*)::INT AS total FROM markets")) {
-        expect(sql).toContain("WHERE category = $1 AND resolved = false AND cancelled = false");
-        expect(values).toEqual(["Crypto"]);
-        return { rows: [{ total: 1 }] };
-      }
-
       expect(sql).toContain("FROM markets");
       expect(sql).toContain("ORDER BY (total_yes + total_no) DESC, created_at DESC");
       expect(values).toEqual(["Crypto", 5, 5]);
-      return { rows: [row] };
+      return { rows: [rowWithTotal] };
     });
 
     const result = await getMarkets(
@@ -91,7 +86,7 @@ describe("db query layer", () => {
       page: 2,
       limit: 5,
     });
-    expect(db.query).toHaveBeenCalledTimes(2);
+    expect(db.query).toHaveBeenCalledTimes(1);
   });
 
   it("gets a market by id and returns null when absent", async () => {
@@ -174,7 +169,7 @@ describe("db query layer", () => {
   it("records oracle submissions and counts submitted rows", async () => {
     const submission = {
       id: 12,
-      market_id: 5,
+      market_id: "5",
       submitter: "G" + "E".repeat(55),
       outcome: "yes",
       bond_amount: "1000",
@@ -184,7 +179,7 @@ describe("db query layer", () => {
 
     const db = makeQueryable(async (sql, values) => {
       if (sql.includes("INSERT INTO oracle_submissions")) {
-        expect(values).toEqual([5, "G" + "E".repeat(55), "yes", "1000", null, null]);
+        expect(values).toEqual([5, "G" + "E".repeat(55), "YES", "1000", null, null, null]);
         return { rows: [submission] };
       }
 

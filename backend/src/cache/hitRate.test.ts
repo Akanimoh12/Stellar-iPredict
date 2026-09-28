@@ -235,9 +235,8 @@ describe("getOrSet records hits and misses", () => {
       setex: vi.fn(),
     };
 
-    await expect(
-      getOrSet(redis as never, marketKey(1), 30, async () => ({ id: 1 })),
-    ).rejects.toThrow("ECONNREFUSED");
+    const result = await getOrSet(redis as never, marketKey(1), 30, async () => ({ id: 1 }));
+    expect(result).toEqual({ id: 1 });
 
     expect(getCacheStats().lookups).toBe(0);
   });

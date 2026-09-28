@@ -144,7 +144,13 @@ describe("route handlers when the database is down", () => {
   it("/api/stats still serves real data when the DB query fails but Redis has a hit", async () => {
     // Redis is up and returns a cache hit — the DB is never touched.
     const redis = createTestRedis();
-    await redis.setex(statsKey(), 60, JSON.stringify(statsRow()));
+    const statsPayload = {
+      totalMarkets: 1,
+      totalVolume: "150.0000000",
+      totalUsers: 1,
+      totalBets: 1,
+    };
+    await redis.setex(statsKey(), 60, JSON.stringify(statsPayload));
 
     let dbCalled = false;
     const server = buildServer({
@@ -169,9 +175,8 @@ describe("route handlers when the database is down", () => {
 });
 
 describe("route handlers when Redis is down", () => {
-  it("a failing Redis read surfaces the 500 envelope instead of leaking", async () => {
-    // Redis.get throws → getOrSet read failure propagates by contract; the
-    // route turns it into the standard error envelope, never a crash.
+  it("a failing Redis read degrades to DB, and surfaces 500 envelope if DB is also down", async () => {
+    // Redis.get throws → getOrSet degrades to DB; if DB fails too, turns into 500 error envelope
     const redis = createTestRedis();
     redis.get = async () => {
       throw new Error("Connection lost to Redis");
@@ -180,7 +185,7 @@ describe("route handlers when Redis is down", () => {
     const server = buildServer({
       corsOrigins: [],
       logger: false,
-      pool: { query: okPool().query } as never,
+      pool: { query: vi.fn(async () => failingPool()) } as never,
       redis: redis as unknown as Redis,
     });
     try {
@@ -209,14 +214,13 @@ describe("route handlers when Redis is down", () => {
     expect(loader).toHaveBeenCalledTimes(1);
   });
 
-  it("getOrSet propagates a failed cache read", async () => {
+  it("getOrSet degrades to loader when cache read fails", async () => {
     const redis = createTestRedis();
     redis.get = async () => {
       throw new Error("ECONNREFUSED");
     };
 
-    await expect(
-      getOrSet(redis as never, "ipredict:v1:stats", 60, async () => 1)
-    ).rejects.toThrow("ECONNREFUSED");
+    const value = await getOrSet(redis as never, "ipredict:v1:stats", 60, async () => 1);
+    expect(value).toBe(1);
   });
 });

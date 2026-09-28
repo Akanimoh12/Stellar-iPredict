@@ -7,6 +7,7 @@ import { getOrSet } from "../cache/cacheAside.js";
 import { cacheKey, CACHE_TTLS } from "../cache/cacheKeys.js";
 import { cacheControlPublic } from "../cache/cacheControl.js";
 import { MAX_PAGINATION_LIMIT, MAX_PAGINATION_OFFSET } from "../lib/pagination.js";
+import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
 
 const leaderboardQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(
@@ -81,6 +82,7 @@ export function registerLeaderboardRoutes(
     server.get(
     "/api/leaderboard",
     {
+      attachValidation: true,
       schema: {
         summary: "Leaderboard rankings",
         description:
@@ -108,17 +110,18 @@ export function registerLeaderboardRoutes(
               },
             },
             properties: {
-              players: { type: "array", items: { type: "object" } },
+              players: { type: "array", items: { type: "object", additionalProperties: true } },
               total: { type: "number" },
             },
             required: ["players", "total"],
           },
+          304: { type: "null", description: "Not modified — ETag matched" },
           400: {
             type: "object",
             properties: {
               code: { type: "string" },
               message: { type: "string" },
-              issues: { type: "array", items: { type: "object" } },
+              issues: { type: "array", items: { type: "object", additionalProperties: true } },
             },
             required: ["code", "message"],
           },
@@ -131,9 +134,7 @@ export function registerLeaderboardRoutes(
       if (!parsed.success) {
         return reply.status(400).send({
           code: "BAD_REQUEST",
-          message:
-            parsed.error.issues[0]?.message ??
-            "Invalid leaderboard query parameters",
+          message: "Invalid leaderboard query parameters",
           issues: parsed.error.issues,
         });
       }
@@ -151,8 +152,16 @@ export function registerLeaderboardRoutes(
         ? await getOrSet(redis, key, LEADERBOARD_CACHE_TTL, loader)
         : await loader();
 
+      const body = { players, total };
+      const etag = computeEtag(body);
+      reply.header("ETag", etag);
+
+      if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
+        return reply.status(304).send();
+      }
+
       reply.header("Cache-Control", cacheControlPublic(LEADERBOARD_CACHE_TTL));
-      return reply.status(200).send({ players, total });
+      return reply.status(200).send(body);
     },
   );
 }

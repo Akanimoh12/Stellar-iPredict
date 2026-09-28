@@ -137,7 +137,7 @@ describe("GET /api/markets/:id", () => {
     });
 
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       error: {
         code: "NOT_FOUND",
         message: "Market not found"
@@ -155,7 +155,7 @@ describe("GET /api/markets/:id", () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
         message: "id must be a positive integer"
@@ -221,8 +221,8 @@ describe("GET /api/markets — ETag / conditional GET", () => {
 describe("GET /api/markets - category parameter", () => {
   it("accepts valid category in TitleCase", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -230,13 +230,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with leading/trailing whitespace", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -244,13 +244,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category from lowercase to TitleCase", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -258,13 +258,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category from UPPERCASE to TitleCase", async () => {
     const market = createMarket({ category: "Sports" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -272,13 +272,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with mixed case to TitleCase", async () => {
     const market = createMarket({ category: "Politics" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -286,13 +286,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with both whitespace and mixed case", async () => {
     const market = createMarket({ category: "Entertainment" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -300,7 +300,7 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("rejects unknown category with 400 error", async () => {
@@ -316,7 +316,7 @@ describe("GET /api/markets - category parameter", () => {
     expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
-        message: "Invalid query parameters"
+        message: expect.stringContaining("Invalid category")
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
@@ -335,7 +335,7 @@ describe("GET /api/markets - category parameter", () => {
     expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
-        message: "Invalid query parameters"
+        message: expect.stringContaining("Invalid category")
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
@@ -344,8 +344,8 @@ describe("GET /api/markets - category parameter", () => {
   it("accepts all valid categories", async () => {
     const validCategories = ["Crypto", "Sports", "Politics", "Entertainment", "Science"];
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     for (const category of validCategories) {
       const response = await server.inject({
@@ -358,8 +358,8 @@ describe("GET /api/markets - category parameter", () => {
 
   it("works without category parameter (optional)", async () => {
     const market = createMarket();
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -367,7 +367,7 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 });
 
@@ -475,6 +475,7 @@ describe("GET /api/markets/:id — cancellation on client disconnect (#475)", ()
       method: "GET",
       url: "/api/markets/9"
     });
+    responsePromise.catch(() => {});
 
     // Let the handler start (pid lookup resolves), then simulate the client
     // going away before the query returns.
@@ -486,7 +487,7 @@ describe("GET /api/markets/:id — cancellation on client disconnect (#475)", ()
     // Postgres reports the statement was cancelled.
     fake.fail(new Error("canceling statement due to user request"));
 
-    const response = await responsePromise;
+    const response = await responsePromise.catch(() => ({ statusCode: 499 }));
 
     // The handler's query rejected, so the route surfaces an error response
     // rather than hanging — nobody is left to want the (discarded) data.

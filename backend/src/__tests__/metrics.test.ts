@@ -449,7 +449,7 @@ describe("recordStatus + getStatusCounts", () => {
   });
 
   it("keeps cardinality bounded to route templates, not raw paths", async () => {
-    const server = buildServer({ corsOrigins: [] });
+    const server = buildServer({ corsOrigins: [], pool: createFakePool() });
     await server.inject({ method: "GET", url: "/api/markets/1" });
     await server.inject({ method: "GET", url: "/api/markets/2" });
 

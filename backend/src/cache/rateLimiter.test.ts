@@ -4,7 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 // The rate limiter reads API_KEYS from the config singleton at import time.
 // Mock the config module before rateLimiter.ts is imported so that the
 // verified-key tests below have known keys to match against (#485).
-vi.mock("../../config/index.js", () => ({
+vi.mock("../config/index.js", () => ({
   config: {
     API_KEYS: ["test-token", "token-a", "token-b", "my-key"],
     TRUSTED_PROXIES: [],

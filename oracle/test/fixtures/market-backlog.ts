@@ -162,8 +162,34 @@ export class BacklogWorld {
       return result(requestId ? [{ request_id: requestId }] : []);
     }
 
+    if (sql === "SELECT tx_hash, outcome, status FROM oracle_submissions WHERE market_id = $1") {
+      const marketId = String(params[0]);
+      const row = this.finalized.get(marketId);
+      if (!row) return result([]);
+      return result([
+        {
+          tx_hash: row.txHash,
+          outcome: row.decision.toUpperCase() === "YES" ? "YES" : "NO",
+          status: "finalized",
+        },
+      ]);
+    }
+
     if (sql.startsWith("INSERT INTO oracle_submissions")) {
       const marketId = String(params[0]);
+      if (sql.includes("ON CONFLICT (market_id) DO UPDATE")) {
+        const decision = String(params[3]);
+        const txHash = String(params[4]);
+        const requestId = (params[5] as string | null | undefined) ?? null;
+        this.finalized.set(marketId, {
+          marketId,
+          decision,
+          txHash,
+          councilVotes: [],
+          requestId,
+        });
+        return result([]);
+      }
       if (this.hasSubmissionRow(marketId)) throw uniqueViolation();
       // ck_oracle_submissions_outcome_canonical (migration 0017).
       if (params[2] !== "YES" && params[2] !== "NO") {
@@ -176,6 +202,39 @@ export class BacklogWorld {
         councilVotes: JSON.parse(String(params[9])) as CouncilVote[],
         requestId: (params[10] as string | null | undefined) ?? null,
       });
+      return result([]);
+    }
+
+    if (sql.startsWith("UPDATE oracle_submissions")) {
+      const marketId = String(params[0]);
+      const existing = this.finalized.get(marketId);
+      const decision = String(params[2]);
+      const txHash = String(params[3]);
+      const councilVotes =
+        typeof params[4] === "string"
+          ? JSON.parse(params[4])
+          : ((params[4] as CouncilVote[]) ?? []);
+      const requestId =
+        (params[5] as string | null | undefined) ?? existing?.requestId ?? null;
+      this.finalized.set(marketId, {
+        marketId,
+        decision,
+        txHash,
+        councilVotes,
+        requestId,
+      });
+      return result([]);
+    }
+
+    if (sql.includes("failed_webhook_notifications")) {
+      return result([]);
+    }
+
+    if (sql.includes("oracle_ambiguous_tallies")) {
+      return result([{ market_id: params[0] }]);
+    }
+
+    if (sql.includes("oracle_resolution_lag")) {
       return result([]);
     }
 

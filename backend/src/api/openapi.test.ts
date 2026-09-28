@@ -98,12 +98,12 @@ describe("GET /api/docs", () => {
     // route present in `registeredRoutes` but missing from `spec.paths`.
     server = buildServer({ corsOrigins: [], pool: createFakePool() });
 
-    const routeTable = server.registeredRoutes;
-    expect(routeTable.length).toBeGreaterThan(0);
-
     const res = await server.inject({ method: "GET", url: DOCS_ROUTE });
     expect(res.statusCode).toBe(200);
     const spec = res.json() as OpenApiDocument;
+
+    const routeTable = server.registeredRoutes;
+    expect(routeTable.length).toBeGreaterThan(0);
 
     const missing: string[] = [];
     for (const { method, url } of routeTable) {

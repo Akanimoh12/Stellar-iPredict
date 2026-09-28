@@ -2,9 +2,13 @@ import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { HealthCheckResult } from "@/db/health";
 
-vi.mock("@/db/health", () => ({
-  pingDb: vi.fn(),
-}));
+vi.mock("@/db/health", async () => {
+  const actual = await vi.importActual<typeof import("@/db/health")>("@/db/health");
+  return {
+    ...actual,
+    pingDb: vi.fn(),
+  };
+});
 
 vi.mock("@/db/redis", () => ({
   pingRedis: vi.fn(),

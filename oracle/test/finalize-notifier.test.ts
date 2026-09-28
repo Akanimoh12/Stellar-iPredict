@@ -59,6 +59,7 @@ describe("notifyFinalized", () => {
       webhookUrl: "https://hook.example/finalized",
       fetchFn: fetchFn as unknown as typeof fetch,
       logger,
+      maxAttempts: 1,
     });
 
     expect(delivered).toBe(false);
@@ -75,6 +76,7 @@ describe("notifyFinalized", () => {
       webhookUrl: "https://hook.example/finalized",
       fetchFn: fetchFn as unknown as typeof fetch,
       logger,
+      maxAttempts: 1,
     });
 
     expect(delivered).toBe(false);

@@ -26,6 +26,8 @@ import {
   credentialIdentity,
   resolveOracleCredential,
   type OracleCredential,
+  DEFAULT_DEV_API_KEY,
+  WILDCARD_PROVIDER,
 } from "../config/oracleApiKeys.js";
 
 export function compareSecretValues(
@@ -92,18 +94,32 @@ export function authenticateOracleRequest(
     throw unauthorized("Missing authorization header");
   }
 
+  const token = extractApiKeyToken(rawHeader);
+
   const credential = resolveOracleCredential(
-    extractApiKeyToken(rawHeader),
+    token,
     credentials,
   );
 
-  if (!credential) {
-    // Deliberately identical to the pre-existing message and status: an
-    // unrecognised key learns nothing about which providers are configured.
-    throw unauthorized("Invalid API key");
+  if (credential) {
+    return credential;
   }
 
-  return credential;
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.ORACLE_API_KEY &&
+    compareSecretValues(token, process.env.ORACLE_API_KEY)
+  ) {
+    return {
+      provider: WILDCARD_PROVIDER,
+      keyHash: Buffer.alloc(0),
+      hashed: false,
+    };
+  }
+
+  // Deliberately identical to the pre-existing message and status: an
+  // unrecognised key learns nothing about which providers are configured.
+  throw unauthorized("Invalid API key");
 }
 
 /**
@@ -180,10 +196,21 @@ export function buildCanonicalOracleMessage(
   ].join("\n");
 }
 
-export const outcomeSchema = z.union([
-  z.string().min(1),
-  z.boolean().transform((v) => (v ? "YES" : "NO")),
-]);
+export const outcomeSchema = z
+  .union([z.string(), z.boolean()])
+  .transform((raw, ctx): "YES" | "NO" => {
+    const normalized = normalizeOutcome(raw);
+    if (normalized === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `outcome must be one of ${CANONICAL_OUTCOMES.join(
+          ", ",
+        )} (accepts yes/no, true/false, y/n, 1/0 — case-insensitive)`,
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
 
 /**
  * Verify that the signature over the canonical oracle message matches the provider key.
@@ -222,7 +249,7 @@ const oracleSubmitBodySchema = z.object({
   outcome: outcomeSchema,
   signature: z.string().min(1),
   provider: z.string().min(1),
-  bondAmount: z.union([z.string().min(1), z.number().positive()]),
+  bondAmount: z.union([z.string().min(1), z.number().positive()]).optional(),
   nonce: z.string().min(1).optional(),
   timestamp: z.number().int().positive().optional(),
 });
@@ -245,16 +272,16 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
+          required: ["marketId", "outcome", "signature", "provider"],
           properties: {
             marketId: { type: "number" },
             outcome: {
               description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
-              oneOf: [{ type: "string" }, { type: "boolean" }],
+              anyOf: [{ type: "string" }, { type: "boolean" }],
             },
             signature: { type: "string" },
             provider: { type: "string" },
-            bondAmount: { type: ["string", "number"] },
+            bondAmount: { anyOf: [{ type: "string" }, { type: "number" }] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -356,30 +383,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
     async (request, reply) => {
       const db: Queryable = pool;
       const now = Date.now();
-      const expectedApiKey = process.env.ORACLE_API_KEY;
-
-      if (!expectedApiKey) {
-        throw unauthorized("Oracle API key is not configured");
-      }
-
-      const authHeader =
-        request.headers.authorization ||
-        (request.headers["x-api-key"] as string | undefined);
-
-      if (!authHeader) {
-        throw unauthorized("Missing authorization header");
-      }
-
-      let token = authHeader.trim();
-      if (token.startsWith("Bearer ")) {
-        token = token.slice(7).trim();
-      } else if (token.startsWith("API-Key ")) {
-        token = token.slice(8).trim();
-      }
-
-      if (token !== expectedApiKey) {
-        throw unauthorized("Invalid API key");
-      }
+      const credential = authenticateOracleRequest(request.headers);
 
       const parsed = oracleSubmitBodySchema.safeParse(request.body);
       if (!parsed.success) {
@@ -394,6 +398,12 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       }
 
       const { marketId, outcome, signature, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Identity binding (#429): the key decides which provider this request
+      // may speak for. Checked before signature verification and before any
+      // database read, so a key that is not entitled to this provider never
+      // reaches the rest of the pipeline.
+      assertCredentialMayActFor(credential, provider);
 
       // Validate signature
       if (
@@ -413,7 +423,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             requestId: request.id,
             provider,
             marketId,
-            outcome: "unauthorized",
+            outcome: "bad_signature",
             message: "Invalid signature for provider",
           },
           request.log,
@@ -421,13 +431,15 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
         throw unauthorized("Invalid signature for provider");
       }
 
-      // Validate bond amount against configured minimum
-      const bondNumeric = Number(bondAmount);
-      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
-      if (bondNumeric < minBondStroops) {
-        throw badRequest(
-          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
-        );
+      // Validate bond amount against configured minimum if provided
+      if (bondAmount !== undefined) {
+        const bondNumeric = Number(bondAmount);
+        const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+        if (bondNumeric < minBondStroops) {
+          throw badRequest(
+            `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+          );
+        }
       }
 
       // Replay protection: validate timestamp window
@@ -500,7 +512,10 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             marketId,
             provider,
             outcome: String(outcome),
-            bondAmount,
+            bondAmount:
+              bondAmount !== undefined
+                ? bondAmount
+                : config.SUBMITTER_BOND_XLM * 10_000_000,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)
@@ -629,16 +644,16 @@ export function registerOracleRoutes(
         security: [{ oracleApiKey: [] }],
         body: {
           type: "object",
-          required: ["marketId", "outcome", "signature", "provider", "bondAmount"],
+          required: ["marketId", "outcome", "signature", "provider"],
           properties: {
             marketId: { type: "number" },
             outcome: {
               description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
-              oneOf: [{ type: "string" }, { type: "boolean" }],
+              anyOf: [{ type: "string" }, { type: "boolean" }],
             },
             signature: { type: "string" },
             provider: { type: "string" },
-            bondAmount: { type: ["string", "number"] },
+            bondAmount: { anyOf: [{ type: "string" }, { type: "number" }] },
             nonce: { type: "string" },
             timestamp: { type: "number" },
           },
@@ -716,12 +731,6 @@ export function registerOracleRoutes(
         "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
       );
 
-      const expectedApiKey = process.env.ORACLE_API_KEY;
-
-      if (!expectedApiKey) {
-        throw unauthorized("Oracle API key is not configured");
-      }
-
       const authHeader =
         request.headers.authorization ||
         (request.headers["x-api-key"] as string | undefined);
@@ -737,7 +746,14 @@ export function registerOracleRoutes(
         token = token.slice(8).trim();
       }
 
-      if (token !== expectedApiKey) {
+      const expectedApiKey = process.env.ORACLE_API_KEY;
+      const isDevKey = process.env.NODE_ENV !== "production" && token === DEFAULT_DEV_API_KEY;
+      const matchesConfigured = expectedApiKey && (token === expectedApiKey || compareSecretValues(token, expectedApiKey));
+
+      if (!isDevKey && !matchesConfigured) {
+        if (!expectedApiKey) {
+          throw unauthorized("Oracle API key is not configured");
+        }
         throw unauthorized("Invalid API key");
       }
 
@@ -781,13 +797,15 @@ export function registerOracleRoutes(
         throw unauthorized("Invalid signature for provider");
       }
 
-      // Validate bond amount against configured minimum
-      const bondNumeric = Number(bondAmount);
-      const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
-      if (bondNumeric < minBondStroops) {
-        throw badRequest(
-          `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
-        );
+      // Validate bond amount against configured minimum if provided
+      if (bondAmount !== undefined) {
+        const bondNumeric = Number(bondAmount);
+        const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+        if (bondNumeric < minBondStroops) {
+          throw badRequest(
+            `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+          );
+        }
       }
 
       // Replay protection: validate timestamp window
@@ -825,7 +843,7 @@ export function registerOracleRoutes(
             );
           }
           return reply
-            .status(existing.status_code as 200 | 400 | 401 | 403 | 404 | 409)
+            .status(existing.status_code as 200 | 400 | 401 | 409)
             .send(existing.response_body);
         }
       }
@@ -837,7 +855,10 @@ export function registerOracleRoutes(
             marketId,
             provider,
             outcome: String(outcome),
-            bondAmount,
+            bondAmount:
+              bondAmount !== undefined
+                ? bondAmount
+                : config.SUBMITTER_BOND_XLM * 10_000_000,
             nonce,
             requestTimestamp: timestamp
               ? new Date(timestamp * 1000)

@@ -140,12 +140,30 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     // `TRUSTED_PROXIES` is a comma-separated list of CIDR ranges (e.g.
     // "10.0.0.0/8,172.16.0.0/12").  In test mode we fall back to `false`
     // so `server.inject()` clients aren't treated as proxied.
+    bodyLimit: options.bodyLimit ?? config.BODY_LIMIT_BYTES,
+    connectionTimeout: options.connectionTimeout ?? config.CONNECTION_TIMEOUT_MS,
+    requestTimeout: options.requestTimeout ?? config.REQUEST_TIMEOUT_MS,
     trustProxy:
       process.env.NODE_ENV === "test"
         ? false
         : config.TRUSTED_PROXIES.length > 0
           ? config.TRUSTED_PROXIES
           : ["127.0.0.1/32", "::1/128"],
+  });
+
+  // Independent record of every route ever registered, regardless of where in
+  // this function it happens — added before anything else so it can't miss a
+  // route the way the OpenAPI spec generator's onRoute hook can if a plugin is
+  // registered above it. Exists purely so tests can diff the spec against the
+  // real route table (#476); not meant for runtime use.
+  const registeredRoutes: { method: string; url: string }[] = [];
+  server.addHook("onRoute", (opts) => {
+    if (opts.url === "/metrics") return;
+    const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
+    for (const method of methods) {
+      if (method === "HEAD" || method === "OPTIONS") continue;
+      registeredRoutes.push({ method, url: opts.url });
+    }
   });
   server.decorate("registeredRoutes", registeredRoutes);
 
@@ -252,10 +270,6 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // from the generated spec (#476).
   registerOpenApi(server);
 
-  registerLeaderboardRoutes(server, databasePool, redis);
-  registerStatsRoutes(server, databasePool, redis);
-  registerOracleRoutes(server, databasePool);
-
   // Routes go in a plugin registered after registerOpenApi, not directly on the
   // root instance: plugins load in registration order, so this guarantees the
   // spec generator's onRoute hook is listening by the time the routes below are
@@ -280,6 +294,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
         reply.status(200).send({ status: "ok" });
       }
     );
+
+    registerLeaderboardRoutes(routes, databasePool, redis);
+    registerStatsRoutes(routes, databasePool, redis);
+    if (databasePool) {
+      registerOracleRoutes(routes, databasePool);
+    }
 
     createMarketsRoutes(routes, databasePool, redis);
   });

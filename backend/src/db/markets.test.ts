@@ -66,7 +66,8 @@ describe("getMarkets", () => {
   it("excludes resolved and cancelled markets when sort is ending_soon", async () => {
     const queryMock = vi
       .fn<Queryable["query"]>()
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] });
 
     const db: Queryable = {
       query: queryMock as Queryable["query"],

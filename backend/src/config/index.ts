@@ -67,10 +67,30 @@ export const envSchema = z.object({
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 300))
     .pipe(z.number().int().positive()),
-    ORACLE_NONCE_RETENTION_SEC: z
+  ORACLE_NONCE_RETENTION_SEC: z
     .string()
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 600))
+    .pipe(z.number().int().positive()),
+  ORACLE_API_KEY: z
+    .string({ message: "ORACLE_API_KEY is required" })
+    .min(1, "ORACLE_API_KEY is required"),
+  ORACLE_API_KEYS: z.string().optional(),
+  // Minimum bond required for oracle submissions (in XLM)
+  SUBMITTER_BOND_XLM: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 100))
+    .pipe(z.number().positive()),
+  ORACLE_THRESHOLD: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 3))
+    .pipe(z.number().int().positive()),
+  ORACLE_IDEMPOTENCY_RETENTION_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 86400))
     .pipe(z.number().int().positive()),
   // Comma-separated list of API keys that qualify for the authenticated
   // rate-limit tier.  Used by the rate-limiter to verify that a Bearer or
@@ -124,7 +144,17 @@ export function loadConfig(): Config {
   if (cached) return cached;
   if (cachedError) throw cachedError;
 
-  const result = envSchema.safeParse(process.env);
+  const envToParse = {
+    ...process.env,
+    ...(process.env.ORACLE_API_KEYS && !process.env.ORACLE_API_KEY
+      ? { ORACLE_API_KEY: "per-provider-keys" }
+      : {}),
+    ...(process.env.NODE_ENV !== "production" && !process.env.ORACLE_API_KEY && !process.env.ORACLE_API_KEYS
+      ? { ORACLE_API_KEY: "dev-oracle-key" }
+      : {}),
+  };
+
+  const result = envSchema.safeParse(envToParse);
   if (!result.success) {
     const issues = result.error.issues
       .map((i) => `  ${i.path.join(".")}: ${i.message}`)
@@ -137,7 +167,10 @@ export function loadConfig(): Config {
   try {
     oracleApiKeys = parseOracleApiKeys({
       raw: result.data.ORACLE_API_KEYS,
-      legacyRaw: result.data.ORACLE_API_KEY,
+      legacyRaw:
+        result.data.ORACLE_API_KEY === "per-provider-keys"
+          ? undefined
+          : result.data.ORACLE_API_KEY,
       nodeEnv: result.data.NODE_ENV,
       warn: (message) =>
         process.stderr.write(`[ipredict-backend] ${message}\n`),

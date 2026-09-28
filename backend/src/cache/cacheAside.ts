@@ -93,11 +93,10 @@ export async function getOrSet<T>(
       circuit.recordFailure();
       logCacheFailure(error);
       // Redis is unhealthy — fall through to the loader (degrade-to-db).
-      recordCacheMiss(key);
+      // A Redis error is not counted as a miss (issue #214).
     }
   } else {
     // Circuit is OPEN — skip Redis entirely to avoid adding latency.
-    recordCacheMiss(key);
   }
 
   // 2. Cache miss (or degraded) — single-flight the entire load+store

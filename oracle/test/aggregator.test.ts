@@ -697,6 +697,7 @@ describe("correlation ids across the finalization path (#467)", () => {
       "computed tally",
       "vote tally",
       "threshold met, finalizing market",
+      "persisted finalization transaction hash",
       "persisted finalized decision",
       "Market 102 finalized",
       "market finalized",
@@ -760,6 +761,10 @@ describe("correlation ids across the finalization path (#467)", () => {
       "computed tally",
       "vote tally",
       "threshold met, finalizing market",
+      "persisted finalization transaction hash",
+      "persisted finalized decision",
+      "Market 201 finalized",
+      "market finalized",
     ]);
     expect(fromProcessMarket.every((l) => l.originRequestId === backendRequestId)).toBe(true);
     expect(attempt.every((l) => l.marketId === "201")).toBe(true);

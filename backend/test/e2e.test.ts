@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
+import { signOracleMessage } from "../src/api/oracle.js";
 
 const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => {
   const marketRow = {
@@ -16,6 +18,7 @@ const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => 
     bet_count: 3,
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    total_count: 1,
   };
   const betRow = {
     market_id: "1",
@@ -51,6 +54,10 @@ const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => 
   };
 
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+      return { rows: [] };
+    }
+
     if (sql.includes("AS total_markets")) {
       return {
         rows: [
@@ -138,14 +145,24 @@ const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => 
   };
 });
 
-vi.mock("../src/db/pool.js", () => ({ pool: sharedPool }));
-vi.mock("../src/db/health.js", () => ({ pingDb: pingDbMock }));
+vi.mock("../src/db/pool.js", () => ({
+  pool: sharedPool,
+  getPoolMetrics: vi.fn(() => ({ total: 10, idle: 5, waiting: 0 })),
+}));
+vi.mock("../src/db/health.js", () => ({
+  pingDb: pingDbMock,
+  withHealthTimeout: async <T>(p: Promise<T>) => p,
+}));
 vi.mock("../src/db/redis.js", () => ({ pingRedis: pingRedisMock }));
 
 import { buildServer } from "../src/server.js";
 
 describe("backend smoke test", () => {
   it("boots the API and serves every live endpoint once", async () => {
+    const testMetricsToken = "test-metrics-token-123";
+    process.env.METRICS_TOKEN = testMetricsToken;
+    process.env.ORACLE_API_KEY = "test-oracle-secret-key-123";
+
     const server = buildServer({
       corsOrigins: [],
       pool: sharedPool as never,
@@ -156,12 +173,22 @@ describe("backend smoke test", () => {
     await server.ready();
 
     try {
-      const address = "G" + "Z".repeat(55);
+      const address = Keypair.random().publicKey();
+      const oracleKp = Keypair.random();
+      const oracleProvider = oracleKp.publicKey();
+      const signature = signOracleMessage(
+        { marketId: 1, outcome: "YES", provider: oracleProvider },
+        oracleKp,
+      );
 
       const responses = await Promise.all([
         server.inject({ method: "GET", url: "/healthz" }),
         server.inject({ method: "GET", url: "/readyz" }),
-        server.inject({ method: "GET", url: "/metrics" }),
+        server.inject({
+          method: "GET",
+          url: "/metrics",
+          headers: { "x-metrics-token": testMetricsToken },
+        }),
         server.inject({ method: "GET", url: "/api/docs" }),
         server.inject({ method: "GET", url: "/api/markets" }),
         server.inject({ method: "GET", url: "/api/markets/1" }),
@@ -173,12 +200,13 @@ describe("backend smoke test", () => {
         server.inject({
           method: "POST",
           url: "/api/oracle/submit",
-          headers: { authorization: `Bearer ${process.env.ORACLE_API_KEY ?? "test-oracle-secret-key-123"}` },
+          headers: { authorization: `Bearer ${process.env.ORACLE_API_KEY}` },
           payload: {
             marketId: 1,
-            outcome: true,
-            signature: "signed-payload",
-            provider: "G" + "D".repeat(55),
+            outcome: "YES",
+            signature,
+            provider: oracleProvider,
+            bondAmount: "1000000000",
           },
         }),
       ]);
@@ -202,6 +230,8 @@ describe("backend smoke test", () => {
       expect(responses[3].json()).toHaveProperty("openapi");
       expect(responses[11].json()).toEqual({
         accepted: true,
+        count: 1,
+        threshold: 3,
         submissionsNeeded: 2,
       });
     } finally {

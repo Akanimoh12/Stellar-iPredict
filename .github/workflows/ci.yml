@@ -14,6 +14,27 @@ permissions:
   checks: write
 
 jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # A complete checkout lets scheduled runs inspect the entire repository
+      # history; the action limits push and pull-request scans to their diff.
+      - name: Checkout repository
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        with:
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
   # ─── Job 1: Frontend lint, test, and build ──────────────────────────────────
   frontend-check:
     name: Frontend (Node ${{ matrix.node-version }})

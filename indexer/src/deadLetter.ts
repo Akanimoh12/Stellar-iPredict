@@ -50,13 +50,3 @@ export async function purgeDeadLetterEvents(
   return result.rowCount ?? 0;
 }
 
-export const deadLetterTableSql = `CREATE TABLE IF NOT EXISTS dead_letter_events (
-  id BIGSERIAL PRIMARY KEY,
-  ledger_seq BIGINT NOT NULL,
-  tx_hash CHAR(64) NOT NULL,
-  raw_event JSONB NOT NULL,
-  error_message TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_dead_letter_events_ledger ON dead_letter_events(ledger_seq DESC);
-CREATE INDEX IF NOT EXISTS idx_dead_letter_events_created_at ON dead_letter_events(created_at ASC);`;

@@ -12,7 +12,11 @@
   "scripts": {
     "build": "npm run build --workspace=@ipredict/shared && npm run build --workspaces --if-present",
     "typecheck": "npm run build --workspace=@ipredict/shared && npm run typecheck --workspaces --if-present",
-    "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present",
+    "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present && npm run test:cross",
+    "test:cross": "vitest run",
+    "test:cross:watch": "vitest",
+    "smoke": "tsx test/smoke/run.ts",
+    "smoke:list": "tsx test/smoke/run.ts --list",
     "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",
     "audit": "npx audit-ci --config ./audit-ci.jsonc"
   }

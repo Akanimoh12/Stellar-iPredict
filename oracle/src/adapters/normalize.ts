@@ -11,10 +11,27 @@
  * | politics  | Source consensus fraction                 | consensusFraction                      |
  * | science   | Committee confidence value (0-1)          | passthrough, clamp to [0, 1]           |
  *
+ * ## Freshness (issue #744)
+ *
+ * Distance-from-threshold says how *marginal* a result is; it says nothing
+ * about how *old* the underlying quote is. A price frozen an hour ago can sit
+ * far from the threshold and score a confident 1.0, so the crypto normalizer
+ * can also be given the provider's observation time and a
+ * {@link FreshnessPolicy}. The ceiling that policy implies then caps the
+ * result, which is what keeps a stale or untimestamped quote out of a
+ * full-confidence resolution.
+ *
+ * Freshness is opt-in here: `normalizeCrypto` applies the cap only when the
+ * payload carries a `freshness` policy. The existing distance-only model is
+ * unchanged for callers with no timestamp to check, and a caller that has
+ * one is forced to say what to do with it rather than silently getting the
+ * uncapped result.
+ *
  * The `normalizeOutcome` export is the primary entry point.  Individual
  * category normalizers are also exported for unit-testing.
  */
 
+import { assessQuote, applyConfidenceCeiling, type FreshnessPolicy } from "./freshness.js";
 import type { MarketCategory } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -48,6 +65,26 @@ export interface CryptoRawPayload {
   threshold: number;
   /** Direction of the threshold comparison. */
   comparator: "gte" | "lte";
+  /**
+   * Provider observation time for `price`, in epoch milliseconds. Omitted
+   * when the provider stamps nothing — which normalizes to an
+   * `untimestamped` quote capped below the resolution confidence floor, not
+   * to an implicit "assume it is fresh".
+   */
+  observedAtMs?: number | null;
+  /**
+   * Freshness bounds to apply. When omitted the quote is **not** judged at
+   * all — no cap, no assessment — so a caller with an observation time is
+   * forced to say what to do with it rather than silently getting the
+   * uncapped result. Use {@link DEFAULT_FRESHNESS_POLICY} for the standard
+   * bounds.
+   */
+  freshness?: FreshnessPolicy;
+  /**
+   * Evaluation instant. Injectable so freshness behaviour is testable without
+   * freezing the process clock. Defaults to `Date.now()`.
+   */
+  now?: number;
 }
 
 /**
@@ -67,6 +104,14 @@ const CRYPTO_FULL_CONFIDENCE_DISTANCE = 0.05;
  *
  * confidence = clamp(distance / CRYPTO_FULL_CONFIDENCE_DISTANCE, 0, 1) * 0.5 + 0.5
  *   where distance = |price - threshold| / threshold
+ *
+ * That distance score is then capped by quote freshness: a price that is
+ * more than `staleAfterMs` old, or that arrived without a timestamp, cannot
+ * be returned at full confidence no matter how far it sits from the
+ * threshold. The `outcome` is still computed from the number the provider
+ * sent — the market question is answered by the price, and freshness governs
+ * how much the oracle is willing to stake on that answer, not whether the
+ * answer exists.
  */
 export function normalizeCrypto(raw: CryptoRawPayload): NormalizedOutcome {
   const { price, threshold, comparator } = raw;
@@ -84,7 +129,66 @@ export function normalizeCrypto(raw: CryptoRawPayload): NormalizedOutcome {
   // Map to [0.5, 1.0]: at boundary → 0.5, at full distance → 1.0.
   const confidence = normalized * 0.5 + 0.5;
 
-  return { outcome, confidence };
+  // Opt-in freshness gate. Absent a policy there is no observation time to
+  // judge, so the distance score stands unchanged.
+  if (!raw.freshness) {
+    return { outcome, confidence };
+  }
+
+  const freshness = assessQuote(raw.observedAtMs ?? null, raw.freshness, raw.now);
+  return { outcome, confidence: applyConfidenceCeiling(confidence, freshness) };
+}
+
+/** Input for the shared price-adapter path used by Binance/CMC/CoinGecko. */
+export interface CryptoQuoteInput {
+  price: number;
+  threshold: number;
+  comparator: "gte" | "lte";
+  /** Provider observation time in epoch ms, or `null` when the provider sent none. */
+  observedAtMs?: number | null;
+  /** Freshness bounds. Omit to skip the cap entirely. */
+  freshness?: FreshnessPolicy;
+  /** Evaluation instant; injectable for tests. Defaults to `Date.now()`. */
+  now?: number;
+  /**
+   * Confidence before the freshness cap. Defaults to 1.
+   *
+   * Price adapters pass the implicit default: comparing a quoted price to a
+   * threshold is not a marginal call, and re-scoring it by distance would make
+   * near-threshold markets fall below the resolution confidence floor for a
+   * reason unrelated to the data's quality. What *can* make it marginal is the
+   * quote being old, which is what the cap handles.
+   */
+  baseConfidence?: number;
+}
+
+/**
+ * The one path every price adapter uses to turn a quote into an outcome.
+ *
+ * Composes the threshold comparison with the freshness ceiling:
+ *
+ *   * a fresh, timestamped quote reports `baseConfidence` unchanged;
+ *   * a stale quote is capped at the policy's `staleConfidence`;
+ *   * an untimestamped quote is capped at `untimestampedConfidence`;
+ *   * an expired quote is capped at 0 — adapters reject it outright by
+ *     throwing {@link StaleQuoteError} rather than returning this.
+ */
+export function normalizeCryptoQuote(input: CryptoQuoteInput): NormalizedOutcome {
+  const { price, threshold, comparator, observedAtMs, freshness, now } = input;
+  const base = input.baseConfidence ?? 1;
+
+  if (!Number.isFinite(price) || !Number.isFinite(threshold)) {
+    return { outcome: false, confidence: 0 };
+  }
+
+  const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
+
+  if (!freshness) {
+    return { outcome, confidence: Math.max(0, Math.min(1, base)) };
+  }
+
+  const quote = assessQuote(observedAtMs ?? null, freshness, now);
+  return { outcome, confidence: applyConfidenceCeiling(base, quote) };
 }
 
 // ---------------------------------------------------------------------------

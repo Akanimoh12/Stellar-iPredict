@@ -1,8 +1,39 @@
 import { selectAdaptersForMarket, type DataAdapter, type Market, type MarketCategory } from "./index.js";
 import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
 import { createProvenanceRecord, sanitizeProvenanceValue, type ProvenanceStore } from "./provenance.js";
+import {
+  type MappabilityOverride,
+  type MappabilityVerdict,
+  MarketMappabilityRegistry,
+  validateMarketMappability,
+  type UnmappableReason,
+} from "./mappability.js";
 
 export type ResolutionStatus = "resolved" | "conflict" | "unresolvable" | "review" | "cancelled";
+
+/**
+ * Why a resolution produced the outcome it did.
+ *
+ * Present on every result so a caller never has to infer intent from a status
+ * code. `unmappable` is the case issue #745 is about: no adapter can ever
+ * resolve this market, so retrying will not help and the market needs a
+ * configuration change rather than time.
+ */
+export interface ResolutionReason {
+  code:
+    | "resolved"
+    | "all-sources-failed"
+    | "insufficient-agreement"
+    | "conflicting-outcomes"
+    | "low-confidence"
+    | "cancelled"
+    | "unmappable";
+  detail?: string;
+  /** Set when `code` is `unmappable`. */
+  mappability?: MappabilityVerdict;
+  /** Set when `code` is `unmappable`. */
+  unmappableReason?: UnmappableReason;
+}
 
 export interface SourceResult {
   adapterId: string;
@@ -18,6 +49,8 @@ export interface ResolutionResult {
   outcome?: boolean;
   confidence: number;
   sources: SourceResult[];
+  /** Present on every result. */
+  reason?: ResolutionReason;
 }
 
 export interface ResolveOptions {
@@ -34,7 +67,29 @@ export interface ResolveOptions {
   provenanceStore?: ProvenanceStore;
   /** Optional category-specific resolution configuration overrides. */
   categoryConfigs?: Partial<Record<MarketCategory, CategoryResolutionConfig>>;
+  /**
+   * Attach a mappability diagnosis when no adapter can resolve the market
+   * (issue #745). Defaults to true; set false to skip the check.
+   *
+   * The check is cheap and does not touch the network, but it is opt-out so
+   * a caller that has already validated mappability at creation time is not
+   * paying for it on every resolution.
+   */
+  checkMappability?: boolean;
+  /** Pre-built registry, so repeated resolutions do not rebuild it. */
+  mappabilityRegistry?: MarketMappabilityRegistry;
+  /** Operator overrides for mappability, from `MappabilityOverrides.load()`. */
+  mappabilityOverrides?: MappabilityOverride;
 }
+
+/** Options carried through as-is, rather than defaulted per category. */
+type PassedThroughOptions =
+  | "reviewQueue"
+  | "provenanceStore"
+  | "categoryConfigs"
+  | "checkMappability"
+  | "mappabilityRegistry"
+  | "mappabilityOverrides";
 
 export interface CategoryResolutionConfig {
   minAgreement?: number;
@@ -43,7 +98,7 @@ export interface CategoryResolutionConfig {
   minConfidence?: number;
 }
 
-export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> = {
+export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, PassedThroughOptions>> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
@@ -118,8 +173,8 @@ export async function resolveMarket(
   const defaultCatConfig = market.category ? DEFAULT_CATEGORY_CONFIG[market.category] : undefined;
   const customCatConfig = market.category ? options?.categoryConfigs?.[market.category] : undefined;
 
-  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> &
-    Pick<ResolveOptions, "reviewQueue" | "provenanceStore"> = {
+  const opts: Required<Omit<ResolveOptions, PassedThroughOptions>> &
+    Pick<ResolveOptions, PassedThroughOptions> = {
     minAgreement:
       options?.minAgreement ??
       customCatConfig?.minAgreement ??
@@ -142,6 +197,10 @@ export async function resolveMarket(
       DEFAULT_OPTIONS.minConfidence,
     reviewQueue: options?.reviewQueue,
     provenanceStore: options?.provenanceStore,
+    categoryConfigs: options?.categoryConfigs,
+    checkMappability: options?.checkMappability ?? true,
+    mappabilityRegistry: options?.mappabilityRegistry,
+    mappabilityOverrides: options?.mappabilityOverrides,
   };
 
   const finish = async (result: ResolutionResult): Promise<ResolutionResult> => {
@@ -151,8 +210,32 @@ export async function resolveMarket(
 
   const supported = selectAdaptersForMarket(market, adapters);
   const limited = supported.slice(0, opts.maxSources);
-
   const sources: SourceResult[] = [];
+
+  // No adapter claimed the market (issue #745). Diagnose *why* before giving
+  // up, because "unresolvable" alone reads as "try again later" — and for an
+  // unmappable market trying again can never help. The remedy travels with the
+  // result so whoever is handling it does not have to re-derive it.
+  if (limited.length === 0 && opts.checkMappability !== false) {
+    const verdict = validateMarketMappability(market, {
+      adapters,
+      overrides: opts.mappabilityOverrides,
+      registry: opts.mappabilityRegistry ?? MarketMappabilityRegistry.fromAdapters(adapters),
+    });
+    if (!verdict.mappable) {
+      return finish({
+        status: "unresolvable",
+        confidence: 0,
+        sources,
+        reason: {
+          code: "unmappable",
+          detail: verdict.detail,
+          mappability: verdict,
+          unmappableReason: verdict.reason,
+        },
+      });
+    }
+  }
 
   for (const adapter of limited) {
     const result = await fetchSource(adapter, market);
@@ -163,15 +246,36 @@ export async function resolveMarket(
 
   const cancellation = successful.find((source) => source.cancellationReason);
   if (cancellation) {
-    return finish({ status: "cancelled", confidence: cancellation.confidence, sources });
+    return finish({
+      status: "cancelled",
+      confidence: cancellation.confidence,
+      sources,
+      reason: { code: "cancelled", detail: `provider reported ${cancellation.cancellationReason}` },
+    });
   }
 
   if (successful.length === 0) {
-    return finish({ status: "unresolvable", confidence: 0, sources });
+    return finish({
+      status: "unresolvable",
+      confidence: 0,
+      sources,
+      reason: {
+        code: "all-sources-failed",
+        detail: sources.length === 0 ? "no adapter was queried" : "every adapter returned an error",
+      },
+    });
   }
 
   if (successful.length < opts.minAgreement) {
-    return finish({ status: "unresolvable", confidence: 0, sources });
+    return finish({
+      status: "unresolvable",
+      confidence: 0,
+      sources,
+      reason: {
+        code: "insufficient-agreement",
+        detail: `${successful.length} of ${opts.minAgreement} required sources succeeded`,
+      },
+    });
   }
 
   const yesCount = successful.filter((s) => s.outcome).length;
@@ -181,7 +285,15 @@ export async function resolveMarket(
   const disagreementRatio = total > 0 ? minority / total : 0;
 
   if (disagreementRatio > opts.conflictThreshold) {
-    const result: ResolutionResult = { status: opts.reviewQueue ? "review" : "conflict", confidence: 0, sources };
+    const result: ResolutionResult = {
+      status: opts.reviewQueue ? "review" : "conflict",
+      confidence: 0,
+      sources,
+      reason: {
+        code: "conflicting-outcomes",
+        detail: `${minority} of ${total} sources dissent (threshold ${opts.conflictThreshold})`,
+      },
+    };
     await opts.reviewQueue?.enqueue(reviewItem(market, "conflicting_outcomes", result));
     return finish(result);
   }
@@ -199,7 +311,16 @@ export async function resolveMarket(
   if (avgConfidence < opts.minConfidence) {
     result.status = "review";
     result.outcome = undefined;
+    result.reason = {
+      code: "low-confidence",
+      detail: `mean confidence ${avgConfidence.toFixed(3)} is below the ${opts.minConfidence} floor`,
+    };
     await opts.reviewQueue?.enqueue(reviewItem(market, "low_confidence", result));
+  } else {
+    result.reason = {
+      code: "resolved",
+      detail: `${yesCount} of ${total} sources agree`,
+    };
   }
   return finish(result);
 }

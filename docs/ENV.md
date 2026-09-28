@@ -124,6 +124,38 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `WEBHOOK_SIGNING_SECRET` | Optional | — | HMAC-SHA256 secret for signing webhook payloads with `X-Signature` and `X-Timestamp`. |
 | `FINALIZE_WEBHOOK_MAX_ATTEMPTS` | Optional | `5` | Retry attempts with exponential backoff before storing in dead-letter table. |
 
+### Data Adapter Quote Freshness
+Per-adapter bounds for how old a provider's price may be before the oracle
+downweights or rejects it. See
+[`docs/ORACLE_ADAPTER_FRESHNESS.md`](./ORACLE_ADAPTER_FRESHNESS.md) for the
+support matrix and which providers cannot be checked at all.
+
+| Variable | Required (Prod) | Default | Description |
+|---|---|---|---|
+| `ORACLE_BINANCE_FRESHNESS_MAX_AGE_MS` | Optional | `120000` | Binance quotes older than this are rejected outright. |
+| `ORACLE_BINANCE_FRESHNESS_STALE_AFTER_MS` | Optional | `30000` | Binance quotes older than this are downweighted. |
+| `ORACLE_BINANCE_FRESHNESS_STALE_CONFIDENCE` | Optional | `0.5` | Confidence ceiling for a stale Binance quote. Keep below the resolution floor (`0.7`). |
+| `ORACLE_BINANCE_FRESHNESS_UNTIMESTAMPED_CONFIDENCE` | Optional | `0.5` | Confidence ceiling when Binance returns no `closeTime`. |
+| `ORACLE_COINMARKETCAP_FRESHNESS_*` | Optional | as above | Same four bounds, prefix `ORACLE_COINMARKETCAP_`. |
+| `ORACLE_COINGECKO_FRESHNESS_*` | Optional | as above | Same four bounds, prefix `ORACLE_COINGECKO_`. |
+
+An unparseable value is a startup error, not a silent fallback to the default.
+
+### Market Mappability Overrides
+Lets an operator declare a market→provider mapping valid without a redeploy,
+and lets a delisted symbol be marked unservable. See
+[`docs/MARKET_MAPPABILITY.md`](./MARKET_MAPPABILITY.md).
+
+| Variable | Required (Prod) | Default | Description |
+|---|---|---|---|
+| `MARKET_MAPPABILITY_OVERRIDES` | Optional | — | JSON object with `symbols`, `categories` and/or `unsupported`. Re-read on every lookup. |
+| `MARKET_MAPPABILITY_OVERRIDES_FILE` | Optional | — | Path to a JSON file with the same shape. Mount it and edit in place; no restart needed. |
+| `MARKET_PARAMS_FILE` | Optional | — | JSON of market id → adapter params, for the unmappable sweep. The database does not store these. |
+| `UNMAPPABLE_SWEEP_WINDOW_SECONDS` | Optional | `2592000` (30d) | How far ahead `GET /api/markets/unmappable` looks. |
+| `UNMAPPABLE_SWEEP_LIMIT` | Optional | `100` | Maximum candidate rows returned by that endpoint. |
+
+Malformed override JSON is an error naming the source, not a silent fallback.
+
 ---
 
 ## 6. Frontend Web Application (`frontend`)

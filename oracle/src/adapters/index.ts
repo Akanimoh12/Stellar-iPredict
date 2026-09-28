@@ -1,5 +1,5 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
-export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export type { ResolutionResult, ResolutionReason, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
 export { FileProvenanceStore, InMemoryProvenanceStore } from "./provenance.js";
 export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
 export {
@@ -11,6 +11,7 @@ export type { AdapterApiKeyName, AdapterApiKeys, AdapterEnvironment } from "./co
 
 export type { AdapterMarketCategory as MarketCategory } from "@ipredict/shared";
 import type { AdapterMarketCategory } from "@ipredict/shared";
+import type { QuoteStatus } from "./freshness.js";
 
 /** Comparator applied between the fetched value and `params.threshold` for threshold-style markets. */
 export type ThresholdComparator = "gte" | "lte";
@@ -47,6 +48,24 @@ export interface AdapterOutcome {
   cancellation?: {
     reason: "postponed" | "cancelled";
     message?: string;
+  };
+  /**
+   * How old the underlying observation was, when the adapter can tell
+   * (issue #744). Present on price adapters; absent on providers that return
+   * a one-shot event result with no notion of an observation time.
+   *
+   * Kept on the outcome rather than only in `raw` so the audit trail and the
+   * dispute view can answer "was this number current when we acted on it?"
+   * without re-parsing a provider payload.
+   */
+  freshness?: {
+    status: QuoteStatus;
+    /** Age of the provider's observation in ms; `null` when untimestamped. */
+    ageMs: number | null;
+    /** Provider observation time in epoch ms; `null` when untimestamped. */
+    observedAtMs: number | null;
+    /** Hard bound that was applied, so a later review can see the policy. */
+    maxAgeMs: number;
   };
 }
 
@@ -149,3 +168,53 @@ export { InMemoryReviewQueue } from "./reviewQueue.js";
 export type { ManualReviewItem, ManualReviewQueue, ReviewReason } from "./reviewQueue.js";
 export { FixtureReplayAdapter, RecordingAdapter } from "./fixtures.js";
 export type { AdapterFixture, FixtureSink } from "./fixtures.js";
+export {
+  assessQuote,
+  applyConfidenceCeiling,
+  DEFAULT_FRESHNESS_POLICY,
+  extractTimestampMs,
+  freshnessPolicyFromEnv,
+  isNotFresh,
+  resolveFreshnessPolicy,
+  StaleQuoteError,
+  StalenessTracker,
+} from "./freshness.js";
+export type {
+  AdapterStalenessReport,
+  FreshnessEnvironment,
+  FreshnessPolicy,
+  QuoteFreshness,
+  QuoteStatus,
+  StalenessTrackerOptions,
+} from "./freshness.js";
+export {
+  getStalenessTracker,
+  recordQuoteStatus,
+  resetStalenessRegistry,
+  setStalenessTracker,
+  staleAdapterReports,
+  staleDataAlerts,
+} from "./stalenessRegistry.js";
+export type { StaleDataAlert } from "./stalenessRegistry.js";
+export { normalizeCryptoQuote } from "./normalize.js";
+export type { CryptoQuoteInput } from "./normalize.js";
+export {
+  assertMarketMappable,
+  collectUnmappableMarkets,
+  DEFAULT_MAPPABLE_SYMBOLS,
+  MAPPABLE_CATEGORIES,
+  MappabilityOverrides,
+  MarketMappabilityRegistry,
+  UnmappableMarketError,
+  validateMarketMappability,
+} from "./mappability.js";
+export type {
+  MappabilityOverride,
+  MappabilityVerdict,
+  MappabilityRegistryOptions,
+  SweepOptions,
+  SweepableMarket,
+  UnmappableOpenMarket,
+  UnmappableReason,
+  ValidateMappabilityOptions,
+} from "./mappability.js";

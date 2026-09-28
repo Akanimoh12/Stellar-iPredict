@@ -279,3 +279,67 @@ export async function getResolutionDelayStatus(
     checkedAt: new Date(nowSeconds * 1000).toISOString(),
   };
 }
+
+// ── Unmappable-market sweep (issue #745) ─────────────────────────────────────
+//
+// A market whose question no adapter can map is unresolvable by construction.
+// Today that is discovered at expiry, when resolution is already urgent. The
+// backend cannot run the oracle's mappability rules, so what it can do is
+// hand out the *candidate set* — open markets, soonest to expire first — and
+// let the oracle classify it. Splitting it this way keeps the category rules
+// in one place instead of duplicating an adapter list into SQL.
+
+/** A market the sweep should classify. Carries no symbol — the DB has none. */
+export type UnmappableCandidate = {
+  id: string;
+  question: string;
+  /** Stored category, e.g. "Crypto". Adapters use the lowercase form. */
+  category: string;
+  end_time: string;
+};
+
+export type UnmappableCandidateResult = {
+  candidates: UnmappableCandidate[];
+  /** Markets within `withinSeconds` of expiry, plus `includePastExpiry` ones. */
+  checked: number;
+  windowSeconds: number;
+  includePastExpiry: boolean;
+  checkedAt: string;
+};
+
+export async function getUnmappableCandidates(
+  db: Queryable = getDefaultDb(),
+  opts: {
+    withinSeconds?: number;
+    limit?: number;
+    includePastExpiry?: boolean;
+    now?: number;
+  } = {},
+): Promise<UnmappableCandidateResult> {
+  const withinSeconds = opts.withinSeconds ?? Number(process.env.UNMAPPABLE_SWEEP_WINDOW_SECONDS ?? 30 * 24 * 3600);
+  const limit = opts.limit ?? Number(process.env.UNMAPPABLE_SWEEP_LIMIT ?? 100);
+  const includePastExpiry = opts.includePastExpiry ?? true;
+  const nowSeconds = Math.floor((opts.now ?? Date.now()) / 1000);
+  const cutoff = nowSeconds + withinSeconds;
+
+  // `end_time` is a past deadline for markets that expired but have not been
+  // resolved. Those are the most urgent of all, so they lead the list.
+  const { rows } = await db.query<UnmappableCandidate>(
+    `SELECT id::TEXT, question, category, end_time::TEXT
+       FROM markets
+      WHERE resolved = false
+        AND cancelled = false
+        AND ($1 OR end_time <= $2)
+      ORDER BY end_time ASC
+      LIMIT $3`,
+    [includePastExpiry, cutoff, limit],
+  );
+
+  return {
+    candidates: rows,
+    checked: rows.length,
+    windowSeconds: withinSeconds,
+    includePastExpiry,
+    checkedAt: new Date(nowSeconds * 1000).toISOString(),
+  };
+}

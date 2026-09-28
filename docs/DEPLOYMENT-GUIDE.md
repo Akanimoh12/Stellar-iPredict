@@ -64,10 +64,10 @@ Service-specific verification follows:
 | `log-collector` | It may remain running; roll back only its prior image/config if logging itself caused the incident. | New JSON logs arrive at the configured sink. |
 | `postgres` / `redis` | Do not roll back their images, volumes, or data as part of an application rollback. | Their existing health checks remain healthy. Restore from a verified backup only under the disaster-recovery procedure. |
 
-After every service is healthy, run a smoke test for market reads, authenticated
-oracle submission, indexer progress, and an oracle monitor cycle. Keep the
-deployment freeze until metrics and error rates have remained normal for the
-release's agreed observation window.
+After every service is healthy, run the **post-deployment smoke suite** (below)
+— it covers market reads, authenticated oracle submission, and the auth
+rejection path. Keep the deployment freeze until metrics and error rates have
+remained normal for the release's agreed observation window.
 
 ### Schema, migrations, and contracts
 
@@ -393,9 +393,161 @@ npm run build
 
 ---
 
+## Post-deployment smoke suite
+
+Deploying is not the same as working. Before this suite existed the only
+verification after a release was manually poking a few endpoints, which is
+exactly the process that misses a release whose API answers 200 with amounts
+serialised as numbers. **The suite below is a required gate: a deployment is
+not complete until it exits 0.**
+
+### Running it
+
+```bash
+# Read-only. Safe against production — this is the default and the gate.
+make smoke BASE_URL=https://api.example.com
+
+# Equivalent, without make:
+npm run smoke -- --base-url https://api.example.com
+
+# See what it will do before running it:
+make smoke-list
+```
+
+Expected output on a healthy deployment:
+
+```
+iPredict smoke suite — https://api.example.com
+
+  PASS GET /healthz
+  PASS GET /readyz
+  PASS GET /resolution-status
+  PASS GET /api/markets
+  PASS GET /api/markets/:id and /odds
+  PASS GET /api/markets/999999999
+  PASS POST /api/v1/oracle/submit (no credential)
+  PASS POST /api/v1/oracle/submit (wrong credential)
+  SKIP POST /api/v1/oracle/submit (valid key, invalid signature) — no --oracle-api-key supplied; …
+
+8 passed, 0 failed, 0 warning, 1 skipped in 178ms
+```
+
+Exit code is `0` when nothing failed, `1` on any failure, `2` on bad usage,
+`3` if the suite itself crashes. Wire it as the last step of the deploy
+script, before the freeze is lifted.
+
+### What it covers, and what it deliberately does not
+
+| Check | Endpoint | Detects |
+|---|---|---|
+| `health.liveness` | `GET /healthz` | Process not serving, wrong port, proxy not routing |
+| `health.readiness` | `GET /readyz` | Missing `DATABASE_URL`, unmigrated database, severed connection, Redis down — **names the failing dependency** |
+| `health.resolution` | `GET /resolution-status` | Oracle aggregator down or falling behind (warning, not failure) |
+| `markets.list` | `GET /api/markets` | Pagination/schema regressions, **and amounts no longer serialised as exact seven-decimal strings** |
+| `markets.detail` | `GET /api/markets/:id`, `/odds` | List and detail disagreeing; odds computing against a missing market |
+| `markets.notFound` | `GET /api/markets/999999999` | 404 handling replaced by a 500, or a stack trace in the body |
+| `oracle.authRejected` | `POST /api/v1/oracle/submit` | **Auth check removed** — the release that lets anyone submit an outcome |
+| `oracle.badKeyRejected` | `POST /api/v1/oracle/submit` | Credential set empty, misparsed, or replaced by a wildcard |
+| `oracle.badSignatureRejected` | `POST /api/v1/oracle/submit` | Rotated/lost `ORACLE_API_KEYS`; **signature verification not running** |
+
+The last one is skipped unless an oracle key is supplied:
+
+```bash
+make smoke BASE_URL=… SMOKE_ARGS="--oracle-api-key $ORACLE_SMOKE_KEY"
+```
+
+Supply the key through `SMOKE_ORACLE_API_KEY` in the environment rather than on
+the command line, so it does not land in shell history or a CI log.
+
+### Why the submission path is only tested as far as a rejection
+
+`POST /oracle/submit` writes real state: a submission row, and a step toward
+finalizing a market. A smoke test that submits successfully against production
+is not a test, it is an incident with extra steps.
+
+So the suite goes as far as a request can go without being accepted:
+
+1. **No credential** → must be 401. A release that dropped the auth check
+   fails here.
+2. **Wrong credential** → must be 401. A release whose `ORACLE_API_KEYS` is
+   empty or wildcard fails here.
+3. **Correct credential, fabricated signature** → must be 401 or 403. This
+   proves the key is live, identity binding works, and the request reached
+   signature verification — and it writes nothing. A 200 here means
+   signature verification is not running, which is a SEV1.
+
+A genuine write-path check exists but is off unless an operator asks for it
+twice over, and even then the suite cannot mint a real provider signature:
+
+```bash
+# Requires BOTH flags, and a dedicated market that exists only for this.
+make smoke BASE_URL=… SMOKE_ARGS="--oracle-api-key $KEY --allow-writes --write-market-id 4242"
+```
+
+`--allow-writes` without `--write-market-id` is refused outright, rather than
+defaulting to some arbitrary market id. The check prints `WRITES STATE` in the
+report and in `--list` so it cannot be run by accident.
+
+**Staging is where the write path is exercised.** For a staging release, use a
+dedicated smoke market and run the write check there, every time.
+
+### Reading a failure
+
+| Output | What it means | Where to look |
+|---|---|---|
+| `FAIL GET /readyz — not ready; failing: db` | The API cannot reach Postgres | `DATABASE_URL`, migrations, network policy |
+| `FAIL GET /api/markets — market.total_yes is number, expected a string` | The pg `NUMERIC` parser is no longer returning strings — **large balances are losing precision for every client** | `configurePgNumericParser` in `backend/src/lib/amount.ts` |
+| `FAIL …/:id — appears in the list but returns 404` | List and detail routes disagree | Cache keys, the market detail query |
+| `FAIL …/submit — expected 401 …, got 200` | **Auth is not running. Treat as SEV1.** | `backend/src/config/oracleApiKeys.ts`, `ORACLE_API_KEYS` |
+| `WARN … (valid key, invalid signature) — configured key was rejected` | The deployment's keys do not match the key supplied | `ORACLE_API_KEYS` on the running container |
+| `WARN GET /resolution-status — stalled` | The deployment is fine; the oracle is not | § "Oracle aggregator outage" below |
+| `WARN … rate limited; this check verified nothing` | The suite's own repeated requests hit a limit. **The check did not run.** | Re-run after the window resets; use `--strict` to make this block |
+
+A `SKIP` is not a `PASS`. The report says what was not exercised, so a green
+run with skips is visibly narrower than a green run without them.
+
+### Gate configuration
+
+`--strict` promotes warnings to failures, for a release where a stalled
+resolution should block rather than warn:
+
+```bash
+make smoke BASE_URL=… SMOKE_ARGS="--strict --oracle-api-key $KEY"
+```
+
+Against production, also run:
+
+```bash
+# Indexer progress — not covered by the suite above.
+curl -fsS "http://<indexer>:9101/metrics" | grep -E '^indexer_(last_ledger|events_processed)'
+# Oracle monitor cycle.
+curl -fsS "http://<oracle-monitor>:9103/health/ready"
+```
+
+Record the run in the release record: the base URL, the exit code, the pass /
+fail / warn / skip counts, and who ran it. A skipped authenticated check in
+production is a finding worth writing down, not a detail.
+
+### The suite is itself tested
+
+`test/smoke/smoke.test.ts` stands up a stub server, breaks it in each way a
+release breaks, and asserts the suite says so — including a release that
+reparses `NUMERIC` as a number and one that accepts an unsigned submission.
+`backend/test/smoke.test.ts` runs the same suite against the real Fastify
+server, so the checks cannot silently drift from the responses the application
+actually produces.
+
+---
+
 ## Verification Checklist
 
-After deployment, verify each feature end-to-end:
+**Automated, required first:**
+
+- [ ] Post-deployment smoke suite exits 0 (`make smoke BASE_URL=…`)
+- [ ] The smoke run's pass/fail/warn/skip counts are recorded in the release
+      record, and any skipped check is called out
+
+Then verify each feature end-to-end:
 
 - [ ] Landing page loads with live stats
 - [ ] Markets page shows seed markets

@@ -49,6 +49,29 @@
 
 import type { Logger } from "../log.js";
 
+// ── Runbook URLs ──────────────────────────────────────────────────────────────
+
+/**
+ * Base URL for runbook links embedded in every alert payload. Override with
+ * RUNBOOK_BASE_URL to point at an internal mirror.
+ */
+const RUNBOOK_BASE =
+  process.env["RUNBOOK_BASE_URL"] ??
+  "https://github.com/Akanimoh12/Stellar-iPredict/blob/main";
+
+/**
+ * Canonical runbook URL for each aggregator alert type.
+ *
+ * These are embedded directly in webhook payloads (field `runbook_url`) so
+ * an engineer receiving a 3 am page can follow the link without searching.
+ * Update this map whenever a runbook is moved or a new alert type is added,
+ * and add a row to docs/RUNBOOK_INDEX.md.
+ */
+export const AGGREGATOR_RUNBOOK_URLS: Record<string, string> = {
+  "oracle.aggregator.submit_failed": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-1--submit-operation`,
+  "oracle.aggregator.ambiguous_tally": `${RUNBOOK_BASE}/oracle/docs/COUNCIL_RUNBOOK.md#ambiguous-tallies-and-manual-review`,
+};
+
 // ── Severity ──────────────────────────────────────────────────────────────────
 
 /**
@@ -95,6 +118,12 @@ export interface Alert {
    * Consumers can thread webhook messages by this value.
    */
   groupKey?: string;
+  /**
+   * Direct link to the runbook procedure for this alert type. Embedded in
+   * every webhook payload so an engineer has the procedure at hand without
+   * needing to search for documentation.
+   */
+  runbook_url?: string;
 }
 
 // ── Classify severity ─────────────────────────────────────────────────────────
@@ -368,6 +397,7 @@ export function createAlertRouter(options: AlertRouterOptions): AlertRouter {
       entityId,
       payload,
       firedAt: new Date(now).toISOString(),
+      runbook_url: AGGREGATOR_RUNBOOK_URLS[type],
     };
 
     // Dispatch immediately (not batched) — submit failures are urgent.
@@ -452,6 +482,7 @@ export function createWebhookAlertSender(
 
     const body = JSON.stringify({
       type: "oracle.aggregator.submit_failed",
+      runbook_url: AGGREGATOR_RUNBOOK_URLS["oracle.aggregator.submit_failed"],
       marketId: payload.marketId,
       attempts: payload.attempts,
       error: payload.error instanceof Error ? payload.error.message : String(payload.error ?? ""),
@@ -512,6 +543,7 @@ export function createAmbiguousTallyAlertSender(
 
     const body = JSON.stringify({
       type: "oracle.aggregator.ambiguous_tally",
+      runbook_url: AGGREGATOR_RUNBOOK_URLS["oracle.aggregator.ambiguous_tally"],
       marketId: alert.marketId,
       yesVotes: alert.yesVotes,
       noVotes: alert.noVotes,

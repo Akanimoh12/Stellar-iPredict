@@ -13,6 +13,30 @@ export type AlertType =
   | "oracle.monitor.council_inactive"
   | "oracle.monitor.council_window_exceeded";
 
+/**
+ * Canonical runbook URL for each alert type.
+ *
+ * These links are embedded in every webhook payload so an engineer receiving
+ * an alert at 3 am can follow the link directly without first finding this
+ * codebase or the index. Update this map whenever a runbook is moved or a
+ * new alert type is added — and add a row to docs/RUNBOOK_INDEX.md.
+ *
+ * Base path assumes the GitHub repository default-branch URL. Override
+ * RUNBOOK_BASE_URL in the environment to point at an internal mirror.
+ */
+const RUNBOOK_BASE =
+  process.env["RUNBOOK_BASE_URL"] ??
+  "https://github.com/Akanimoh12/Stellar-iPredict/blob/main";
+
+export const ALERT_RUNBOOK_URLS: Record<AlertType, string> = {
+  "oracle.monitor.market_stuck": `${RUNBOOK_BASE}/oracle/docs/STUCK_MARKET_RUNBOOK.md`,
+  "oracle.monitor.submission_new": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-1--submit-operation`,
+  "oracle.monitor.dispute_escalated": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-2--challenge-operation`,
+  "oracle.monitor.bond_below_minimum": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-4--monitoring`,
+  "oracle.monitor.council_inactive": `${RUNBOOK_BASE}/oracle/docs/COUNCIL_RUNBOOK.md#monitoring--alerts`,
+  "oracle.monitor.council_window_exceeded": `${RUNBOOK_BASE}/oracle/docs/COUNCIL_FLOW_RUNBOOK.md#handling-escalated-disputes-exceeding-the-council-window`,
+};
+
 export interface Alert {
   type: AlertType;
   /**
@@ -34,7 +58,14 @@ function replacer(_key: string, value: unknown): unknown {
 }
 
 export function serializeAlert(alert: Alert): string {
-  return JSON.stringify({ type: alert.type, ...alert.payload }, replacer);
+  return JSON.stringify(
+    {
+      type: alert.type,
+      runbook_url: ALERT_RUNBOOK_URLS[alert.type],
+      ...alert.payload,
+    },
+    replacer,
+  );
 }
 
 function logFields(payload: object): Record<string, unknown> {
@@ -49,6 +80,9 @@ function logFields(payload: object): Record<string, unknown> {
 /**
  * Logs every alert and, when a webhook is configured, POSTs it as JSON.
  *
+ * Every payload includes a `runbook_url` field so the receiving engineer can
+ * navigate directly to the procedure without searching for documentation.
+ *
  * Delivery failures are logged, never thrown: an alerting outage must not
  * stop the monitor's check cycle, which would turn one broken webhook into a
  * total loss of oracle observability.
@@ -59,7 +93,10 @@ export function createAlertEmitter(
   fetchImpl: typeof fetch = fetch,
 ): AlertEmitter {
   return async (alert) => {
-    logger.warn(alert.type, logFields(alert.payload));
+    logger.warn(alert.type, {
+      runbook_url: ALERT_RUNBOOK_URLS[alert.type],
+      ...logFields(alert.payload),
+    });
 
     if (!webhookUrl) return;
 

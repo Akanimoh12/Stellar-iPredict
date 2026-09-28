@@ -10,6 +10,7 @@ groups:
         annotations:
           summary: Indexer is more than 100 ledgers behind
           description: "Indexer lag is {{ $value }} ledgers for 10 minutes."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/INDEXER_RUNBOOK.md"
 
       - alert: HighRPCErrorRate
         expr: sum by (service) (rate(rpc_errors_total[5m])) > (5 / 60)
@@ -19,6 +20,7 @@ groups:
         annotations:
           summary: High RPC error rate for {{ $labels.service }}
           description: "RPC failures have exceeded 5 per minute for 5 minutes (current: {{ $value | humanize }}/s)."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/ORACLE_AND_BACKEND.md"
 
       - alert: MarketStuck
         expr: (time() - market_end_time_seconds) > (48 * 60 * 60) and on (market_id) market_resolved == 0
@@ -29,6 +31,7 @@ groups:
         annotations:
           summary: Market {{ $labels.market_id }} is stuck
           description: "Market {{ $labels.market_id }} remains unresolved more than 48 hours after expiry."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/oracle/docs/STUCK_MARKET_RUNBOOK.md"
 
       - alert: HighAPILatency
         expr: histogram_quantile(0.99, sum by (le) (rate(api_request_duration_ms_bucket[5m]))) > 2000
@@ -39,6 +42,7 @@ groups:
         annotations:
           summary: API p99 latency is above 2 seconds
           description: "API p99 latency is {{ $value | humanize }} ms."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/BACKEND_DEPLOYMENT.md"
 
       - alert: DatabaseSlow
         expr: histogram_quantile(0.99, sum by (le) (rate(db_query_duration_ms_bucket[5m]))) > 500
@@ -49,6 +53,7 @@ groups:
         annotations:
           summary: Database p99 query latency is above 500 ms
           description: "Database p99 query latency is {{ $value | humanize }} ms."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/DB_SCHEMA.md"
 
       # Windowed, not the lifetime cache_hit_rate gauge: the gauge averages
       # over the whole process lifetime, so a cache that stopped working an
@@ -70,6 +75,7 @@ groups:
         annotations:
           summary: Cache hit rate is below 50%
           description: "Redis is serving {{ $value | humanizePercentage }} of cache lookups; the rest are hitting Postgres. Check for a key-shape change or over-eager invalidation."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/BACKEND_DEPLOYMENT.md"
 
       # The oracle serves scrapes from a cached snapshot, so a broken collector
       # returns stale numbers with a 200 rather than failing the scrape. Only
@@ -83,6 +89,7 @@ groups:
         annotations:
           summary: Oracle metrics have not refreshed in over 5 minutes
           description: "The oracle metrics collector last succeeded {{ $value | humanizeDuration }} ago; oracle_submissions_total and oracle_disputes_total are stale."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/ORACLE_AND_BACKEND.md"
 
       # ── Oracle endpoint authentication failures (issue #576) ────────────────
       #
@@ -112,6 +119,7 @@ groups:
         annotations:
           summary: Oracle authentication failures match a misconfigured provider
           description: "Failures are concentrated on fewer than 5 client origins, or include a valid key used for the wrong provider. One integration is broken rather than being probed — check recent ORACLE_API_KEYS rotations and the failing provider's key binding."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/SECRETS.md"
 
       - alert: OracleAuthFailureDistributedGuessing
         expr: |
@@ -125,3 +133,4 @@ groups:
         annotations:
           summary: Distributed oracle API-key guessing attempt
           description: "Unrecognised keys are failing at {{ $value | humanize }}/s from 5 or more distinct client origins. This is the signature of a credential-guessing attempt, not a misconfiguration; the attempted keys are never logged, so use the source addresses in the oracle auth-failure lines to identify the traffic."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/SECRET-ROTATION.md"

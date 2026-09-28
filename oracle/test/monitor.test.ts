@@ -103,6 +103,8 @@ describe("serializeAlert", () => {
     };
     expect(JSON.parse(serializeAlert(alert))).toEqual({
       type: "oracle.monitor.bond_below_minimum",
+      runbook_url:
+        "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-4--monitoring",
       marketId: "7",
       currentBond: "1",
       requiredMinimum: "1000000000",

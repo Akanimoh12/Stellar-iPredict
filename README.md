@@ -341,6 +341,7 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 
 - [Contributor Onboarding](docs/ONBOARDING.md) — guided onboarding path for new contributors through starting issues and setup.
 - [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
+- [Runbook Index](docs/RUNBOOK_INDEX.md) — **on-call start here**: every alert mapped to its runbook procedure, with runbook links embedded in alert payloads.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
 - [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.

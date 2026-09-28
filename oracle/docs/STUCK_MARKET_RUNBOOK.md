@@ -28,8 +28,8 @@ the older runbooks say something different, this one is correct. See
 |---|---|
 | **This file** | Responding to a stuck market, from the alert to resolution |
 | [`COUNCIL_RUNBOOK.md`](./COUNCIL_RUNBOOK.md) | Council members casting votes; severity levels, escalation path and user communication ([Incident Response](./COUNCIL_RUNBOOK.md#incident-response)) |
-| [`../src/OPTIMISTIC_ORACLE_RUNBOOK.md`](../src/OPTIMISTIC_ORACLE_RUNBOOK.md) | The bonded optimistic oracle: `submit_outcome`, `challenge`, `finalize_outcome`, `resolve_challenge` |
-| [`../src/aggregator/COUNCIL_FLOW_RUNBOOK.md`](../src/aggregator/COUNCIL_FLOW_RUNBOOK.md) | Exercising the council flow by hand on a local or testnet contract (QA, not production) |
+| [`OPTIMISTIC_ORACLE_RUNBOOK.md`](./OPTIMISTIC_ORACLE_RUNBOOK.md) | The bonded optimistic oracle: `submit_outcome`, `challenge`, `finalize_outcome`, `resolve_challenge` |
+| [`COUNCIL_FLOW_RUNBOOK.md`](./COUNCIL_FLOW_RUNBOOK.md) | Exercising the council flow by hand on a local or testnet contract (QA, not production) |
 | [`../../docs/ORACLE_RUNBOOK.md`](../../docs/ORACLE_RUNBOOK.md) | A merged overview of the council and optimistic runbooks |
 
 For severity, paging and user communication, follow the

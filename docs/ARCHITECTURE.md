@@ -93,4 +93,4 @@ shared/     Shared TypeScript types and event constants
 infra/      Local and production service configuration
 ```
 
-See [LOCAL_DEV.md](LOCAL_DEV.md) for local startup, [API.md](API.md) for endpoints, [INDEXER_RUNBOOK.md](INDEXER_RUNBOOK.md) for indexer operations, and [ORACLE_RUNBOOK.md](ORACLE_RUNBOOK.md) for resolution operations.
+See [LOCAL_DEV.md](LOCAL_DEV.md) for local startup, [API.md](API.md) for endpoints, [INDEXER_RUNBOOK.md](INDEXER_RUNBOOK.md) for indexer operations, [ORACLE_RUNBOOK.md](ORACLE_RUNBOOK.md) for resolution operations, and [RUNBOOK_INDEX.md](RUNBOOK_INDEX.md) for the alert → runbook map.

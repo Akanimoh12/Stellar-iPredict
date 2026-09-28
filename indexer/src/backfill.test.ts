@@ -22,6 +22,7 @@ import {
   writeEventToDb,
   runBackfill,
 } from "./backfill.js";
+import { RetentionExceededError } from "./rpc/getEvents.js";
 import { rpc } from "@stellar/stellar-sdk";
 
 // Mock config
@@ -101,6 +102,14 @@ describe("Backfill & Poll Module", () => {
 
       await expect(fetchWithRetry(fn, 3, 1)).rejects.toThrow();
       expect(fn).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+    });
+
+    it("fails fast without retry when a retention exceeded error occurs", async () => {
+      const retentionErr = new Error("startLedger is less than the oldest ledger stored in this node (50000)");
+      const fn = vi.fn().mockRejectedValue(retentionErr);
+
+      await expect(fetchWithRetry(fn, 5, 1)).rejects.toThrow(/oldest ledger/);
+      expect(fn).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -267,5 +276,57 @@ describe("Backfill & Poll Module", () => {
         })
       );
     });
+
+    it("fails fast with RetentionExceededError naming unavailable range when startLedger is beyond retention", async () => {
+      const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 100000 });
+      const mockGetEvents = vi.fn().mockRejectedValue(
+        new Error("startLedger is less than the oldest ledger stored in this node (50000)")
+      );
+
+      const serverInstance = {
+        getLatestLedger: mockGetLatestLedger,
+        getEvents: mockGetEvents,
+      };
+      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+
+      try {
+        await runBackfill();
+        expect.fail("Expected runBackfill to throw RetentionExceededError");
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(RetentionExceededError);
+        expect(err.startLedger).toBe(100);
+        expect(err.oldestLedger).toBe(50000);
+        expect(err.unavailableRange).toEqual({ fromLedger: 100, toLedger: 49999 });
+        expect(err.message).toContain("Unavailable ledger range: [100..49999]");
+        expect(err.message).toContain("Recovery path: Please re-backfill from a snapshot");
+      }
+    });
+
+    it("proactively fails with RetentionExceededError when getHealth indicates START_LEDGER is beyond retention", async () => {
+      const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 100000 });
+      const mockGetHealth = vi.fn().mockResolvedValue({
+        status: "healthy",
+        latestLedger: 100000,
+        oldestLedger: 50000,
+        ledgerRetentionWindow: 50000,
+      });
+
+      const serverInstance = {
+        getLatestLedger: mockGetLatestLedger,
+        getHealth: mockGetHealth,
+        getEvents: vi.fn(),
+      };
+      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+
+      try {
+        await runBackfill();
+        expect.fail("Expected runBackfill to throw RetentionExceededError");
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(RetentionExceededError);
+        expect(err.unavailableRange).toEqual({ fromLedger: 100, toLedger: 49999 });
+        expect(err.message).toContain("Unavailable ledger range: [100..49999]");
+      }
+    });
   });
 });
+

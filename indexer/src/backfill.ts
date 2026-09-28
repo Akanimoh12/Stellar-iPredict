@@ -2,6 +2,14 @@ import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "./config/index.js";
 import { pool } from "./db.js";
 import { insertProcessedEvent } from "./handlers/idempotency.js";
+import {
+  isRetentionExceededError,
+  extractOldestLedger,
+  formatRetentionExceededMessage,
+  RetentionExceededError,
+  checkRetentionBoundary,
+  DEFAULT_RETENTION_ALERT_THRESHOLD,
+} from "./rpc/getEvents.js";
 
 /**
  * Backfill as a recovery path.
@@ -64,6 +72,9 @@ export async function fetchWithRetry<T>(
   try {
     return await fn();
   } catch (error) {
+    if (isRetentionExceededError(error)) {
+      throw error;
+    }
     if (isRateLimitError(error) && retries > 0) {
       console.warn(`[backfill] Rate limited (429). Retrying in ${delay}ms... (Retries left: ${retries})`);
       await new Promise((resolve) => setTimeout(resolve, delay));
@@ -182,6 +193,24 @@ export async function runBackfill(): Promise<number> {
 
   console.log(`[backfill] Network head ledger is ${headLedger}. Starting backfill from ${config.START_LEDGER}...`);
 
+  // Proactively check retention boundary if getHealth is supported
+  if (typeof (server as any).getHealth === "function") {
+    try {
+      const health = await (server as any).getHealth();
+      const oldestLedger = Number(health?.oldestLedger);
+      if (!isNaN(oldestLedger)) {
+        if (config.START_LEDGER < oldestLedger) {
+          const { message, unavailableRange } = formatRetentionExceededMessage(config.START_LEDGER, oldestLedger);
+          console.error(message);
+          throw new RetentionExceededError(config.START_LEDGER, oldestLedger, message, unavailableRange);
+        }
+        await checkRetentionBoundary(server, config.START_LEDGER, DEFAULT_RETENTION_ALERT_THRESHOLD);
+      }
+    } catch (err) {
+      if (err instanceof RetentionExceededError) throw err;
+    }
+  }
+
   await ensureDeadLetterTable();
 
   let currentLedger = config.START_LEDGER;
@@ -204,9 +233,27 @@ export async function runBackfill(): Promise<number> {
       `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
     );
 
-    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
-      return await server.getEvents(request);
-    });
+    let response: rpc.Api.GetEventsResponse;
+    try {
+      response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
+        return await server.getEvents(request);
+      });
+    } catch (err: any) {
+      if (isRetentionExceededError(err)) {
+        const msg = err instanceof Error ? err.message : String(err);
+        let oldestLedger = extractOldestLedger(msg);
+        if (oldestLedger === null && typeof (server as any).getHealth === "function") {
+          try {
+            const health = await (server as any).getHealth();
+            oldestLedger = Number(health?.oldestLedger);
+          } catch {}
+        }
+        const { message, unavailableRange } = formatRetentionExceededMessage(currentLedger, oldestLedger);
+        console.error(message);
+        throw new RetentionExceededError(currentLedger, oldestLedger, message, unavailableRange);
+      }
+      throw err;
+    }
     const events = response.events || [];
 
     if (events.length === 0) {
@@ -238,6 +285,8 @@ export async function runBackfill(): Promise<number> {
     const lastEventLedger = events[events.length - 1].ledger;
     currentLedger = lastEventLedger;
     cursor = response.cursor;
+
+    await checkRetentionBoundary(server, currentLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
 
     console.log(`[backfill] Processed events up to ledger ${lastEventLedger}`);
 

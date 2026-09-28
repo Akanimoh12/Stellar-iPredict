@@ -29,6 +29,14 @@ export interface IndexerRuntime {
   recomputeTotals?: boolean;
   recomputeBetCounts?: boolean;
   logger?: Logger;
+  /**
+   * Optional atomic batch processor: processes all events in a batch and saves the
+   * checkpoint ledger within a single database transaction.
+   */
+  processBatchAtomically?(
+    events: RawEvent[],
+    checkpointLedger: number,
+  ): Promise<void>;
 }
 
 export interface RawEvent { ledger: number; txHash: string; [key: string]: unknown }
@@ -70,25 +78,36 @@ export class Indexer {
 
   async indexOnce(): Promise<number> {
     const response = await this.runtime.fetchEvents(this.lastLedger);
-    for (const event of response.events) {
-      if (this.stopping) break;
-      this.processing = true;
-      try {
-        const decoded = this.runtime.decodeEvent(event);
-        await this.runtime.writeEventToDb(decoded);
-      } catch (error) {
-        await persistDeadLetterEvent(this.runtime.db, {
-          ledger: event.ledger,
-          txHash: event.txHash,
-          rawEvent: event,
-          error,
-        });
-      } finally {
-        this.processing = false;
+    if (typeof this.runtime.processBatchAtomically === "function") {
+      // Atomic commit: cursor advances in the same transaction as event effects
+      await this.runtime.processBatchAtomically(response.events, response.latestLedger);
+      this.lastLedger = response.latestLedger;
+    } else {
+      // Deliberate ordering for at-least-once processing:
+      // Process event effects FIRST, then advance cursor SECOND.
+      // If a crash happens mid-batch, events are reprocessed on recovery
+      // rather than permanently skipped (idempotent handlers guarantee no duplicates).
+      for (const event of response.events) {
+        if (this.stopping) break;
+        this.processing = true;
+        try {
+          const decoded = this.runtime.decodeEvent(event);
+          await this.runtime.writeEventToDb(decoded);
+        } catch (error) {
+          await persistDeadLetterEvent(this.runtime.db, {
+            ledger: event.ledger,
+            txHash: event.txHash,
+            rawEvent: event,
+            error,
+          });
+        } finally {
+          this.processing = false;
+        }
       }
+      this.lastLedger = response.latestLedger;
+      await this.runtime.saveCheckpoint(this.lastLedger);
     }
-    this.lastLedger = response.latestLedger;
-    await this.runtime.saveCheckpoint(this.lastLedger);
+
     if (this.runtime.recomputeTotals) await recomputeMarketTotalsFromBets(this.runtime.db);
     if (this.runtime.recomputeBetCounts) await recomputeMarketBetCountsFromBets(this.runtime.db);
     return this.lastLedger;
@@ -160,6 +179,10 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
           await writeBackfillEvent(event.ledger, event.txHash, topics, data);
         }
         currentLedger = response.latestLedger;
+        try {
+          const { saveCheckpointLedger, pool: dbPool } = await import("./db.js");
+          await saveCheckpointLedger(dbPool, currentLedger);
+        } catch {}
       }
     } catch (err) {
       console.error("[live-poll] Error in polling loop:", err);

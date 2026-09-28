@@ -11,6 +11,14 @@ export interface SourceResult {
   error?: string;
   cancellationReason?: "postponed" | "cancelled";
   raw?: unknown;
+  /**
+   * Attributable fetch metadata (provider / request / response time) for the
+   * payload in `raw`. Carried through to the audit trail so a persisted
+   * payload is never anonymous.
+   */
+  provider?: string;
+  request?: unknown;
+  respondedAt?: string;
 }
 
 export interface ResolutionResult {
@@ -19,6 +27,23 @@ export interface ResolutionResult {
   confidence: number;
   sources: SourceResult[];
 }
+
+/**
+ * Durable sink for the raw provider payloads behind a resolution.
+ *
+ * Called once per resolution with every source consulted, so the payloads
+ * outlive the process. `AdapterOutcome.raw` is otherwise in-memory only, which
+ * leaves no evidence of what a provider actually returned if the resolution is
+ * later disputed.
+ *
+ * Mirrors the existing `provenanceStore` hook: the caller supplies a store
+ * bound to its own backend (see `createRawPayloadSink` in
+ * `aggregator/council-audit.ts` for the Postgres-backed one).
+ */
+export type RawPayloadSink = (
+  marketId: string,
+  sources: readonly SourceResult[],
+) => Promise<void>;
 
 export interface ResolveOptions {
   /** Minimum number of sources that must agree for a resolution. Defaults to 1 (2 for politics). */
@@ -32,6 +57,8 @@ export interface ResolveOptions {
   reviewQueue?: ManualReviewQueue;
   /** Optional durable audit store. Every resolution decision is recorded when supplied. */
   provenanceStore?: ProvenanceStore;
+  /** Optional durable store for the raw provider payloads behind the decision. */
+  rawPayloadSink?: RawPayloadSink;
   /** Optional category-specific resolution configuration overrides. */
   categoryConfigs?: Partial<Record<MarketCategory, CategoryResolutionConfig>>;
 }
@@ -43,7 +70,7 @@ export interface CategoryResolutionConfig {
   minConfidence?: number;
 }
 
-export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> = {
+export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink" | "categoryConfigs">> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
@@ -81,6 +108,15 @@ export const DEFAULT_CATEGORY_CONFIG: Record<MarketCategory, Required<CategoryRe
   },
 };
 
+/**
+ * Fetches one source, attaching the provenance needed to make its payload
+ * attributable later.
+ *
+ * `provider` falls back to the adapter id and `respondedAt` to the fetch time,
+ * so a payload is never stored anonymously even if the adapter populates no
+ * `provenance` of its own. Both go through the same credential redaction as the
+ * payload, because a request URL carries API keys in its query string.
+ */
 function fetchSource(
   adapter: DataAdapter,
   market: Market,
@@ -93,6 +129,11 @@ function fetchSource(
       confidence: outcome.confidence,
       cancellationReason: outcome.cancellation?.reason,
       raw: sanitizeProvenanceValue(outcome.raw),
+      provider: outcome.provenance?.provider ?? adapter.id,
+      request: outcome.provenance?.request === undefined
+        ? undefined
+        : sanitizeProvenanceValue(outcome.provenance.request),
+      respondedAt: outcome.provenance?.respondedAt ?? new Date().toISOString(),
     }))
     .catch((error) => ({
       adapterId: adapter.id,
@@ -118,8 +159,8 @@ export async function resolveMarket(
   const defaultCatConfig = market.category ? DEFAULT_CATEGORY_CONFIG[market.category] : undefined;
   const customCatConfig = market.category ? options?.categoryConfigs?.[market.category] : undefined;
 
-  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "categoryConfigs">> &
-    Pick<ResolveOptions, "reviewQueue" | "provenanceStore"> = {
+  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink" | "categoryConfigs">> &
+    Pick<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink"> = {
     minAgreement:
       options?.minAgreement ??
       customCatConfig?.minAgreement ??
@@ -142,9 +183,16 @@ export async function resolveMarket(
       DEFAULT_OPTIONS.minConfidence,
     reviewQueue: options?.reviewQueue,
     provenanceStore: options?.provenanceStore,
+    rawPayloadSink: options?.rawPayloadSink,
   };
 
+  // Every exit path runs through `finish`, so a payload is persisted whatever
+  // the decision was — including "unresolvable" and "review", which are
+  // exactly the outcomes a dispute later asks about. Audit persistence
+  // failures propagate, matching `provenanceStore`: silently losing the
+  // evidence would leave a resolution that cannot be defended.
   const finish = async (result: ResolutionResult): Promise<ResolutionResult> => {
+    await opts.rawPayloadSink?.(market.id, result.sources);
     await opts.provenanceStore?.save(createProvenanceRecord(market.id, result));
     return result;
   };

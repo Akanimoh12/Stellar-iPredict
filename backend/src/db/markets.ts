@@ -59,11 +59,21 @@ const MARKET_COLUMNS = `
   updated_at
 `;
 
+/**
+ * Sort expressions, each ending in a unique `id` tiebreaker.
+ *
+ * The tiebreaker is load-bearing for pagination, not cosmetic: without a
+ * trailing unique term, rows that tie on the sort key have an order Postgres
+ * does not guarantee, so two page requests reading the same snapshot can
+ * disagree about which rows fall inside each LIMIT/OFFSET window — surfacing
+ * as a row repeated across pages or skipped between them. `id` is unique and
+ * immutable, which makes every sort a total order.
+ */
 const ORDER_BY: Record<MarketSort, string> = {
-  newest: "created_at DESC",
-  volume: "(total_yes + total_no) DESC, created_at DESC",
-  ending_soon: "end_time ASC",
-  bettors: "bet_count DESC, created_at DESC",
+  newest: "created_at DESC, id ASC",
+  volume: "(total_yes + total_no) DESC, created_at DESC, id ASC",
+  ending_soon: "end_time ASC, id ASC",
+  bettors: "bet_count DESC, created_at DESC, id ASC",
 };
 
 function buildFilterClause(filter: MarketFilter): string {

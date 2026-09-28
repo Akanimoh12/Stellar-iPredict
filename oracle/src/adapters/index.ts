@@ -1,7 +1,10 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
-export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig, RawPayloadSink } from "./resolve.js";
 export { FileProvenanceStore, InMemoryProvenanceStore } from "./provenance.js";
 export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
+export { NormalizationError } from "./normalize.js";
+export type { NormalizedOutcome, RawPayloadByCategory } from "./normalize.js";
+export { normalizeOutcome } from "./normalize.js";
 export {
   ADAPTER_API_KEY_ENV,
   loadAdapterApiKeys,
@@ -37,12 +40,36 @@ export interface Market {
   params: Record<string, unknown>;
 }
 
+/**
+ * Provenance metadata for a provider fetch.
+ *
+ * `AdapterOutcome.raw` holds the response body, but a body alone is not
+ * evidence: without knowing *who* answered, *what we asked*, and *when* they
+ * answered, a reviewer cannot tell a genuine reading from a stale cache hit or
+ * from the wrong market's response being attributed here. These three fields
+ * make the payload attributable, and are what `adapter_raw_payloads` persists.
+ */
+export interface AdapterProvenance {
+  /** Provider/adapter identity, e.g. `"binance"`. Defaults to the adapter id. */
+  provider?: string;
+  /** The request that produced this response (URL, params, query). Redacted before storage. */
+  request?: unknown;
+  /** When the provider responded, ISO-8601. */
+  respondedAt?: string;
+}
+
 export interface AdapterOutcome {
   outcome: boolean;
   /** 0-1 confidence in the outcome, for weighting/aggregation upstream. */
   confidence: number;
   /** Raw provider payload, kept for audit/dispute review. */
   raw: unknown;
+  /**
+   * Attributable fetch metadata (who/what/when) to persist alongside `raw`.
+   * Optional so existing adapters keep working; `fetchSource` fills in
+   * `provider` and `respondedAt` when an adapter omits them.
+   */
+  provenance?: AdapterProvenance;
   /** Provider reports that the event cannot settle normally. */
   cancellation?: {
     reason: "postponed" | "cancelled";

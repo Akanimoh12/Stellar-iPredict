@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { serializeCacheMetrics } from "./cache/hitRate.js";
+import { serializeOracleAuthFailureMetrics } from "./lib/oracleAuthFailures.js";
 
 /**
  * Request-duration histogram — issue #87
@@ -458,10 +459,14 @@ export function serializeMetrics(): string {
     }
   }
 
+  // Oracle authentication-failure telemetry (issue #576). Always emitted, so
+  // the alert expressions and the dashboard panels exist before the incident.
+  const oracleAuth = serializeOracleAuthFailureMetrics();
+
   // Cache hit rate (issue #214). Always emitted, even before the first
   // lookup — a series that only appears once traffic arrives is a series
   // nobody can build a dashboard panel against.
-  return lines.join("\n") + "\n" + serializeCacheMetrics();
+  return lines.join("\n") + "\n" + oracleAuth + "\n" + serializeCacheMetrics();
 }
 
 /**

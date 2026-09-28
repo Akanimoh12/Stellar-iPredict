@@ -92,6 +92,31 @@ export const envSchema = z.object({
     .optional()
     .transform((v) => (v !== undefined ? Number(v) : 86400))
     .pipe(z.number().int().positive()),
+  // Oracle authentication-failure spike detection (issue #576). The baseline
+  // is `MIN_COUNT` failures within `WINDOW_SEC`; failures spread across
+  // `DISTINCT_SOURCES` or more client origins read as distributed guessing
+  // rather than one misconfigured provider. `COOLDOWN_SEC` bounds how often a
+  // sustained spike re-alerts.
+  ORACLE_AUTH_FAILURE_WINDOW_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 300))
+    .pipe(z.number().int().positive()),
+  ORACLE_AUTH_FAILURE_MIN_COUNT: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 10))
+    .pipe(z.number().int().positive()),
+  ORACLE_AUTH_FAILURE_DISTINCT_SOURCES: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 5))
+    .pipe(z.number().int().positive()),
+  ORACLE_AUTH_FAILURE_COOLDOWN_SEC: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 300))
+    .pipe(z.number().int().positive()),
   // Comma-separated list of API keys that qualify for the authenticated
   // rate-limit tier.  Used by the rate-limiter to verify that a Bearer or
   // X-API-Key credential is genuine before elevating the caller (#485).

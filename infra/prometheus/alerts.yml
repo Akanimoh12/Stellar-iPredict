@@ -83,3 +83,45 @@ groups:
         annotations:
           summary: Oracle metrics have not refreshed in over 5 minutes
           description: "The oracle metrics collector last succeeded {{ $value | humanizeDuration }} ago; oracle_submissions_total and oracle_disputes_total are stale."
+
+      # ── Oracle endpoint authentication failures (issue #576) ────────────────
+      #
+      # The endpoint authenticates with an API key, and until #576 a rejected
+      # key left no trace beyond the 4xx, so a provider integration that broke
+      # overnight was indistinguishable from a scripted guessing attempt.
+      # `oracle_auth_failures_total{reason}` and
+      # `oracle_auth_failure_sources_distinct` make the two separable: only
+      # `invalid_key` can come from guessing, and guessing is distributed
+      # across origins, whereas a broken provider retries from one place.
+      #
+      # Baseline: 10 failures over 5 minutes (10/300 per second).
+
+      - alert: OracleAuthFailureMisconfiguredProvider
+        expr: |
+          (
+            sum(rate(oracle_auth_failures_total[5m])) > (10 / 300)
+            and
+            max(oracle_auth_failure_sources_distinct) < 5
+          )
+          or
+          sum(rate(oracle_auth_failures_total{reason="provider_mismatch"}[5m])) > (1 / 300)
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Oracle authentication failures match a misconfigured provider
+          description: "Failures are concentrated on fewer than 5 client origins, or include a valid key used for the wrong provider. One integration is broken rather than being probed — check recent ORACLE_API_KEYS rotations and the failing provider's key binding."
+
+      - alert: OracleAuthFailureDistributedGuessing
+        expr: |
+          sum(rate(oracle_auth_failures_total{reason="invalid_key"}[5m])) > (10 / 300)
+          and
+          max(oracle_auth_failure_sources_distinct) >= 5
+        for: 5m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: Distributed oracle API-key guessing attempt
+          description: "Unrecognised keys are failing at {{ $value | humanize }}/s from 5 or more distinct client origins. This is the signature of a credential-guessing attempt, not a misconfiguration; the attempted keys are never logged, so use the source addresses in the oracle auth-failure lines to identify the traffic."

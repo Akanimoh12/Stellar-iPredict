@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import type { FastifyInstance } from "fastify";
+import type {
+  OracleAuthFailureByReason,
+  OracleAuthFailureLevel,
+  OracleAuthFailurePattern,
+  OracleAuthFailureReason,
+} from "./oracleAuthFailures.js";
 
 /**
  * Request logging with a correlation id.
@@ -309,7 +315,12 @@ export function logOracleSubmissionAttempt(entry: OracleAuditLogEntry, logger: a
   const level = entry.outcome === "accepted" ? "info" : "warn";
   const logFn = logger[level] || logger.info;
 
-  logFn(
+  // `.call(logger, …)` rather than an extracted reference: pino reads its
+  // message prefix off `this`, so `const fn = logger.warn; fn(…)` throws when
+  // handed a real Fastify request logger (it only happened to work against the
+  // test doubles, which bind nothing).
+  logFn.call(
+    logger,
     {
       requestId: entry.requestId,
       provider: entry.provider,
@@ -318,5 +329,107 @@ export function logOracleSubmissionAttempt(entry: OracleAuditLogEntry, logger: a
       ...(entry.message && { message: entry.message }),
     },
     `oracle submission ${entry.outcome}`,
+  );
+}
+
+/**
+ * How the presented credential arrived, when one arrived at all.
+ *
+ * Recorded instead of the credential so a rejected request is still
+ * diagnosable: a provider that suddenly starts sending `API-Key x` where the
+ * integration used to send `Bearer x` looks the same as a wrong key until the
+ * scheme is in the log. `raw` means a bare token in either accepted header.
+ */
+export type OracleAuthScheme = "bearer" | "api-key" | "raw" | "none";
+
+/**
+ * Structured authentication-failure entry for the oracle endpoint (#576).
+ *
+ * Contains only what is needed to locate the source and explain the refusal.
+ * There is deliberately no field for the attempted key — a near-miss key in a
+ * log line is a credential in a log line, so the value must never reach here.
+ */
+export interface OracleAuthFailureLogEntry {
+  /** Correlation id for joining against the request log. */
+  requestId: string;
+  /** Closed-set reason code. */
+  reason: OracleAuthFailureReason;
+  /** Client address the request came from. Never credential material. */
+  source?: string;
+  /** Provider the request claimed, when it was established. */
+  provider?: string;
+  /** Which auth header carried (or failed to carry) a credential. */
+  scheme?: OracleAuthScheme;
+  /** Optional human-readable context; must never contain key material. */
+  message?: string;
+}
+
+/**
+ * Emit one structured warn line for a refused oracle request.
+ *
+ * Never logs the attempted key, signature, or any value derived from them.
+ * The source address and reason are sufficient to answer "who, and why" without
+ * turning the log aggregator into a credential store.
+ */
+export function logOracleAuthFailure(entry: OracleAuthFailureLogEntry, logger: any): void {
+  const logFn = logger.warn || logger.info;
+
+  logFn.call(
+    logger,
+    {
+      requestId: entry.requestId,
+      reason: entry.reason,
+      ...(entry.source !== undefined && { source: entry.source }),
+      ...(entry.provider !== undefined && { provider: entry.provider }),
+      ...(entry.scheme !== undefined && { scheme: entry.scheme }),
+      ...(entry.message !== undefined && { message: entry.message }),
+    },
+    `oracle auth failure ${entry.reason}`,
+  );
+}
+
+/**
+ * Structured entry describing a *spike*, emitted when the rolling failure
+ * count crosses the baseline (see `oracleAuthFailures.ts`).
+ *
+ * This is the line an on-call engineer greps for. It carries the classification
+ * (`misconfigured_provider` vs `distributed_guessing`) and the evidence behind
+ * it, so the first question — "is one provider broken or are we being probed?"
+ * — is answered by the log line itself.
+ */
+export interface OracleAuthFailureSpikeLogEntry {
+  /** Correlation id of the failure that crossed the threshold, when in a request. */
+  requestId?: string;
+  level: Exclude<OracleAuthFailureLevel, "ok">;
+  pattern: OracleAuthFailurePattern;
+  windowFailures: number;
+  distinctSources: number;
+  topSource?: string;
+  byReason: OracleAuthFailureByReason;
+}
+
+/**
+ * Emit the spike alert line. `distributed_guessing` logs at error level so it
+ * survives production log filtering; a misconfiguration logs at warn.
+ */
+export function logOracleAuthFailureSpike(
+  entry: OracleAuthFailureSpikeLogEntry,
+  logger: any,
+): void {
+  const logFn =
+    (entry.level === "critical" ? logger.error : logger.warn) || logger.warn;
+
+  logFn.call(
+    logger,
+    {
+      ...(entry.requestId !== undefined && { requestId: entry.requestId }),
+      level: entry.level,
+      pattern: entry.pattern,
+      windowFailures: entry.windowFailures,
+      distinctSources: entry.distinctSources,
+      ...(entry.topSource !== undefined && { topSource: entry.topSource }),
+      byReason: entry.byReason,
+    },
+    `oracle auth failure spike: ${entry.pattern}`,
   );
 }

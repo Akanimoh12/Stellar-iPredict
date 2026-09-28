@@ -83,6 +83,10 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `ORACLE_TIMESTAMP_WINDOW_SEC` | Optional | `300` (5 min) | Maximum allowed skew between signature timestamp and server time. |
 | `ORACLE_NONCE_RETENTION_SEC` | Optional | `600` (10 min) | Retention duration for used nonces to prevent replay attacks. |
 | `ORACLE_IDEMPOTENCY_RETENTION_SEC`| Optional | `86400` (24h) | Cache retention period for submission idempotency keys. |
+| `ORACLE_AUTH_FAILURE_WINDOW_SEC` | Optional | `300` (5 min) | Rolling window the authentication-failure spike baseline is measured over (#576). |
+| `ORACLE_AUTH_FAILURE_MIN_COUNT` | Optional | `10` | Authentication failures within the window before a spike is considered. |
+| `ORACLE_AUTH_FAILURE_DISTINCT_SOURCES` | Optional | `5` | Distinct client origins at or above which a spike is classified as distributed guessing rather than a misconfigured provider. |
+| `ORACLE_AUTH_FAILURE_COOLDOWN_SEC` | Optional | `300` (5 min) | Minimum time between two spike alerts of the same pattern. |
 
 ---
 

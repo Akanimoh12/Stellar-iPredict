@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-bookworm-slim AS build
+# node:22-bookworm-slim
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build
 WORKDIR /app
 
 # The oracle imports @ipredict/shared, so build from the repository root and
@@ -18,7 +19,7 @@ RUN npm run build --workspace=@ipredict/shared \
  && npm run build --workspace=ipredict-oracle \
  && npm prune --omit=dev --ignore-scripts
 
-FROM node:22-bookworm-slim AS production
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS production
 ENV NODE_ENV=production
 WORKDIR /app
 

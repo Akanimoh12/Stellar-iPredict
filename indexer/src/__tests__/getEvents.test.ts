@@ -6,9 +6,11 @@ import { metrics, resetMetrics } from "../metrics.js";
 describe("SorobanRpcClient.getEvents", () => {
   let client: SorobanRpcClient;
 
+  const TEST_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
   beforeEach(() => {
     resetMetrics();
-    client = new SorobanRpcClient("https://mock-rpc-url.stellar.org");
+    client = new SorobanRpcClient("https://mock-rpc-url.stellar.org", [TEST_CONTRACT]);
     vi.restoreAllMocks();
   });
 

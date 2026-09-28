@@ -18,6 +18,9 @@ import {
   decodeTokenMint,
   handleTokenMint,
   TOKEN_MINT_TOPIC,
+  decodeTokenTransfer,
+  handleTokenTransfer,
+  TOKEN_TRANSFER_TOPIC,
 } from "../src/handlers/index.js";
 import { writeEventToDb } from "../src/event-router.js";
 import {
@@ -96,6 +99,7 @@ describe("dispatchEvent with the real registry", () => {
       ORACLE_SUBMISSION_TOPIC,
       REWARD_POINTS_TOPIC,
       TOKEN_MINT_TOPIC,
+      TOKEN_TRANSFER_TOPIC,
     ]);
   });
 

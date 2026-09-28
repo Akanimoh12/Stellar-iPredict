@@ -29,8 +29,14 @@ export interface HealthStatus {
   };
 }
 
-const MAX_LAG_LEDGERS = Number(process.env.MAX_LAG_LEDGERS ?? 1000);
-const POLL_LOOP_STALL_THRESHOLD_MS = Number(process.env.POLL_LOOP_STALL_THRESHOLD_MS ?? 60_000);
+
+function getMaxLagLedgers(): number {
+  return Number(process.env.MAX_LAG_LEDGERS ?? 1000);
+}
+
+function getPollLoopStallThresholdMs(): number {
+  return Number(process.env.POLL_LOOP_STALL_THRESHOLD_MS ?? 60_000);
+}
 
 let lastPollLoopUpdate = Date.now();
 let lastProcessedLedger = 0;
@@ -49,7 +55,7 @@ export function recordPollLoopProgress(ledger: number): void {
 export function checkLiveness(): Pick<HealthStatus, "status" | "timestamp" | "checks"> {
   const now = Date.now();
   const stalledForMs = now - lastPollLoopUpdate;
-  const isStalled = stalledForMs > POLL_LOOP_STALL_THRESHOLD_MS;
+  const isStalled = stalledForMs > getPollLoopStallThresholdMs();
 
   return {
     status: isStalled ? "unhealthy" : "ok",
@@ -103,19 +109,20 @@ export async function checkReadiness(deps: HealthCheckDeps): Promise<HealthStatu
   if (latestLedger > 0) {
     const currentLedger = deps.getLastProcessedLedger();
     const lag = latestLedger - currentLedger;
+    const maxLag = getMaxLagLedgers();
 
-    if (lag > MAX_LAG_LEDGERS) {
+    if (lag > maxLag) {
       checks.lag = {
         status: "high",
         ledgersBehind: lag,
-        threshold: MAX_LAG_LEDGERS,
+        threshold: maxLag,
       };
       overallStatus = overallStatus === "unhealthy" ? "unhealthy" : "degraded";
     } else {
       checks.lag = {
         status: "ok",
         ledgersBehind: lag,
-        threshold: MAX_LAG_LEDGERS,
+        threshold: maxLag,
       };
     }
   }

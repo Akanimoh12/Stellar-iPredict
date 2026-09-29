@@ -444,6 +444,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -458,6 +459,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -472,6 +474,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                   marketId: { type: "number" },
                 },
               },
@@ -487,6 +490,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -501,6 +505,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -835,6 +840,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -849,6 +855,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -863,6 +870,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                   marketId: { type: "number" },
                 },
               },

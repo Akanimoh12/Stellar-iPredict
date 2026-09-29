@@ -71,6 +71,64 @@ groups:
           summary: Cache hit rate is below 50%
           description: "Redis is serving {{ $value | humanizePercentage }} of cache lookups; the rest are hitting Postgres. Check for a key-shape change or over-eager invalidation."
 
+      # Per-namespace, baseline-relative companion to LowCacheHitRate.
+      #
+      # LowCacheHitRate asks "is the cache healthy at all?" — one number for
+      # every namespace combined, against an absolute 50% floor. This one asks
+      # "is this key namespace worse than it was?", because the failure modes
+      # it exists for (a deploy that changes key structure, an invalidation
+      # that clears too aggressively) hit the namespace whose keys changed
+      # while the aggregate stays afloat on the namespaces that did not.
+      #
+      #   current    windowed 10m hit rate for one namespace
+      #   baseline   the same ratio averaged over 6h, via a subquery so the
+      #              range can exceed the 10m the rate itself uses
+      #   material   below 80% of baseline — a fifth of that namespace's
+      #              usual cache work turning into Postgres load
+      #
+      # 6h is long enough that the first minutes of a bad deploy move the
+      # baseline by far less than the threshold, and short enough to follow
+      # diurnal drift in what traffic asks for. The 100-lookup floor keeps a
+      # quiet namespace from paging on a handful of requests; NaN — a
+      # namespace with no lookups in one of the two windows — never compares
+      # true, so cold namespaces stay silent.
+      - alert: CacheHitRateBelowBaseline
+        expr: |
+          (
+            (
+              sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+              / clamp_min(
+                  sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                  + sum by (namespace) (rate(cache_namespace_misses_total[10m])),
+                  0.01
+                )
+            )
+            <
+            0.8
+            * avg_over_time(
+                (
+                  sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                  / clamp_min(
+                      sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                      + sum by (namespace) (rate(cache_namespace_misses_total[10m])),
+                      0.01
+                    )
+                )[6h:5m]
+              )
+          )
+          and
+          (
+            sum by (namespace) (increase(cache_namespace_hits_total[10m]))
+            + sum by (namespace) (increase(cache_namespace_misses_total[10m]))
+          ) > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: 'Cache hit rate for the {{ $labels.namespace }} namespace is below its baseline'
+          description: 'Redis is serving {{ $value | humanizePercentage }} of {{ $labels.namespace }} lookups over the last 10m, against a 6h baseline for the same namespace. The difference is reaching Postgres — check this namespace for a key-shape change or over-eager invalidation, and compare with db_query_duration_ms on the Cache & Database Load dashboard.'
+
       # The oracle serves scrapes from a cached snapshot, so a broken collector
       # returns stale numbers with a 200 rather than failing the scrape. Only
       # this alert distinguishes the two.

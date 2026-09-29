@@ -25,6 +25,10 @@ export {
   CACHE_TTL_MS,
   CACHE_KEYS,
   CACHE_REGISTRY,
+  CACHE_ENTITIES,
+  cacheNamespaceOf,
+  type CacheEntity,
+  type CacheNamespace,
 } from "./cacheKeys.js";
 
 export {
@@ -57,11 +61,22 @@ export {
 } from "./rateLimiter.js";
 
 export { RedisSlidingWindowStore } from "./rateLimiterRedis.js";
-export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";
+export {
+  NegativeCache,
+  NEGATIVE_CACHE_TTL_MS,
+  computeNegativeHitRate,
+  getNegativeCacheHitRate,
+  getNegativeCacheStats,
+  recordNegativeCacheHit,
+  recordNegativeCacheMiss,
+  resetNegativeCacheStats,
+  serializeNegativeCacheMetrics,
+  type NegativeCacheCounts,
+  type NegativeCacheStatsSnapshot,
+} from "./negativeCache.js";
 export { getOrSet, withSingleFlight } from "./cacheAside.js";
 export {
   CACHE_NAMESPACES,
-  cacheNamespaceOf,
   computeHitRate,
   getCacheHitRate,
   getCacheStats,
@@ -70,7 +85,6 @@ export {
   resetCacheStats,
   serializeCacheMetrics,
   type CacheCounts,
-  type CacheNamespace,
   type CacheStatsSnapshot,
 } from "./hitRate.js";
 export {

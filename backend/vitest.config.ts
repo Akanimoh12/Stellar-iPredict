@@ -11,11 +11,12 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/test/**"],
-      all: false,
-      lines: 65,
-      functions: 65,
-      branches: 55,
-      statements: 65,
+      thresholds: {
+        lines: 65,
+        functions: 65,
+        branches: 55,
+        statements: 65,
+      },
     },
   },
   resolve: {

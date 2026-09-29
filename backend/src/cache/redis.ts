@@ -1,5 +1,6 @@
 import { Redis, RedisOptions } from 'ioredis';
 import { recordCacheHit, recordCacheMiss } from './hitRate.js';
+import { recordNegativeCacheHit } from './negativeCache.js';
 import { getCircuitBreaker } from './circuitBreaker.js';
 import { config } from '../config/index.js';
 import { logCacheFailure } from './invalidate.js';
@@ -66,6 +67,13 @@ export const cache = {
    * unavailable (circuit open or command rejected).  A `null` return is
    * treated as a cache miss by callers, so the loader / database path
    * runs transparently.
+   *
+   * Accounting matches `getOrSet`: a stored `null` is a negative-cache hit
+   * (the key exists and says "not found"), everything else that has to be
+   * reloaded is an ordinary miss. Unlike `getOrSet`, an *absent* key cannot
+   * be classified here — this helper has no loader whose answer would say
+   * whether the resource is missing or merely uncached — so it counts as an
+   * ordinary miss.
    */
   async get<T>(key: string): Promise<T | null> {
     if (!circuit.canAttempt()) {
@@ -82,7 +90,11 @@ export const cache = {
       }
       try {
         const value = JSON.parse(data) as T;
-        recordCacheHit(key);
+        if (value === null) {
+          recordNegativeCacheHit(key);
+        } else {
+          recordCacheHit(key);
+        }
         return value;
       } catch {
         // Unparseable entry: the caller gets null and goes to its source, so

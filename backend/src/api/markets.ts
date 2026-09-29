@@ -9,6 +9,7 @@ import {
   getMarketById,
   getMarkets,
   getResolutionDelayStatus,
+  getUnmappableCandidates,
   type Queryable,
   type MarketCategory,
 } from "../db/markets.js";
@@ -383,6 +384,63 @@ export function createMarketsRoutes(
       // Short cache — this is a coarse signal and the query hits `markets`.
       reply.header("Cache-Control", "public, max-age=30");
       return reply.status(200).send(status);
+    }
+  );
+
+  // ── GET /api/markets/unmappable ────────────────────────────────────────────
+  // Issue #745: markets no adapter can resolve must be found well before
+  // expiry, not at it. Static path — Fastify matches it ahead of
+  // `/api/markets/:id`.
+  //
+  // The backend does not hold the oracle's adapter rules, so it reports the
+  // *candidate set* — open, un-cancelled markets ordered by how soon they
+  // expire — and the caller classifies them. Duplicating an adapter list into
+  // SQL would let the two drift apart silently, which is the failure this
+  // endpoint exists to prevent.
+  app.get(
+    "/api/markets/unmappable",
+    {
+      schema: {
+        summary: "Open markets that may be unresolvable, soonest to expire first",
+        description:
+          "Candidate set for the oracle's mappability sweep (#745). The backend does not know which markets " +
+          "an adapter can query, so it returns open, un-cancelled markets ordered by end_time ascending. " +
+          "Markets already past end_time lead the list: they are the ones holding stakes with no resolution path.",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              candidates: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: "string" },
+                    question: { type: "string" },
+                    category: { type: "string" },
+                    end_time: { type: "string", description: "Epoch seconds" },
+                  },
+                  required: ["id", "question", "category", "end_time"],
+                },
+              },
+              checked: { type: "number", description: "Candidates returned" },
+              windowSeconds: { type: "number" },
+              includePastExpiry: { type: "boolean" },
+              checkedAt: { type: "string" },
+            },
+            required: ["candidates", "checked", "windowSeconds", "includePastExpiry", "checkedAt"],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      // Short cache: this drives a periodic sweep, not a user-facing view, and
+      // an operator running it repeatedly should not hammer `markets`.
+      reply.header("Cache-Control", "public, max-age=60");
+      return getUnmappableCandidates(db);
     }
   );
 

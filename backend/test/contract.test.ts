@@ -1,223 +1,110 @@
-import { describe, expect, it, vi } from "vitest";
-import type { Pool } from "pg";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
+import type { FastifyInstance, InjectOptions } from "fastify";
+import { createFakePool } from "../src/test/fakePool.js";
+import { detectDroppedFields, getOpenApiSpec, validateResponseAgainstSpec } from "./contract-helpers.js";
+
+const mocks = vi.hoisted(() => ({ query: vi.fn() }));
+// Exercise the real query modules, including routes that use the default pool.
+vi.mock("pg", async importOriginal => {
+  const actual = await importOriginal<typeof import("pg")>();
+  return { ...actual, Pool: class {
+    query = mocks.query;
+    on() {}
+    async end() {}
+    async connect() { return { query: mocks.query, release() {} }; }
+  } };
+});
+vi.mock("../src/db/redis.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/db/redis.js")>(),
+  pingRedis: vi.fn(async () => ({ ok: true })),
+}));
 import { buildServer } from "../src/server.js";
 
-// ---------------------------------------------------------------------------
-// Contract tests — verify that API response shapes match the types the
-// frontend expects.  If these tests fail, the frontend will break at runtime.
-// See frontend/src/types/index.ts for the canonical TS interfaces.
-// ---------------------------------------------------------------------------
-
-// ── Frontend type contracts (copied from frontend/src/types/index.ts) ────────
-//
-// The assertions below validate every field the frontend relies on, ensuring
-// backend responses are shape-compatible even if the actual TS types drift.
-
-interface ExpectedMarket {
-  id: number;
-  question: string;
-  imageUrl: string; // snake_case from API → camelCase in frontend
-  category: string;
-  endTime: number;
-  totalYes: number;
-  totalNo: number;
-  resolved: boolean;
-  outcome: boolean;
-  cancelled: boolean;
-  creator: string;
-  betCount: number;
+const address = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1)).publicKey();
+const market = { id: 1, question: "Will XLM reach $1?", image_url: null, category: "Crypto", end_time: "1770000000", total_yes: "10.0000000", total_no: "5.0000000", resolved: false, outcome: null, cancelled: false, creator: address, bet_count: 1, created_at: new Date("2026-01-01T00:00:00Z"), updated_at: new Date("2026-01-02T00:00:00Z") };
+const bet = { market_id: "1", bettor: address, net_amount: "9.8000000", gross_amount: "10.0000000", is_yes: true, claimed: false, created_at: new Date("2026-01-01T00:00:00Z") };
+const leader = { address, display_name: null, points: "350", won_bets: 2, lost_bets: 1, updated_at: new Date("2026-01-01T00:00:00Z") };
+function queryRows(sql: string, values?: unknown[]) {
+  if (sql.includes("pg_backend_pid")) return [{ pid: 123 }];
+  if (sql.includes("AS total_markets")) return [{ total_markets: "1", total_volume: "15.0000000", total_users: "1", total_bets: "1" }];
+  if (/COUNT\(\*\)/.test(sql) && !sql.includes("OVER")) return [{ total: "1" }];
+  if (sql.includes("SELECT id::TEXT")) return [{ id: "1", question: market.question, category: market.category, end_time: market.end_time }];
+  if (sql.includes("FROM markets")) {
+    if (/WHERE id\s*=/.test(sql) && Number(values?.[0]) === 999) return [];
+    return [{ ...market, ...(sql.includes("total_count") ? { total_count: 1 } : {}) }];
+  }
+  if (sql.includes("FROM bets")) return [bet];
+  if (sql.includes("FROM leaderboard")) return [leader];
+  if (sql.includes("FROM events")) return [];
+  if (sql.trim() === "SELECT 1") return [{ "?column?": 1 }];
+  throw new Error(`Unexpected query: ${sql}`);
 }
 
-interface ExpectedPlayerStats {
-  address: string;
-  displayName: string;
-  points: number;
-  totalBets: number;
-  wonBets: number;
-  lostBets: number;
-  winRate: number;
-}
-
-interface ExpectedBet {
-  amount: number;
-  isYes: boolean;
-  claimed: boolean;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function makeMarketRow(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 42,
-    question: "Will XLM close above $1?",
-    image_url: null,
-    category: "Crypto",
-    end_time: "1735689600",
-    total_yes: "10.0000000",
-    total_no: "5.0000000",
-    resolved: false,
-    outcome: null,
-    cancelled: false,
-    creator: "G" + "A".repeat(55),
-    bet_count: 3,
-    total_count: 1,
-    created_at: "2026-01-01T00:00:00.000Z",
-    updated_at: "2026-01-01T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
-function makeLeaderboardRow(overrides: Record<string, unknown> = {}) {
-  return {
-    address: "G" + "B".repeat(55),
-    display_name: "Alice",
-    points: "100",
-    won_bets: 5,
-    lost_bets: 2,
-    updated_at: "2026-01-01T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
-function makePool(mockRows: unknown[], totalRows: unknown[] = []) {
-  return {
-    query: vi.fn(async (sql: string) => {
-      if (sql.includes("COUNT(*)::INT AS total") || (sql.includes("COUNT(*)") && !sql.includes("COUNT(*) OVER"))) {
-        return { rows: totalRows.length ? totalRows : [{ total: "1" }] };
-      }
-      return { rows: mockRows };
-    }),
-  } as unknown as Pool & { query: ReturnType<typeof vi.fn> };
-}
-
-// ── Market contract ────────────────────────────────────────────────────────
-
-describe("Contract: GET /api/markets/:id", () => {
-  it("response shape matches frontend Market type", async () => {
-    const row = makeMarketRow();
-    const pool = makePool([row]);
-    const server = buildServer({ pool, corsOrigins: [] });
-
-    const res = await server.inject({
-      method: "GET",
-      url: "/api/markets/42",
-    });
-
-    await server.close();
-
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-
-    // Every field the frontend Market interface expects must be present
-    // and of the correct type.
-    expect(typeof body.id).toBe("number");
-    expect(typeof body.question).toBe("string");
-    expect(body.image_url === null || typeof body.image_url === "string").toBe(
-      true
-    );
-    expect(typeof body.category).toBe("string");
-    expect(typeof body.end_time).toBe("string"); // BIGINT as string
-    expect(typeof body.total_yes).toBe("string"); // NUMERIC as string
-    expect(typeof body.total_no).toBe("string");
-    expect(typeof body.resolved).toBe("boolean");
-    expect(
-      body.outcome === null || typeof body.outcome === "boolean"
-    ).toBe(true);
-    expect(typeof body.cancelled).toBe("boolean");
-    expect(typeof body.creator).toBe("string");
-    expect(typeof body.bet_count).toBe("number");
-    expect(typeof body.created_at).toBe("string");
-    expect(typeof body.updated_at).toBe("string");
+const cases: { method: "GET" | "POST"; url: string; path: string; status: number }[] = [
+  ...["/api/docs", "/healthz", "/readyz", "/resolution-status", "/status", "/api/markets", "/api/markets/resolution-status", "/api/markets/unmappable", "/api/leaderboard", "/api/stats"].map(path => ({ method: "GET" as const, url: path, path, status: 200 })),
+  ...["", "/bets", "/odds"].map(suffix => ({ method: "GET" as const, url: `/api/markets/1${suffix}`, path: `/api/markets/{id}${suffix}`, status: 200 })),
+  { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
+  ...["/api/oracle/submit", "/api/v1/oracle/submit"].map(path => ({ method: "POST" as const, url: path, path, status: 401 })),
+];
+let app: FastifyInstance;
+let rawPayload: unknown;
+beforeEach(() => {
+  mocks.query.mockReset().mockImplementation(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values) }));
+  app = buildServer({ pool: createFakePool(mocks.query), corsOrigins: [], logger: false });
+  rawPayload = undefined;
+  app.addHook("preSerialization", async (_request, _reply, payload) => {
+    rawPayload = structuredClone(payload);
+    return payload;
   });
 });
+afterEach(async () => { await app.close(); });
 
-describe("Contract: GET /api/markets", () => {
-  it("list response contains market-shaped objects", async () => {
-    const row = makeMarketRow();
-    const pool = makePool([row], [{ total: "1" }]);
-    const server = buildServer({ pool, corsOrigins: [] });
+function assertPreservedFields(raw: unknown, serialized: unknown) {
+  expect(detectDroppedFields(raw, serialized).droppedFields).toEqual([]);
+}
 
-    const res = await server.inject({
-      method: "GET",
-      url: "/api/markets",
-    });
+async function assertContract(options: InjectOptions, path: string, status: number) {
+  const spec = await getOpenApiSpec(app);
+  const response = await app.inject(options);
+  expect(response.statusCode, response.body).toBe(status);
+  const result = validateResponseAgainstSpec(spec, String(options.method ?? "GET"), path, status, response.json());
+  expect(result.errors).toEqual([]);
+  expect(result.valid).toBe(true);
+  expect(rawPayload).toBeDefined();
+  assertPreservedFields(rawPayload, response.json());
+  return response;
+}
 
-    await server.close();
-
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-
-    expect(Array.isArray(body.markets)).toBe(true);
-    expect(typeof body.total).toBe("number");
-    expect(typeof body.page).toBe("number");
-    expect(typeof body.limit).toBe("number");
-
-    const market = body.markets[0];
-    expect(typeof market.id).toBe("number");
-    expect(typeof market.question).toBe("string");
-    expect(typeof market.category).toBe("string");
-    expect(typeof market.resolved).toBe("boolean");
-    expect(typeof market.cancelled).toBe("boolean");
-    expect(typeof market.bet_count).toBe("number");
-    expect(typeof market.end_time).toBe("string");
-    expect(typeof market.total_yes).toBe("string");
-    expect(typeof market.total_no).toBe("string");
+describe("OpenAPI contracts on the production server", () => {
+  it("covers every documented and registered operation", async () => {
+    const spec = await getOpenApiSpec(app);
+    const tested = cases.map(c => `${c.method.toLowerCase()} ${c.path}`).sort();
+    const documented = Object.entries(spec.paths).flatMap(([path, methods]) => Object.keys(methods as object).map(method => `${method} ${path}`)).sort();
+    expect(documented).toEqual(tested);
+    expect(app.registeredRoutes.map(({ method, url }) => `${method.toLowerCase()} ${url.replace(/:([A-Za-z0-9_]+)/g, "{$1}")}`).sort()).toEqual(tested);
   });
-});
-
-// ── Leaderboard contract ───────────────────────────────────────────────────
-
-describe("Contract: GET /api/leaderboard", () => {
-  it("response shape matches frontend PlayerStats expectations", async () => {
-    const row = makeLeaderboardRow();
-    const pool = makePool([row], [{ total: "1" }]);
-    const server = buildServer({ pool, corsOrigins: [] });
-
-    const res = await server.inject({
-      method: "GET",
-      url: "/api/leaderboard",
-    });
-
-    await server.close();
-
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-
-    expect(Array.isArray(body.players)).toBe(true);
-    expect(typeof body.total).toBe("number");
-
-    const player = body.players[0];
-    expect(typeof player.address).toBe("string");
-    expect(
-      player.display_name === null || typeof player.display_name === "string"
-    ).toBe(true);
-    expect(typeof player.points).toBe("string"); // BIGINT as string
-    expect(typeof player.won_bets).toBe("number");
-    expect(typeof player.lost_bets).toBe("number");
-    expect(typeof player.updated_at).toBe("string");
+  it.each(cases)("$method $url returns a valid $status response without dropped fields", async ({ method, url, path, status }) => {
+    await assertContract({ method, url, ...(method === "POST" ? { payload: { marketId: 1, outcome: "YES", signature: "invalid", provider: address } } : {}) }, path, status);
   });
-});
-
-// ── Stats contract ─────────────────────────────────────────────────────────
-
-describe("Contract: GET /api/stats", () => {
-  it("response shape matches expected global stats", async () => {
-    const pool = makePool([], [{ total: "0" }]);
-    const server = buildServer({ pool, corsOrigins: [] });
-
-    const res = await server.inject({
-      method: "GET",
-      url: "/api/stats",
-    });
-
-    await server.close();
-
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-
-    expect(typeof body.totalMarkets).toBe("number");
-    expect(typeof body.totalVolume).toBe("string");
-    expect(typeof body.totalUsers).toBe("number");
-    expect(typeof body.totalBets).toBe("number");
+  it.each([
+    ["/api/markets?page=-1", "/api/markets", 400],
+    ["/api/markets/invalid", "/api/markets/{id}", 400],
+    ["/api/markets/999", "/api/markets/{id}", 404],
+    ["/api/markets/999/bets", "/api/markets/{id}/bets", 404],
+    ["/api/v1/profile/invalid", "/api/v1/profile/{address}", 400],
+  ] as const)("validates real error response %s", async (url, path, status) => {
+    await assertContract({ method: "GET", url }, path, status);
+  });
+  it("validates readiness failure against the declared 503 response", async () => {
+    mocks.query.mockRejectedValue(new Error("Database unavailable"));
+    await assertContract({ method: "GET", url: "/readyz" }, "/readyz", 503);
+  });
+  it.each(["/api/markets", "/api/markets/1", "/api/markets/1/bets"])("detects a new database field silently removed from %s", async url => {
+    mocks.query.mockImplementation(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values).map(row => ({ ...row, new_public_field: "must survive" })) }));
+    const response = await app.inject(url);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(detectDroppedFields(rawPayload, response.json()).droppedFields).toEqual(expect.arrayContaining([expect.stringContaining("new_public_field")]));
+    expect(() => assertPreservedFields(rawPayload, response.json())).toThrow();
   });
 });

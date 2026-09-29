@@ -24,7 +24,7 @@ jobs:
       # A complete checkout lets scheduled runs inspect the entire repository
       # history; the action limits push and pull-request scans to their diff.
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -41,14 +41,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20]
+        node-version: [22, 24]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -71,8 +71,8 @@ jobs:
         run: npm run build
 
       - name: Upload build artifact
-        if: matrix.node-version == 20
-        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        if: matrix.node-version == 22
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frontend-build
           path: frontend/.next
@@ -85,15 +85,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc940cb3f9632 # v1.78.0
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: "1.91.0"
           targets: wasm32-unknown-unknown, wasm32v1-none
 
       - name: Cache Cargo registry & build
-        uses: actions/cache@13aacd865c20de90d75de7b05d64711245b6baab # v4.0.0
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -112,7 +113,7 @@ jobs:
 
   # ─── Job 3: Backend Node package check ─────────────────────────────────────
   backend-check:
-    name: Backend API (Node 20)
+    name: Backend API (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -140,12 +141,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install root and shared dependencies
@@ -163,7 +164,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload backend coverage
-        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: backend-coverage
@@ -172,7 +173,7 @@ jobs:
 
   # ─── Job 4: Oracle Node package check ───────────────────────────────────────
   oracle-check:
-    name: Oracle (Node 20)
+    name: Oracle (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -191,12 +192,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -213,7 +214,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload oracle coverage
-        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: oracle-coverage
@@ -222,7 +223,7 @@ jobs:
 
   # ─── Job 5: Indexer Node package check ──────────────────────────────────────
   indexer-check:
-    name: Indexer (Node 20)
+    name: Indexer (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -250,12 +251,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -273,12 +274,47 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload indexer coverage
-        uses: actions/upload-artifact@26f96dfa5e0e87d29885761215ebc406b32b72a4 # v4.3.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: indexer-coverage
           path: indexer/coverage/
           retention-days: 5
+
+  # ─── Job: Cross-package suite (backend + indexer + smoke suite) ─────────────
+  # `test/` at the repository root is the only place that can import from both
+  # backend and indexer, so it is the only place the full
+  # contract → indexer → database → API precision path and the deployment smoke
+  # suite can be tested. It has its own job rather than riding along with one
+  # workspace so a failure here is not mistaken for a backend-only regression.
+  cross-package-check:
+    name: Cross-package (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build @ipredict/shared
+        run: npm run build --workspace=@ipredict/shared
+
+      - name: Run cross-package tests
+        # Runs the i128 precision boundaries and the smoke suite's own tests.
+        # No Postgres or Redis: every database is a fake, by design.
+        run: npm run test:cross
+
+      - name: Smoke suite lists cleanly
+        # The CLI must stay runnable as a deployment gate.
+        run: npm run smoke:list
 
   # ─── Job 6: Database package & Migration Idempotency check ───────────────────
   db-migrations-check:
@@ -301,12 +337,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -316,9 +352,13 @@ jobs:
         working-directory: db
         run: npm run typecheck
 
+      # Includes db/test/migration-regression.test.ts, which executes every
+      # migration against this Postgres. REQUIRE_DB makes an unreachable
+      # database a failure instead of a silent skip.
       - name: Run db tests
         working-directory: db
         env:
+          REQUIRE_DB: "1"
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
         run: npm test
 
@@ -341,12 +381,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -362,36 +402,33 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Run dependency vulnerability scan (Backend, Oracle, Indexer, DB, Frontend, Shared)
         run: |
-          npm audit --audit-level=high || true
-          for dir in backend oracle indexer db shared frontend; do
-            if [ -d "$dir" ] && [ -f "$dir/package.json" ]; then
-              echo "Auditing $dir..."
-              (cd "$dir" && npm audit --audit-level=high) || exit 1
-            fi
-          done
+          # The root lockfile covers all backend workspaces; frontend is separate.
+          npm audit --audit-level=high
+          cd frontend
+          npm audit --audit-level=high
 
   # ─── Job 9: TypeScript Typecheck across all workspaces ───────────────────────
   typecheck:
-    name: Typecheck (Node 20)
+    name: Typecheck (Node 22)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -400,3 +437,21 @@ jobs:
       - name: Typecheck all workspaces
         run: npm run typecheck
 
+
+  backend-openapi-contract-test:
+    name: Backend OpenAPI response contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Build shared types
+        run: npm run build --workspace=@ipredict/shared
+      - name: Validate API response contracts
+        run: npm run test:contract --workspace=ipredict-backend

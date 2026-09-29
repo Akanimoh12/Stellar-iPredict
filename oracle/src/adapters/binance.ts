@@ -3,21 +3,53 @@ import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
 import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
 import { ProviderRateLimiter, sharedProviderRateLimiter } from "./rateLimiter.js";
 import { probeHttp } from "./health.js";
+import { normalizeCryptoQuote } from "./normalize.js";
+import {
+  assessQuote,
+  extractTimestampMs,
+  freshnessPolicyFromEnv,
+  StaleQuoteError,
+  type FreshnessPolicy,
+} from "./freshness.js";
+import { recordQuoteStatus } from "./stalenessRegistry.js";
 
-const BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price";
+/**
+ * `/api/v3/ticker/price` is the obvious endpoint and the wrong one: its
+ * response is `{ symbol, price }` and nothing else, so a quote frozen in an
+ * edge cache is indistinguishable from a live one. `/api/v3/ticker/24hr`
+ * carries the same rolling-window price as `lastPrice` plus `closeTime` — the
+ * moment the window the price belongs to was closed — so the oracle can
+ * measure how old the number actually is.
+ */
+const BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr";
+
+/** `closeTime` is the authoritative stamp; the rest are fallbacks. */
+const TIMESTAMP_KEYS = ["closeTime", "openTime"] as const;
 
 interface BinanceTickerResponse {
   symbol: string;
-  price: string;
+  lastPrice: string;
+  /** Epoch milliseconds the 24h rolling window closed. */
+  closeTime?: number;
+  openTime?: number;
 }
 
-interface BinanceAdapterOptions extends FetchWithRetryOptions {
+export interface BinanceAdapterOptions extends FetchWithRetryOptions {
   rateLimiter?: ProviderRateLimiter;
+  /** Overrides for the freshness bounds applied to each quote. */
+  freshness?: Partial<FreshnessPolicy>;
+  /** Environment the freshness bounds are read from. Injectable for tests. */
+  env?: Record<string, string | undefined>;
 }
 
 /**
- * Resolves crypto markets from Binance's public ticker price endpoint.
+ * Resolves crypto markets from Binance's public 24h ticker endpoint.
  * `market.params` must satisfy `CryptoMarketParams` (symbol/comparator/threshold).
+ *
+ * Freshness (issue #744): every quote is timestamped by the provider, so a
+ * quote older than the hard bound is rejected outright and one inside the
+ * soft band is downweighted. Bounds are per-adapter and configurable — see
+ * {@link freshnessPolicyFromEnv}.
  */
 export class BinanceAdapter implements DataAdapter {
   readonly id = "binance";
@@ -25,12 +57,14 @@ export class BinanceAdapter implements DataAdapter {
 
   private readonly fetchOptions: FetchWithRetryOptions;
   private readonly rateLimiter: ProviderRateLimiter;
+  private readonly freshness: FreshnessPolicy;
 
   constructor(options: BinanceAdapterOptions = {}) {
-    const { rateLimiter, ...fetchOptions } = options;
+    const { rateLimiter, env, freshness, ...fetchOptions } = options;
     this.fetchOptions = fetchOptions;
     this.rateLimiter = rateLimiter ?? sharedProviderRateLimiter;
     this.responseCache = new AdapterResponseCache(options.cacheTtlMs);
+    this.freshness = freshnessPolicyFromEnv("ORACLE_BINANCE", env, freshness);
   }
 
   supports(market: Market): boolean {
@@ -51,13 +85,46 @@ export class BinanceAdapter implements DataAdapter {
       const response = await fetchWithRetry(url, { method: "GET" }, this.fetchOptions);
       const body = (await response.json()) as BinanceTickerResponse;
 
-      const price = Number(body.price);
+      // `lastPrice` is the 24h rolling-window price, the same value
+      // `/ticker/price` returns for the same symbol.
+      const price = Number(body.lastPrice);
       if (!Number.isFinite(price)) {
-        throw new Error(`BinanceAdapter received a non-numeric price for ${symbol}: ${String(body.price)}`);
+        throw new Error(`BinanceAdapter received a non-numeric price for ${symbol}: ${String(body.lastPrice)}`);
       }
 
-      const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
-      return { outcome, confidence: 1, raw: body };
+      const now = Date.now();
+      const observedAtMs = extractTimestampMs(body, TIMESTAMP_KEYS, now);
+      const freshness = assessQuote(observedAtMs, this.freshness, now);
+      recordQuoteStatus(this.id, freshness.status, now);
+
+      if (freshness.status === "expired") {
+        throw new StaleQuoteError(this.id, {
+          ageMs: freshness.ageMs ?? 0,
+          maxAgeMs: this.freshness.maxAgeMs,
+          observedAtMs: freshness.observedAtMs,
+        });
+      }
+
+      const { outcome, confidence } = normalizeCryptoQuote({
+        price,
+        threshold,
+        comparator,
+        observedAtMs,
+        freshness: this.freshness,
+        now,
+      });
+
+      return {
+        outcome,
+        confidence,
+        raw: body,
+        freshness: {
+          status: freshness.status,
+          ageMs: freshness.ageMs,
+          observedAtMs: freshness.observedAtMs,
+          maxAgeMs: this.freshness.maxAgeMs,
+        },
+      };
     });
   }
 }

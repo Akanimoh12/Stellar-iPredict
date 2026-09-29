@@ -1,0 +1,415 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# iPredict — production stack.
+#
+#   docker compose -f docker-compose.production.yml up -d --build
+#
+# Every value comes from infra/.env (see infra/.env.example), which Compose
+# loads automatically. Each service then lists the variables it actually needs
+# under `environment:` — deliberately, instead of `env_file:`. Enumerating them
+# costs a few lines and buys least privilege: RESOLVER_KEY reaches only the
+# aggregator, ORACLE_API_KEY only the API, and the read-only monitor holds no
+# signing credential at all. See "Configuration and secrets" in infra/README.md.
+#
+# Required secrets use the ${VAR:?message} form: compose refuses to start, with
+# that message, rather than silently defaulting a password.
+#
+# Services:
+#   postgres          system of record (indexed chain data)
+#   redis             cache + rate-limiter store, persisted per infra/redis.conf
+#   migrate           opt-in one-shot migration runner (--profile migrate)
+#   api               REST API, replicated
+#   indexer           Soroban event indexer, exactly one replica
+#   proxy             Caddy reverse proxy / TLS termination in front of api
+#   oracle-aggregator council tally + on-chain finalization
+#   oracle-monitor    read-only oracle watchdog and alerting
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: ipredict
+
+# Both oracle services ship from one image: same code, different entrypoint.
+# Compose builds it once because the `image:` tag matches.
+x-oracle-image: &oracle-image
+  build:
+    context: ..
+    dockerfile: oracle/src/aggregator/Dockerfile
+  image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-oracle:${ORACLE_IMAGE_TAG:-local}"
+
+x-logging: &logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    tag: "ipredict.{{.Name}}"
+
+# Connection strings are assembled here so the credentials live in exactly one
+# place in this file.
+x-postgres-url: &postgres-url
+  DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+x-redis-url: &redis-url
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+
+services:
+  # ── Data ───────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16.4-alpine
+    restart: always
+    cpus: "1.00"
+    mem_limit: 1g
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in infra/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in infra/.env}
+      # Password auth over TCP; the container-local socket stays trusted so the
+      # init scripts and backup.sh --docker can run without a password.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Read-only: the container applies these, it must never edit them.
+      - ../db/migrations:/migrations:ro
+      # Runs once, on the first boot of an empty pgdata volume. Migrations
+      # added later are applied with the `migrate` profile below.
+      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/00-apply-migrations.sh:ro
+    healthcheck:
+      # -h 127.0.0.1 on purpose: during initdb the server listens only on a
+      # private socket, so a TCP probe keeps the service "starting" until the
+      # migrations above have finished and real clients can connect.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: always
+    cpus: "0.50"
+    mem_limit: 256m
+    # The config file is the baseline; --requirepass comes last so the secret
+    # stays in the environment instead of a tracked file.
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in infra/.env}
+    environment:
+      # redis-cli reads this, so the healthcheck authenticates without the
+      # password appearing in the process list.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Give AOF/RDB time to flush on shutdown instead of being SIGKILLed.
+    stop_grace_period: 30s
+    logging: *logging
+
+  # ── Migrations (opt-in) ────────────────────────────────────────────────────
+  # `docker compose -f docker-compose.production.yml --profile migrate run --rm migrate`
+  # Applies anything in db/migrations that the running database has not seen.
+  # Not in the default profile: schema changes are a deliberate deploy step.
+  migrate:
+    profiles: ["migrate"]
+    image: postgres:16-alpine
+    # This is a finite, operator-invoked job. Its successful exit status is the
+    # readiness signal, so it must not be restarted or given a long-running
+    # container healthcheck.
+    restart: "no"
+    cpus: "0.25"
+    mem_limit: 128m
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - ../db/migrations:/migrations:ro
+      - ./scripts/init-db.sh:/usr/local/bin/init-db.sh:ro
+    entrypoint: ["/usr/local/bin/init-db.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+
+  # ── Application ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
+    restart: always
+    environment:
+      <<: [*postgres-url, *redis-url]
+      NODE_ENV: production
+      PORT: "4000"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-30000}
+      DB_CONNECTION_TIMEOUT_MS: ${DB_CONNECTION_TIMEOUT_MS:-5000}
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-30}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Guards POST /api/v1/oracle/submit. backend/src/api/oracle.ts falls back
+      # to a well-known development key when this is unset, so it is required
+      # here rather than optional.
+      ORACLE_API_KEY: ${ORACLE_API_KEY:?set ORACLE_API_KEY in infra/.env}
+      ORACLE_THRESHOLD: ${ORACLE_THRESHOLD:-3}
+    # A host port per replica, drawn from the range. The range is what makes
+    # rolling one replica at a time possible on a single host. Bound to the
+    # loopback interface on purpose: the Caddy proxy (service `proxy`) is the
+    # only public entry point, so nothing can bypass TLS. Override
+    # API_PORT_BIND only if you really need the API reachable directly.
+    ports:
+      - "${API_PORT_BIND:-127.0.0.1}:${API_PORT_RANGE:-4000-4002}:4000"
+    deploy:
+      replicas: ${API_REPLICAS:-3}
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: ${API_MEMORY_LIMIT:-512m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /readyz pings Postgres and Redis, so this is a real dependency probe
+      # rather than a liveness tautology.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 20s
+    logging: *logging
+
+  indexer:
+    build:
+      context: ../indexer
+      dockerfile: src/Dockerfile
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
+    restart: always
+    environment:
+      <<: [*postgres-url, *redis-url]
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:?set SOROBAN_RPC_URL in infra/.env}
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:?set NETWORK_PASSPHRASE in infra/.env}
+      MARKET_CONTRACT_ID: ${MARKET_CONTRACT_ID:?set MARKET_CONTRACT_ID in infra/.env}
+      TOKEN_CONTRACT_ID: ${TOKEN_CONTRACT_ID:?set TOKEN_CONTRACT_ID in infra/.env}
+      REFERRAL_CONTRACT_ID: ${REFERRAL_CONTRACT_ID:?set REFERRAL_CONTRACT_ID in infra/.env}
+      LEADERBOARD_CONTRACT_ID: ${LEADERBOARD_CONTRACT_ID:?set LEADERBOARD_CONTRACT_ID in infra/.env}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
+      EVENTS_PER_PAGE: ${EVENTS_PER_PAGE:-200}
+      START_LEDGER: ${START_LEDGER:-0}
+      METRICS_PORT: "9090"
+    # Exactly one. Two indexers polling the same contract would race on the
+    # events table and double-count leaderboard points.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: ${INDEXER_MEMORY_LIMIT:-512m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:9090/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 20s
+    logging: *logging
+
+  # ── Reverse proxy / TLS ────────────────────────────────────────────────────
+  # Caddy terminates TLS in front of the replicated API. Clients reach the
+  # stack only over HTTPS (ports 80/443); the API's own host ports stay bound
+  # to 127.0.0.1 so nothing bypasses the proxy. Docker's DNS resolves `api`
+  # round-robin across all replicas, so Caddy needs no upstream list of its
+  # own. Config lives in infra/proxy/ (Caddyfile + Dockerfile).
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-proxy:${PROXY_IMAGE_TAG:-local}"
+    restart: always
+    environment:
+      # Public hostname served with automatic HTTPS. Defaults to localhost,
+      # which Caddy serves with an internally-trusted certificate.
+      PROXY_DOMAIN: ${PROXY_DOMAIN:-localhost}
+      # Let's Encrypt account email for expiry notices. The placeholder keeps
+      # the Caddyfile parseable when the operator leaves ACME_EMAIL unset;
+      # Let's Encrypt issues certificates regardless of the contact address.
+      ACME_EMAIL: ${ACME_EMAIL:-admin@localhost}
+      # Upstream inside the compose network; Docker DNS load-balances `api`
+      # across its replicas, so this stays a single hostname.
+      API_UPSTREAM: ${API_UPSTREAM:-api:4000}
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+      - "${PROXY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      # Caddy's data dir: ACME account + issued certificates. Persistent so
+      # certificates are not re-issued on every restart (and so Let's Encrypt
+      # rate limits are not hit).
+      - caddy-data:/data
+      # Runtime config storage (cert metadata etc.).
+      - caddy-config:/config
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: ${PROXY_MEMORY_LIMIT:-128m}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # wget ships in the caddy image. Hits the container-internal :8080
+      # liveness endpoint, which is domain- and TLS-independent.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 20s
+    logging: *logging
+
+  # ── Oracle ─────────────────────────────────────────────────────────────────
+  # The aggregator writes (it signs and submits resolutions); the monitor only
+  # reads. They are separate services so the monitor can run without a resolver
+  # key, and so a crash-looping aggregator does not take oracle observability
+  # down with it — exactly when you need it most.
+  oracle-aggregator:
+    <<: *oracle-image
+    restart: always
+    environment:
+      <<: *postgres-url
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:?set SOROBAN_RPC_URL in infra/.env}
+      # Without these the aggregator skips every market as "not configured".
+      NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:?set NETWORK_PASSPHRASE in infra/.env}
+      MARKET_CONTRACT_ID: ${MARKET_CONTRACT_ID:?set MARKET_CONTRACT_ID in infra/.env}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
+      COUNCIL_SIZE: ${COUNCIL_SIZE:-7}
+      COUNCIL_THRESHOLD: ${COUNCIL_THRESHOLD:-4}
+      COUNCIL_MEMBERS: ${COUNCIL_MEMBERS:-}
+      CONFLICT_THRESHOLD: ${CONFLICT_THRESHOLD:-0.3}
+      STUCK_MARKET_HOURS: ${STUCK_MARKET_HOURS:-6}
+      SUBMIT_BASE_BACKOFF_MS: ${SUBMIT_BASE_BACKOFF_MS:-1000}
+      SUBMIT_MAX_BACKOFF_MS: ${SUBMIT_MAX_BACKOFF_MS:-30000}
+      SUBMITTER_BOND_XLM: ${SUBMITTER_BOND_XLM:-100}
+      DISPUTER_BOND_XLM: ${DISPUTER_BOND_XLM:-200}
+      CHALLENGE_WINDOW_SECONDS: ${CHALLENGE_WINDOW_SECONDS:-86400}
+      COUNCIL_WINDOW_SECONDS: ${COUNCIL_WINDOW_SECONDS:-259200}
+      COUNCIL_FEE_BPS: ${COUNCIL_FEE_BPS:-1000}
+      FINALIZE_WEBHOOK_URL: ${FINALIZE_WEBHOOK_URL:-}
+      # The signing key. This is the one service that holds it.
+      RESOLVER_KEY: ${RESOLVER_KEY:-}
+      # Data-source credentials; adapters fall back to public endpoints when
+      # a key is absent.
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      COINMARKETCAP_API_KEY: ${COINMARKETCAP_API_KEY:-}
+      SPORTDATA_API_KEY: ${SPORTDATA_API_KEY:-}
+      THE_ODDS_API_KEY: ${THE_ODDS_API_KEY:-}
+      METACULUS_API_KEY: ${METACULUS_API_KEY:-}
+    command: ["node", "dist/index.js"]
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: ${ORACLE_MEMORY_LIMIT:-384m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The monitor has no HTTP server; verify that its Node process is alive.
+    # Postgres readiness is separately enforced by depends_on above.
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 20s
+    logging: *logging
+
+  oracle-monitor:
+    <<: *oracle-image
+    restart: always
+    # No RESOLVER_KEY and no data-source credentials: the monitor only reads
+    # Postgres and posts alerts, so it is given nothing it could sign with.
+    environment:
+      <<: *postgres-url
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MONITOR_INTERVAL_MS: ${MONITOR_INTERVAL_MS:-60000}
+      STUCK_MARKET_HOURS: ${STUCK_MARKET_HOURS:-6}
+      COUNCIL_INACTIVITY_HOURS: ${COUNCIL_INACTIVITY_HOURS:-48}
+      SUBMITTER_BOND_XLM: ${SUBMITTER_BOND_XLM:-100}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    command: ["node", "dist/monitor/run.js"]
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: ${ORACLE_MEMORY_LIMIT:-384m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 20s
+    logging: *logging
+
+  log-collector:
+    image: fluent/fluent-bit:3.1.9
+    restart: always
+    cpus: "0.25"
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:24224:24224"
+      - "127.0.0.1:24224:24224/udp"
+    volumes:
+      - ./logging/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - aggregated-logs:/var/log/ipredict
+    healthcheck:
+      # The collector is PID 1; this fails if it crashes while preserving the
+      # local log driver as a fallback for its own output.
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  redisdata:
+  aggregated-logs:
+  caddy-data:
+  caddy-config:

@@ -1,122 +1,110 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import type { FastifyInstance } from "fastify";
-import { createApiServer } from "../src/server";
-import { getOpenApiSpec, validateResponseAgainstSpec, detectDroppedFields } from "../src/api/openapi";
-import type { Queryable } from "../src/db/markets";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
+import type { FastifyInstance, InjectOptions } from "fastify";
+import { createFakePool } from "../src/test/fakePool.js";
+import { detectDroppedFields, getOpenApiSpec, validateResponseAgainstSpec } from "./contract-helpers.js";
 
-const market = { id: 1, question: "Will XLM reach $1?", image_url: null, category: "Crypto", end_time: "1770000000", total_yes: "10", total_no: "5", resolved: false, outcome: null, cancelled: false, creator: "GCREATOR", bet_count: 1, created_at: new Date("2026-01-01Z"), updated_at: new Date("2026-01-02Z") };
-const bet = { market_id: "1", bettor: "GBETTOR", net_amount: "9.8", gross_amount: "10", is_yes: true, claimed: false, created_at: new Date("2026-01-01Z") };
-const leader = { address: "GBETTOR", display_name: null, points: "350", won_bets: 2, lost_bets: 1, updated_at: new Date("2026-01-01Z") };
+const mocks = vi.hoisted(() => ({ query: vi.fn() }));
+// Exercise the real query modules, including routes that use the default pool.
+vi.mock("pg", async importOriginal => {
+  const actual = await importOriginal<typeof import("pg")>();
+  return { ...actual, Pool: class {
+    query = mocks.query;
+    on() {}
+    async end() {}
+    async connect() { return { query: mocks.query, release() {} }; }
+  } };
+});
+vi.mock("../src/db/redis.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/db/redis.js")>(),
+  pingRedis: vi.fn(async () => ({ ok: true })),
+}));
+import { buildServer } from "../src/server.js";
 
+const address = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1)).publicKey();
+const market = { id: 1, question: "Will XLM reach $1?", image_url: null, category: "Crypto", end_time: "1770000000", total_yes: "10.0000000", total_no: "5.0000000", resolved: false, outcome: null, cancelled: false, creator: address, bet_count: 1, created_at: new Date("2026-01-01T00:00:00Z"), updated_at: new Date("2026-01-02T00:00:00Z") };
+const bet = { market_id: "1", bettor: address, net_amount: "9.8000000", gross_amount: "10.0000000", is_yes: true, claimed: false, created_at: new Date("2026-01-01T00:00:00Z") };
+const leader = { address, display_name: null, points: "350", won_bets: 2, lost_bets: 1, updated_at: new Date("2026-01-01T00:00:00Z") };
 function queryRows(sql: string, values?: unknown[]) {
-  if (sql.includes("COUNT(*)")) return [{ total: 1 }];
-  if (sql.includes("FROM markets")) return sql.includes("WHERE id") && values?.[0] === "999" ? [] : [market];
+  if (sql.includes("pg_backend_pid")) return [{ pid: 123 }];
+  if (sql.includes("AS total_markets")) return [{ total_markets: "1", total_volume: "15.0000000", total_users: "1", total_bets: "1" }];
+  if (/COUNT\(\*\)/.test(sql) && !sql.includes("OVER")) return [{ total: "1" }];
+  if (sql.includes("SELECT id::TEXT")) return [{ id: "1", question: market.question, category: market.category, end_time: market.end_time }];
+  if (sql.includes("FROM markets")) {
+    if (/WHERE id\s*=/.test(sql) && Number(values?.[0]) === 999) return [];
+    return [{ ...market, ...(sql.includes("total_count") ? { total_count: 1 } : {}) }];
+  }
   if (sql.includes("FROM bets")) return [bet];
   if (sql.includes("FROM leaderboard")) return [leader];
-  throw new Error(`Unexpected SQL: ${sql}`);
+  if (sql.includes("FROM events")) return [];
+  if (sql.trim() === "SELECT 1") return [{ "?column?": 1 }];
+  throw new Error(`Unexpected query: ${sql}`);
 }
 
-// Every successful response is compared to its actual handler output, before serialization.
-function observePayloads(app: FastifyInstance) {
-  const payloads = new Map<string, unknown>();
-  app.addHook("preSerialization", async (request, _reply, payload) => {
-    payloads.set(request.id, structuredClone(payload));
+const cases: { method: "GET" | "POST"; url: string; path: string; status: number }[] = [
+  ...["/api/docs", "/healthz", "/readyz", "/resolution-status", "/status", "/api/markets", "/api/markets/resolution-status", "/api/markets/unmappable", "/api/leaderboard", "/api/stats"].map(path => ({ method: "GET" as const, url: path, path, status: 200 })),
+  ...["", "/bets", "/odds"].map(suffix => ({ method: "GET" as const, url: `/api/markets/1${suffix}`, path: `/api/markets/{id}${suffix}`, status: 200 })),
+  { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
+  ...["/api/oracle/submit", "/api/v1/oracle/submit"].map(path => ({ method: "POST" as const, url: path, path, status: 401 })),
+];
+let app: FastifyInstance;
+let rawPayload: unknown;
+beforeEach(() => {
+  mocks.query.mockReset().mockImplementation(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values) }));
+  app = buildServer({ pool: createFakePool(mocks.query), corsOrigins: [], logger: false });
+  rawPayload = undefined;
+  app.addHook("preSerialization", async (_request, _reply, payload) => {
+    rawPayload = structuredClone(payload);
     return payload;
-  });
-  app.addHook("onSend", async (request, reply, payload) => {
-    const raw = payloads.get(request.id);
-    payloads.delete(request.id);
-    if (reply.statusCode < 300 && typeof payload === "string") {
-      expect(raw).toBeDefined();
-      expect(detectDroppedFields(raw, JSON.parse(payload)).droppedFields).toEqual([]);
-    }
-    return payload;
-  });
-}
-
-const successCases = [
-  ["/health", "/health"],
-  ["/api/v1/markets?page=2&limit=10", "/api/v1/markets"],
-  ["/api/v1/markets/1", "/api/v1/markets/{id}"],
-  ["/api/v1/bets?marketId=1&bettor=GBETTOR", "/api/v1/bets"],
-  ["/api/v1/leaderboard", "/api/v1/leaderboard"],
-] as const;
-
-describe("Shared API contracts", () => {
-  let app: FastifyInstance;
-  let spec: any;
-  const query = vi.fn(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values) }));
-  beforeAll(async () => {
-    app = await createApiServer({ query: query as Queryable["query"] });
-    observePayloads(app);
-    spec = await getOpenApiSpec(app);
-  });
-  afterAll(async () => { await app.close(); });
-
-  it("covers every documented operation", () => {
-    const operations = Object.entries(spec.paths).flatMap(([path, item]) => Object.keys(item as object).filter(method => ["get", "post", "put", "patch", "delete", "head", "options"].includes(method)).map(method => `${method} ${path}`));
-    expect(operations.sort()).toEqual(successCases.map(([, path]) => `get ${path}`).sort());
-  });
-  it.each(successCases)("validates success and preserves handler fields: %s", async (url, path) => {
-    const res = await app.inject({ method: "GET", url });
-    expect(res.statusCode, res.body).toBe(200);
-    expect(validateResponseAgainstSpec(spec, "GET", path, res.statusCode, res.json())).toEqual({ valid: true, errors: [], schemaFound: true });
-  });
-  it("passes filters and pagination to the database", async () => {
-    await app.inject("/api/v1/markets?page=2&limit=10&category=Crypto");
-    expect(query).toHaveBeenCalledWith(expect.stringContaining("LIMIT"), ["Crypto", 10, 10]);
-  });
-  it.each([
-    ["/api/v1/markets?page=-1", "/api/v1/markets", 400],
-    ["/api/v1/markets/invalid", "/api/v1/markets/{id}", 400],
-    ["/api/v1/markets/999", "/api/v1/markets/{id}", 404],
-    ["/api/v1/bets?marketId=invalid", "/api/v1/bets", 400],
-  ])("validates actual error: %s", async (url, path, status) => {
-    const res = await app.inject(String(url));
-    expect(res.statusCode).toBe(status);
-    expect(validateResponseAgainstSpec(spec, "GET", String(path), res.statusCode, res.json()).valid).toBe(true);
-  });
-  it.each(successCases.slice(1))("validates database failure: %s", async (url, path) => {
-    const failing = await createApiServer({ query: async () => { throw new Error("Database unavailable"); } });
-    try {
-      const failureSpec = await getOpenApiSpec(failing);
-      const res = await failing.inject(url);
-      expect(res.statusCode).toBe(500);
-      expect(validateResponseAgainstSpec(failureSpec, "GET", path, 500, res.json()).valid).toBe(true);
-    } finally { await failing.close(); }
-  });
-  it.each(successCases.slice(1))("fails the contract when a database field is omitted: %s", async (url) => {
-    const mutated = await createApiServer({ query: (async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values).map(row => ({ ...row, new_public_field: "must survive" })) })) as Queryable["query"] });
-    observePayloads(mutated);
-    try {
-      const res = await mutated.inject(url);
-      // The same guard used by success tests turns the omission into a failed response.
-      expect(res.statusCode).toBe(500);
-      expect(res.json().message).toContain("newPublicField");
-    } finally { await mutated.close(); }
   });
 });
+afterEach(async () => { await app.close(); });
 
-describe("Contract helpers", () => {
-  it("detects nested omissions, array items, null and ignores undefined", () => {
-    expect(detectDroppedFields({ markets: [{ id: "1", extra: true }], absent: undefined }, { markets: [{ id: "1" }] }).droppedFields).toEqual(["markets[0].extra"]);
-    expect(detectDroppedFields({ nested: { id: 1 } }, { nested: null }).droppedFields).toEqual(["nested.id"]);
-    expect(detectDroppedFields({ id: 1 }, null).droppedFields).toEqual(["id"]);
+function assertPreservedFields(raw: unknown, serialized: unknown) {
+  expect(detectDroppedFields(raw, serialized).droppedFields).toEqual([]);
+}
+
+async function assertContract(options: InjectOptions, path: string, status: number) {
+  const spec = await getOpenApiSpec(app);
+  const response = await app.inject(options);
+  expect(response.statusCode, response.body).toBe(status);
+  const result = validateResponseAgainstSpec(spec, String(options.method ?? "GET"), path, status, response.json());
+  expect(result.errors).toEqual([]);
+  expect(result.valid).toBe(true);
+  expect(rawPayload).toBeDefined();
+  assertPreservedFields(rawPayload, response.json());
+  return response;
+}
+
+describe("OpenAPI contracts on the production server", () => {
+  it("covers every documented and registered operation", async () => {
+    const spec = await getOpenApiSpec(app);
+    const tested = cases.map(c => `${c.method.toLowerCase()} ${c.path}`).sort();
+    const documented = Object.entries(spec.paths).flatMap(([path, methods]) => Object.keys(methods as object).map(method => `${method} ${path}`)).sort();
+    expect(documented).toEqual(tested);
+    expect(app.registeredRoutes.map(({ method, url }) => `${method.toLowerCase()} ${url.replace(/:([A-Za-z0-9_]+)/g, "{$1}")}`).sort()).toEqual(tested);
   });
-  it("does not accept inherited properties as serialized fields", () => {
-    expect(detectDroppedFields({ toString: "value" }, {}).droppedFields).toEqual(["toString"]);
+  it.each(cases)("$method $url returns a valid $status response without dropped fields", async ({ method, url, path, status }) => {
+    await assertContract({ method, url, ...(method === "POST" ? { payload: { marketId: 1, outcome: "YES", signature: "invalid", provider: address } } : {}) }, path, status);
   });
-  const spec = { paths: { "/example": { get: { responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/Example" } } } } } } } }, components: { schemas: {
-    Example: { type: "object", required: ["child"], properties: { child: { $ref: "#/components/schemas/Child" } } },
-    Child: { type: "object", required: ["id"], additionalProperties: false, properties: { id: { type: "string" } } },
-  } } };
-  it("resolves component references including nested references on repeated calls", () => {
-    for (let i = 0; i < 2; i++) expect(validateResponseAgainstSpec(spec, "GET", "/example", 200, { child: { id: "1" } }).valid).toBe(true);
-    expect(validateResponseAgainstSpec(spec, "GET", "/example", 200, { child: {} }).valid).toBe(false);
-    expect(validateResponseAgainstSpec(spec, "GET", "/example", 200, { child: { id: 1 } }).valid).toBe(false);
+  it.each([
+    ["/api/markets?page=-1", "/api/markets", 400],
+    ["/api/markets/invalid", "/api/markets/{id}", 400],
+    ["/api/markets/999", "/api/markets/{id}", 404],
+    ["/api/markets/999/bets", "/api/markets/{id}/bets", 404],
+    ["/api/v1/profile/invalid", "/api/v1/profile/{address}", 400],
+  ] as const)("validates real error response %s", async (url, path, status) => {
+    await assertContract({ method: "GET", url }, path, status);
   });
-  it("rejects undocumented paths and statuses", () => {
-    expect(validateResponseAgainstSpec(spec, "GET", "/missing", 200, {}).schemaFound).toBe(false);
-    expect(validateResponseAgainstSpec(spec, "GET", "/example", 201, {}).schemaFound).toBe(false);
+  it("validates readiness failure against the declared 503 response", async () => {
+    mocks.query.mockRejectedValue(new Error("Database unavailable"));
+    await assertContract({ method: "GET", url: "/readyz" }, "/readyz", 503);
+  });
+  it.each(["/api/markets", "/api/markets/1", "/api/markets/1/bets"])("detects a new database field silently removed from %s", async url => {
+    mocks.query.mockImplementation(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values).map(row => ({ ...row, new_public_field: "must survive" })) }));
+    const response = await app.inject(url);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(detectDroppedFields(rawPayload, response.json()).droppedFields).toEqual(expect.arrayContaining([expect.stringContaining("new_public_field")]));
+    expect(() => assertPreservedFields(rawPayload, response.json())).toThrow();
   });
 });

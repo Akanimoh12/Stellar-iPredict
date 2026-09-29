@@ -5,23 +5,34 @@
   "description": "Backend API and indexer for iPredict",
   "main": "index.js",
   "scripts": {
-    "build": "tsc --module commonjs --moduleResolution node",
+    "build": "tsc",
     "test": "vitest run",
-    "test:contract": "vitest run test/contract.test.ts",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit -p tsconfig.test.json",
-    "start": "node dist/index.js"
+    "test:openapi:update": "vitest run src/api/openapi.test.ts -u",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test:contract": "vitest run test/contract.test.ts test/contract-helpers.test.ts test/frontend-contract.test.ts"
   },
   "dependencies": {
-    "@fastify/swagger": "^9.9.0",
+    "@ipredict/shared": "*",
+    "@fastify/compress": "^9.1.0",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.0",
+    "@fastify/swagger": "^9.8.1",
+    "@stellar/stellar-sdk": "^16.2.0",
+    "fastify": "^5.8.5",
+    "ioredis": "^5.11.1",
+    "pg": "^8.13.1",
+    "zod": "^4.4.3",
     "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
-    "fastify": "^5.12.5",
-    "pg": "^8.13.1"
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
+    "@types/ioredis": "^4.28.10",
     "@types/node": "^20.0.0",
     "@types/pg": "^8.11.10",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.7.3",
     "vitest": "^2.1.9"
   }

@@ -1,0 +1,976 @@
+# iPredict Infrastructure
+
+Local-dev and production infrastructure for the backend stack: Postgres, Redis,
+the API service, the indexer, and the oracle services.
+
+> **Branch:** all work happens on `implementation-drips`.
+
+## Local development
+
+Start Postgres + Redis (enough to run the backend and indexer locally):
+
+```bash
+make up          # from the repo root — waits until both are healthy
+```
+
+or by hand:
+
+```bash
+cd infra
+docker compose -f docker-compose.dev.yml up -d
+```
+
+This gives you:
+- Postgres on `localhost:5432` (database: ipredict, see docker-compose.dev.yml for credentials)
+- Redis on `localhost:6379`
+
+Then run each service from its own folder (`backend/`, `indexer/`, `oracle/`)
+with `npm run dev`.
+
+## Staging (Stellar Testnet)
+
+The staging compose file uses isolated persistent volumes and points the oracle
+at Stellar Testnet (`Test SDF Network ; September 2015`). It deliberately does
+not publish Postgres or Redis ports to the host.
+
+```bash
+cd infra
+cp .env.staging.example .env
+# Edit .env and set a non-default POSTGRES_PASSWORD and the contract ID.
+docker compose -f docker-compose.staging.yml up --build -d
+docker compose -f docker-compose.staging.yml ps
+```
+
+Follow service output with `docker compose -f docker-compose.staging.yml logs
+-f oracle`. To stop staging without deleting its database/cache volumes, run
+`docker compose -f docker-compose.staging.yml down`. Add `-v` only when a
+complete staging data reset is intended.
+
+The oracle container is included now so adapter configuration is validated in
+the same network and environment used for testnet resolution. API and indexer
+containers will be added with their respective runtime images; they are not
+defined here because neither service currently ships a runnable container image.
+
+## Production
+
+[`docker-compose.production.yml`](docker-compose.production.yml) runs the whole
+backend stack. It follows the design in
+[`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#infrastructure).
+
+| Service | What it does | Replicas |
+|---|---|---|
+| `postgres` | System of record for indexed chain data | 1 |
+| `redis` | Cache + rate-limiter store, persisted per [`redis.conf`](redis.conf) | 1 |
+| `api` | REST API (`backend/`) | `API_REPLICAS`, default 3 |
+| `indexer` | Soroban event indexer (`indexer/`) | 1, always |
+| `proxy` | Caddy reverse proxy / TLS termination in front of `api` | 1 |
+| `oracle-aggregator` | Council tally and on-chain finalization (`oracle/`) | 1 |
+| `oracle-monitor` | Read-only oracle watchdog and alerting (`oracle/`) | 1 |
+| `log-collector` | Aggregates container logs with Fluent Bit | 1 |
+| `migrate` | One-shot migration runner, opt-in profile | on demand |
+
+```bash
+cd infra
+cp .env.example .env          # then fill in every CHANGE_ME value
+./scripts/deploy.sh           # migrate, then bring up the whole stack
+```
+
+[`scripts/deploy.sh`](scripts/deploy.sh) runs DB migrations **before** any
+application service starts, then brings up the stack — see
+[Deploy flow](#deploy-flow). For a plain compose bring-up without the explicit
+migration step (e.g. first boot, where the postgres container already applies
+`db/migrations`), the equivalent is:
+
+```bash
+docker compose -f docker-compose.production.yml up -d --build
+docker compose -f docker-compose.production.yml ps
+```
+
+The **only public entry point is the `proxy`** service: Caddy terminates TLS
+on ports 80/443 and forwards to the API — see
+[Reverse proxy and TLS](#reverse-proxy-and-tls). The API replicas each bind
+one loopback-only host port from `API_PORT_RANGE` (4000–4002 by default) so
+you can address one replica at a time for debugging and rolling updates
+without exposing anything unencrypted to the world. Postgres and Redis
+publish no host port at all: they are reachable only from inside the compose
+network.
+
+### Single indexer instance
+
+Compose declares one indexer replica, and the indexer additionally uses the
+PostgreSQL session-level advisory lock implemented in
+[`indexer/src/lock.ts`](../indexer/src/lock.ts). Startup must call
+`acquireIndexerLock(pool)` before polling and retain the returned handle for the
+process lifetime. If another instance owns the lock, acquisition fails fast
+with `IndexerAlreadyRunningError`; the extra instance must exit instead of
+processing events. During graceful shutdown, call `lock.release()` before
+closing the pool. PostgreSQL releases the lock automatically if the process or
+its dedicated connection dies, so a replacement can start without manual
+cleanup.
+### Structured Logging and Aggregation
+
+All services emit structured JSON logs to stdout, which are collected by the
+`log-collector` service using Fluent Bit. Logs include correlation IDs that
+allow tracing a single request or market processing attempt across backend, oracle,
+and indexer services.
+
+**Correlation IDs:** The `x-request-id` header carries a unique identifier:
+- **Backend → Oracle webhook:** The backend sets `x-request-id` on requests to the finalize webhook
+- **Oracle market processing:** Oracle generates a fresh correlation ID for each market, stored in `oracle_submissions.correlation_id`
+- **Cross-service queries:** A single `x-request-id` or `correlation_id` value retrieves the full processing history
+
+Field naming is consistent across services:
+- `timestamp` — ISO 8601 UTC timestamp
+- `level` — debug, info, warn, or error
+- `message` — human-readable summary
+- `requestId` / `correlationId` — tracing identifier
+- Service-specific fields as needed (e.g., `durationMs`, `statusCode`, `marketId`)
+
+**Log aggregation destination:** Logs are aggregated to the `aggregated-logs`
+volume at `/var/log/ipredict/containers.log`. In production, configure an external
+aggregator (Datadog, Splunk, CloudWatch) to consume from Docker's Fluentd socket.
+Edit [`logging/fluent-bit.conf`](logging/fluent-bit.conf) to change the destination.
+
+**Retention:** Operational logs (access logs, routine housekeeping) are retained
+for 7 days. Audit logs (oracle submissions, disputes, council votes) are retained
+for 90 days and only removed by a reviewed manual process — see
+[`docs/DATA-RETENTION.md`](../docs/DATA-RETENTION.md) for the full policy.
+
+### Runtime and logging policy
+
+Long-running services use `restart: always` and explicit CPU and memory
+ceilings. The defaults are starting points; monitor throttling, out-of-memory
+restarts, database working-set size, and indexer lag before changing them.
+The opt-in `migrate` service is intentionally different: it has a bounded
+resource allocation and `restart: "no"`, because its successful one-shot exit
+is the migration readiness signal.
+
+| Service | CPUs | Memory |
+|---|---:|---:|
+| API | 1.00 | 512 MiB |
+| Indexer | 0.75 | 384 MiB |
+| Proxy (Caddy) | 0.25 | 128 MiB |
+| Postgres | 1.00 | 1 GiB |
+| Redis | 0.50 | 256 MiB |
+| Oracle aggregator | 0.50 | 384 MiB |
+| Oracle monitor | 0.25 | 256 MiB |
+| Fluent Bit | 0.25 | 128 MiB |
+
+Docker sends service logs asynchronously over the local Fluentd protocol to
+Fluent Bit at `127.0.0.1:24224`. The collector writes the combined stream to
+the `aggregated-logs` volume and uses Docker's size-limited `local` driver
+itself to avoid a logging loop. Follow the stream with:
+
+```bash
+docker compose -f docker-compose.production.yml exec log-collector \
+  tail -f /var/log/ipredict/containers.log
+```
+
+The collector configuration lives in
+[`logging/fluent-bit.conf`](logging/fluent-bit.conf).
+
+### Container image tags
+
+Application images use immutable tags: semantic versions such as `v1.4.0` for
+releases, or `<branch>-<short-sha>` for branch builds. The `local` default is
+only for local builds; never publish or deploy it, and never use `latest`.
+
+```bash
+IMAGE_REGISTRY=ghcr.io/akanimoh12 \
+API_IMAGE_TAG=v1.4.0 \
+INDEXER_IMAGE_TAG=implementation-drips-a1b2c3d \
+ORACLE_IMAGE_TAG=v1.4.0 \
+docker compose -f docker-compose.production.yml up -d --no-build
+```
+
+### Why the oracle is two services
+
+`oracle-aggregator` writes — it signs and submits `resolve_market`
+transactions, so it holds `RESOLVER_KEY`. `oracle-monitor` only reads Postgres
+and posts alerts, so it is given no signing credential at all. Splitting them
+means a crash-looping aggregator does not take oracle observability down with
+it, which is exactly when you need the alerts.
+
+The two share one image (`ipredict-oracle`) and differ only in their command:
+`dist/index.js` versus `dist/monitor/run.js`. Compose builds it once.
+
+The monitor re-runs the read-only checks in `oracle/src/aggregator/` every
+`MONITOR_INTERVAL_MS` and emits one alert per finding — logged as JSON, and
+POSTed to `ALERT_WEBHOOK_URL` when set:
+
+| Alert `type` | Raised when |
+|---|---|
+| `oracle.monitor.market_stuck` | A market is unresolved `STUCK_MARKET_HOURS` past expiry — see the [Stuck Market Runbook](../oracle/docs/STUCK_MARKET_RUNBOOK.md) |
+| `oracle.monitor.submission_new` | A new bonded submission appears |
+| `oracle.monitor.dispute_escalated` | A dispute escalates to council |
+| `oracle.monitor.bond_below_minimum` | A submission is bonded under `SUBMITTER_BOND_XLM` |
+| `oracle.monitor.council_inactive` | An escalated market has no votes after `COUNCIL_INACTIVITY_HOURS` |
+| `oracle.monitor.council_window_exceeded` | An escalated market passed the 72h council window |
+
+Two of these are watermarked (`submission_new`, `dispute_escalated`): on
+startup the monitor reads the current maxima, so a restart alerts on new
+activity only rather than replaying history into your alert channel. A failing
+cycle is logged and retried on the next tick — a Postgres blip must not leave
+the oracle unwatched.
+
+### Migrations
+
+On the first boot of an empty `pgdata` volume, the postgres container applies
+everything in `db/migrations` in filename order and records it in
+`schema_migrations` — the same bookkeeping table `db/migrate.ts` uses. The
+health check probes over TCP, so dependent services wait for that to finish
+before they start.
+
+For migrations added later, against an already-running database:
+
+```bash
+docker compose -f docker-compose.production.yml --profile migrate run --rm migrate
+```
+
+Both paths run [`scripts/init-db.sh`](scripts/init-db.sh) and both are
+idempotent — already-applied migrations are skipped, and each migration
+commits together with its bookkeeping row.
+
+### Deploy flow
+
+[`scripts/deploy.sh`](scripts/deploy.sh) is the deploy entry point: it runs the
+migration step and then starts the application services, in the right order,
+so api/indexer never boot against a half-migrated schema.
+
+```bash
+cd infra
+./scripts/deploy.sh                        # migrate + full stack
+./scripts/deploy.sh --services api,indexer # migrate, then only those services
+./scripts/deploy.sh --skip-migrate         # deploy without migrating
+./scripts/deploy.sh --no-build             # reuse existing images
+```
+
+What it does, in order:
+
+1. **Data plane.** Starts `postgres`, `redis` and `log-collector` and waits
+   for postgres to report healthy (`--wait`).
+2. **Migrations.** Runs the `migrate` profile (`init-db.sh`) against the
+   running database — the same idempotent path documented above.
+3. **Application services.** Brings up the rest of the stack (api, indexer,
+   oracle-*), or only the services named with `--services` / positional args.
+
+The script reads everything from `infra/.env` (override with `--env-file` or
+`COMPOSE_FILE`), never touches host state outside `infra/`, and is safe to run
+repeatedly and from CI. Passing `--skip-migrate` disables step 2 for
+operations that already applied migrations out of band — use with care.
+
+### Reverse proxy and TLS
+
+The `proxy` service runs [Caddy](https://caddyserver.com/) in front of the
+API and terminates TLS. Config lives entirely in
+[`proxy/`](proxy/): the [`Caddyfile`](proxy/Caddyfile) and a one-line
+[`Dockerfile`](proxy/Dockerfile) that pins the official `caddy:2.11.2-alpine`
+image. Clients reach the stack only over HTTPS; the API's own host ports stay
+bound to `127.0.0.1`, so nothing can bypass the proxy.
+
+**How it proxies.** Caddy forwards everything to `api:4000` on the compose
+network. Docker's built-in DNS resolves `api` round-robin across all API
+replicas, so no explicit upstream list or extra load balancer is needed —
+Caddy just load-balances whatever Docker hands it. Responses are gzip-encoded.
+
+**Local testing (default).** With `PROXY_DOMAIN=localhost` (the default in
+`.env.example`) Caddy serves HTTPS using an internally-trusted certificate:
+
+```bash
+cd infra && ./scripts/deploy.sh
+curl -k https://localhost/healthz     # -> ok (through TLS + proxy)
+curl -k https://localhost/api/v1/...  # -> your API response
+```
+
+`curl -k` is only needed because the localhost certificate is not in your
+system trust store. The proxy's own container healthcheck hits a plain-HTTP
+liveness endpoint on an internal port, so the service reports healthy
+regardless of the TLS certificate state.
+
+**Production.** Set a real domain and a Let's Encrypt account email in
+`infra/.env` and redeploy:
+
+```bash
+PROXY_DOMAIN=api.ipredict.app
+ACME_EMAIL=ops@example.com
+```
+
+Caddy then provisions and renews a Let's Encrypt certificate automatically
+(automatic HTTPS). Requirements: ports 80 and 443 reachable from the
+internet, and a DNS `A`/`AAAA` record pointing at the host. Certificates and
+the ACME account live in the persistent `caddy-data` volume, so restarts do
+not re-issue them.
+
+**Custom internal hostnames.** For a non-public hostname that is not
+`localhost` (e.g. `api.internal`), add `tls internal` to the site block in
+[`proxy/Caddyfile`](proxy/Caddyfile) so Caddy uses its internal CA instead of
+attempting Let's Encrypt.
+
+## Configuration and secrets
+
+Every value for the production stack lives in **one file**: `infra/.env`,
+created from [`.env.example`](.env.example). Compose loads it automatically for
+`${VAR}` interpolation, and `docker-compose.production.yml` then hands each
+service only the variables that service actually reads.
+
+```bash
+cd infra
+cp .env.example .env
+$EDITOR .env       # every CHANGE_ME value must be replaced
+```
+
+That indirection is deliberate. Listing `env_file: .env` on every service would
+be shorter, but it would also put the resolver signing key and the data-source
+API keys into the API container and into the read-only monitor. Enumerating
+variables per service costs a few lines and buys least privilege:
+
+| Secret | Reaches | Deliberately not in |
+|---|---|---|
+| `POSTGRES_PASSWORD` | postgres, and the composed `DATABASE_URL` | — |
+| `REDIS_PASSWORD` | redis, and the composed `REDIS_URL` | indexer's Postgres-only peers |
+| `ORACLE_API_KEY` | api | everything else |
+| `RESOLVER_KEY` | oracle-aggregator | api, indexer, **oracle-monitor** |
+| Adapter API keys | oracle-aggregator | api, indexer, oracle-monitor |
+
+### Where each variable is read
+
+`.env.example` is grouped by service and annotated. The schemas that parse
+these are the source of truth, and a name that does not match one of them is
+silently ignored rather than rejected:
+
+| Service | Schema |
+|---|---|
+| api | [`backend/src/config/index.ts`](../backend/src/config/index.ts) |
+| indexer | [`indexer/src/config/index.ts`](../indexer/src/config/index.ts) |
+| oracle-aggregator | [`oracle/src/aggregator/config.ts`](../oracle/src/aggregator/config.ts) |
+| oracle-monitor | [`oracle/src/monitor/config.ts`](../oracle/src/monitor/config.ts) |
+| oracle adapters | [`oracle/src/adapters/config.ts`](../oracle/src/adapters/config.ts) |
+
+`infra/.env` is for the container stack. The per-service
+`backend/.env.example`, `indexer/.env.example` and `oracle/.env.example` are
+for running a single service on the host with `npm run dev` — those stay as
+they are.
+
+### Required values
+
+Compose refuses to start, naming the variable, when one of these is unset —
+they use the `${VAR:?message}` form rather than defaulting:
+
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `REDIS_PASSWORD`,
+`ORACLE_API_KEY`, `SOROBAN_RPC_URL`, `NETWORK_PASSPHRASE`,
+`MARKET_CONTRACT_ID`, `TOKEN_CONTRACT_ID`, `REFERRAL_CONTRACT_ID`,
+`LEADERBOARD_CONTRACT_ID`.
+
+`ORACLE_API_KEY` is in that list for a specific reason: `backend/src/api/oracle.ts`
+falls back to a hard-coded development key when it is unset, so an unset value
+would leave `POST /api/v1/oracle/submit` open rather than disabled.
+
+### Secret handling
+
+- **Never commit `.env`.** It is covered by the root `.gitignore`. Commit
+  changes to `.env.example` instead, with the value left blank or as
+  `CHANGE_ME_...`.
+- **Generate, do not invent.** `openssl rand -base64 24` for passwords,
+  `openssl rand -hex 32` for API keys.
+- **Keep passwords URL-safe** (`A–Z a–z 0–9 . _ ~ -`). `POSTGRES_PASSWORD` and
+  `REDIS_PASSWORD` are interpolated into `postgres://` and `redis://` URLs, so
+  `@ : / ? #` would have to be percent-encoded to survive.
+- **Permissions.** `chmod 600 infra/.env`. It holds the signing key for an
+  account that can resolve markets.
+- **Rotation.** Postgres and Redis passwords: change `.env`, then
+  `docker compose -f docker-compose.production.yml up -d --force-recreate`.
+  `RESOLVER_KEY` rotates through the aggregator's key manager
+  (`oracle/src/aggregator/key-rotation.ts`) — rotate the on-chain resolver
+  first, then the file.
+- **Beyond one host.** `.env` on disk is the right size of tool for a
+  single-host compose deployment. Anything larger should mount Docker secrets
+  or pull from a manager (Vault, AWS Secrets Manager, SOPS). Every service now
+  resolves `<NAME>_FILE` into `<NAME>` at startup
+  ([`shared/src/secrets.ts`](../shared/src/secrets.ts)), so pointing at a
+  mounted path takes no code change:
+  `RESOLVER_KEY_FILE=/run/secrets/resolver_key`. See
+  [`docs/SECRETS.md`](../docs/SECRETS.md) for the backends, the precedence
+  rules, and the reserved Vault variables.
+- **Never log a secret.** `restore.sh` redacts the password out of the
+  connection string before printing it, and the Redis health check reads
+  `REDISCLI_AUTH` from the environment so the password never lands in the
+  container's process list. Hold new tooling to the same bar.
+
+## Redis persistence
+
+[`redis.conf`](redis.conf) is mounted read-only into the redis container.
+`--requirepass` is appended on the command line so the password stays in the
+environment rather than in a tracked file.
+
+Redis holds only regenerable data — cache-aside reads, rate-limiter counters,
+negative-cache markers — so it is not a system of record. Persistence is still
+configured, for availability rather than durability: a restart with an empty
+keyspace sends every in-flight request straight to Postgres and the Soroban
+RPC at once.
+
+That is what sets the trade-offs:
+
+| Setting | Value | Why |
+|---|---|---|
+| `appendonly` | `yes` | Primary recovery path; bounds loss to the last second rather than the last snapshot |
+| `appendfsync` | `everysec` | `always` buys durability the data does not need, at a disk round-trip per write |
+| `aof-use-rdb-preamble` | `yes` | Rewrites emit an RDB base — smaller file, much faster load |
+| `save` | `900 1 / 300 10 / 60 10000` | Point-in-time snapshots; this is what `backup.sh` would copy |
+| `stop-writes-on-bgsave-error` | `no` | A disk hiccup must not turn a cache into an API outage. Alert on `rdb_last_bgsave_status` instead |
+| `maxmemory-policy` | `allkeys-lru` | Every key is regenerable; `volatile-*` would return OOM once only untyped keys remain |
+| `maxmemory` | `512mb` | Raise together with the container's memory limit |
+
+Verify a running instance:
+
+```bash
+docker compose -f docker-compose.production.yml exec redis \
+  redis-cli CONFIG GET appendonly appendfsync maxmemory-policy save
+```
+
+## Backups
+
+[`scripts/backup.sh`](scripts/backup.sh) and
+[`scripts/restore.sh`](scripts/restore.sh) wrap `pg_dump`/`pg_restore`.
+
+```bash
+cd infra
+./scripts/backup.sh                        # → infra/backups/ipredict-<UTC>.dump
+./scripts/backup.sh -o /srv/backups -r 14  # custom directory, 14-day retention
+./scripts/restore.sh --list <dump>         # inspect an archive, change nothing
+./scripts/restore.sh <dump>                # restore, with confirmation
+```
+
+Both scripts pick how to run automatically: the local `pg_dump`/`pg_restore`
+when `DATABASE_URL` points somewhere reachable, otherwise the pinned client
+inside the compose postgres container. `--docker` and `--local` force it.
+Auto-selection also covers the version-skew case — `pg_dump` refuses to dump a
+server newer than itself, and the host client is routinely older than the
+pinned `postgres:16`.
+
+What the scripts guarantee:
+
+- **Custom format** (`-Fc`) — compressed, restorable in parallel, and
+  selective.
+- **No half-backups.** The dump is written to a `.part` file and renamed only
+  after `pg_restore --list` reads the archive back. A truncated file is never
+  left looking usable.
+- **Checksums.** Every dump gets a `.sha256` sidecar; `restore.sh` verifies it
+  before touching the target and refuses on a mismatch.
+- **Retention runs last.** Pruning happens only after a verified dump lands,
+  so a run of failures can never age out the last good backup.
+- **Restore is explicit.** It drops and recreates every object in the dump, so
+  it requires typing `restore` at a prompt, or `--yes`. Non-interactively
+  without `--yes` it refuses outright.
+
+### Schedule
+
+Backups run from cron on the host (not in a container — it needs the docker
+socket or a reachable `DATABASE_URL`):
+
+```cron
+# 03:15 daily — full verified dump, 7-day retention
+15 3 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups ./scripts/backup.sh >> /var/log/ipredict-backup.log 2>&1
+# 04:15 daily — prove the newest dump actually restores
+15 4 * * * cd /srv/ipredict/infra && BACKUP_DIR=/srv/backups VERIFY_METRICS_FILE=/var/lib/node_exporter/textfile/ipredict_backup.prom BACKUP_ALERT_WEBHOOK_URL=$ALERT_WEBHOOK_URL ./scripts/verify-backup.sh >> /var/log/ipredict-verify.log 2>&1
+```
+
+- **Frequency:** daily. **Retention:** 7 daily dumps (`BACKUP_RETENTION_DAYS`).
+- **Offsite:** sync `/srv/backups` to object storage after each run (`aws s3
+  sync`, `rclone`) — a backup on the same host is not a backup.
+
+### Verification (not assumed — proven)
+
+[`scripts/verify-backup.sh`](scripts/verify-backup.sh) is the automated restore
+test. It stands up a throwaway `postgres:16` container, restores the newest
+dump into it, checks the result, and tears it down. It exits non-zero — and
+POSTs `{"type":"backup.verification_failed"}` to `$BACKUP_ALERT_WEBHOOK_URL`
+(or `$ALERT_WEBHOOK_URL`) — if any check fails:
+
+- every core table is present (`markets`, `bets`, `events`,
+  `oracle_submissions`, `leaderboard`, `council_votes`, `schema_migrations`);
+- `pg_restore --exit-on-error` completed — no partial restore;
+- the dump's `schema_migrations` count is **≥** the repo's up-migration count
+  (catches a backup taken before a schema change);
+- referential sanity — no `bets` rows orphaned from `markets`.
+
+With `VERIFY_METRICS_FILE` set it writes a Prometheus textfile:
+`ipredict_backup_verify_success`, `..._restore_seconds`,
+`..._dump_age_seconds`, `..._timestamp_seconds`.
+
+```bash
+./scripts/verify-backup.sh                    # newest dump in $BACKUP_DIR
+./scripts/verify-backup.sh /srv/backups/x.dump
+```
+
+### Recovery objectives (measured)
+
+| Objective | Target | How it is measured |
+|---|---|---|
+| **RPO** (max data loss) | ≤ 24h from backup; ~minutes in practice | `dump_age_seconds` from `verify-backup.sh`. Chain-derived rows after the last dump are recoverable by replay (see below), so effective RPO for that state is ~0. |
+| **RTO** (time to restore service) | ≤ 1h | `restore_seconds` from `verify-backup.sh` (dominant term) + migration re-run + service restart. Record the observed number here after each DR drill: `<fill in>`. |
+
+Non–chain-derived state (that which a replay cannot rebuild — see
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery") sets the true RPO floor, which
+is why the daily off-host backup is load-bearing.
+
+### Secondary recovery path — replay from chain
+
+Most state (`markets`, `bets`, resolutions) derives from on-chain events and can
+be rebuilt without a backup by replaying: `indexer … --backfill`, then
+`npm run rebuild:leaderboard`. Bounded by RPC event retention —
+`getBackfillCoverage()` (`indexer/src/backfill.ts`) reports the ledger range a
+replay can currently reach. Full procedure and the reconstructible/not list:
+`docs/DEPLOYMENT-GUIDE.md` § "Disaster recovery".
+
+### After any restore
+
+Re-run migrations so `schema_migrations` matches the code, then restart the API
+and indexer so they reconnect to the rebuilt schema.
+
+## Data retention
+
+Full policy: [`docs/DATA-RETENTION.md`](../docs/DATA-RETENTION.md). Every data
+category has a stated retention period and justification, recorded in the
+`data_retention_policies` table. Operational data is purged automatically;
+audit data (finalized oracle submissions, council votes, disputes) is kept for
+a deliberately long window and only ever removed by a reviewed manual process.
+
+Run the operational sweep daily from cron on the DB host:
+
+```cron
+30 3 * * * psql "$DATABASE_URL" -c "SELECT * FROM enforce_data_retention();" >> /var/log/ipredict-retention.log 2>&1
+```
+
+`enforce_data_retention()` returns a row count per category and is safe to
+re-run. Alert if the log shows no run in 48h, or if `dead_letter_events` /
+`events` row counts grow past their windows (Prometheus: scrape
+`pg_stat_user_tables` or add a small exporter query).
+
+## Contributing
+
+Pick an open issue labelled `area:infra`, branch off `implementation-drips`,
+PR back to `implementation-drips`.
+
+## Monitoring
+
+The monitoring assets use the canonical metric names in
+[`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#monitoring).
+
+### Prometheus metrics and alerts
+
+#### Backend API Metrics
+
+The backend exposes Prometheus metrics at `GET /metrics` in text exposition
+format (the standard Prometheus scrape protocol).
+
+**Metrics exposed:**
+
+- `api_request_duration_ms_bucket{route, le}` — request latency histogram
+  (cumulative counts per bucket, labeled by route and bucket boundary in ms)
+- `api_request_duration_ms_sum{route}` — sum of all request durations
+- `api_request_duration_ms_count{route}` — total number of requests
+- `api_errors_total{route}` — total number of 5xx responses per route
+- `cache_hit_rate` — gauge, Redis cache hits ÷ lookups since start. `NaN`
+  before the first lookup: a backend that has served no traffic has not
+  achieved a 0% hit rate, and emitting 0 would fire `LowCacheHitRate` on every
+  deploy
+- `cache_hits_total` / `cache_misses_total` — counters, so a dashboard can
+  compute a *windowed* hit rate instead of the lifetime one:
+
+  ```promql
+  sum(rate(cache_hits_total[5m]))
+    / clamp_min(sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m])), 0.001)
+  ```
+
+- `cache_namespace_hits_total{namespace}` /
+  `cache_namespace_misses_total{namespace}` — counters, broken down by cache
+  key entity (`market`, `markets`, `leaderboard`, `stats`, `bets`, `other`).
+  The namespace list is closed on purpose: keys embed market ids, so an
+  open-ended label would be one series per market. The per-namespace series use
+  their own metric names rather than a label on `cache_hits_total`, because
+  mixing labelled and unlabelled samples under one metric name makes Prometheus
+  reject the whole scrape
+
+A lookup is any read that consults Redis before falling back to its loader —
+`getOrSet` in [`backend/src/cache/cacheAside.ts`](../backend/src/cache/cacheAside.ts)
+and `cache.get` in [`backend/src/cache/redis.ts`](../backend/src/cache/redis.ts).
+An absent key is a miss; so is a stored value that fails to parse, because the
+caller still paid for the loader. A Redis *error* is neither — counting an
+outage as a cold cache would point the investigation at the wrong thing.
+
+**Example:** After running the backend for a while, visit
+`http://localhost:4000/metrics` (the default port from `backend/.env.example`,
+override with `PORT`) to see all metrics.
+
+#### Indexer Metrics
+
+The indexer exposes Prometheus metrics at `GET /metrics` on port 9090 (or
+`$METRICS_PORT` if set) in text exposition format. The server binds `0.0.0.0`
+(override with `METRICS_HOST`) so a containerized Prometheus can reach it.
+When running the indexer on the host alongside the monitoring stack, set
+`METRICS_PORT=9091` — the code default 9090 is the same host port the
+Prometheus container publishes (see `indexer/.env.example`).
+
+**Metrics exposed:**
+
+- `indexer_lag_ledgers` — gauge, difference between latest ledger and indexer
+  checkpoint (0 means fully caught up)
+- `events_processed_total` — counter, total contract events successfully indexed
+- `rpc_errors_total{service, operation}` — counter, failed RPC calls by service
+  and operation (e.g. `operation="getEvents"`)
+
+The `service` and `operation` labels are intentionally low-cardinality. Other
+services can use the same metric and identify their stable RPC operation with
+those labels. Do not attach URLs, errors, transaction hashes, or market IDs.
+
+**Example:** After running the indexer with `METRICS_PORT=9091`, visit
+`http://localhost:9091/metrics` to see all metrics.
+
+#### Oracle Metrics
+
+The **oracle aggregator** exposes Prometheus metrics at `GET /metrics` on port
+9101 (`$ORACLE_METRICS_PORT`), plus `GET /health` for a compose `healthcheck`.
+Like the indexer's, the server is plain `node:http`
+([`oracle/src/metrics/server.ts`](../oracle/src/metrics/server.ts)) and binds
+`0.0.0.0` by default (`ORACLE_METRICS_HOST`).
+
+**Metrics exposed:**
+
+- `oracle_submissions_total` — counter, rows in `oracle_submissions`
+- `oracle_disputes_total` — counter, rows in `oracle_disputes` (one per
+  disputed market, challenged or escalated)
+- `oracle_resolution_lag_h{market_id}` — gauge, hours from `markets.end_time`
+  to `oracle_submissions.finalized_at`
+- `oracle_up` — gauge, 1 when the collector reached Postgres. Distinct from
+  Prometheus's built-in `up`, which cannot tell a broken collector from an
+  unreachable host
+- `oracle_metrics_last_refresh_timestamp_seconds` — gauge, Unix time of the
+  last successful refresh
+- `oracle_metrics_collection_errors_total` — counter, refreshes that failed
+
+The first three are the names the Grafana oracle dashboard
+([`grafana/oracle.json`](grafana/oracle.json)) already queries, and the ones in
+the catalogue in
+[`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#monitoring).
+
+**Why the aggregator and not the monitor.** Prometheus scrapes one oracle
+target, and the aggregator is the process whose absence is worth alerting on.
+The monitor stays exactly as it is — read-only, no signing credential, no
+listener.
+
+**Why the totals come from Postgres.** `AggregatorMetrics`
+([`oracle/src/aggregator/metrics.ts`](../oracle/src/aggregator/metrics.ts)) is
+an in-process registry: it counts what one process saw since it started.
+Submissions also arrive through the API and the challenge bot, and a restart
+would reset every counter to zero while the rows are still there — a counter
+that resets on deploy makes every `rate()` over it spike. The collector reads
+the totals from Postgres instead, so they survive restarts and do not depend on
+which process handled a given submission.
+
+**Scrapes never query.** A background timer refreshes a cached snapshot every
+`ORACLE_METRICS_REFRESH_MS` (default 15s) and scrapes are served from it, so a
+scrape storm cannot become database load and a slow query cannot stall a
+scrape. A failed refresh keeps the previous snapshot rather than blanking it
+— see `OracleMetricsStale` in [`prometheus/alerts.yml`](prometheus/alerts.yml),
+which is the only thing that distinguishes a stale 200 from a healthy one.
+
+**Cardinality.** `oracle_resolution_lag_h` is labelled by `market_id`, so it
+grows with every market ever finalized. `ORACLE_METRICS_LAG_SERIES` (default
+100) caps it at the most recently finalized markets; the dashboard queries it
+through `avg()`/`max()`, which only needs the recent ones.
+
+**Example:** with the aggregator running, `curl http://localhost:9101/metrics`.
+
+### Prometheus Configuration
+
+The scrape config lives at
+[`prometheus/prometheus.yml`](prometheus/prometheus.yml) and covers every
+service `/metrics` endpoint:
+
+| Job | Local target | Service |
+| --- | --- | --- |
+| `prometheus` | `localhost:9090` | Prometheus self-scrape |
+| `ipredict-backend` | `host.docker.internal:4000` | Backend API, `GET /metrics` |
+| `ipredict-indexer` | `host.docker.internal:9091` | Indexer, `GET /metrics` (run it with `METRICS_PORT=9091`) |
+| `ipredict-oracle` | `host.docker.internal:9101` | Oracle aggregator, `GET /metrics` (override with `ORACLE_METRICS_PORT`) |
+
+App services run on the host during local development, so the containerized
+Prometheus reaches them via `host.docker.internal`.
+`docker-compose.monitoring.yml` maps that name to the host gateway through
+`extra_hosts`, which is required on Linux. In a full compose deployment
+(`docker-compose.production.yml`), target the Compose service names instead
+(e.g. `api:4000`).
+
+The config loads [`prometheus/alerts.yml`](prometheus/alerts.yml) from
+`rule_files`. Validate the config and the rules before deploying:
+
+```bash
+promtool check config infra/prometheus/prometheus.yml
+promtool check rules infra/prometheus/alerts.yml
+```
+
+The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
+`HighAPILatency`, `DatabaseSlow`, `LowCacheHitRate`, and `OracleMetricsStale`.
+
+`LowCacheHitRate` is written against the *counters*, not the `cache_hit_rate`
+gauge: the gauge averages over the whole process lifetime, so a cache that
+stopped working an hour ago barely moves it. The rule also requires more than
+100 lookups in the window, so a handful of requests at 3am cannot page anyone.
+
+The `MarketStuck` rule expects
+`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
+to be exported. API and database latency must be Prometheus histograms with
+millisecond buckets.
+
+### Production compose notes
+
+The production compose file (`docker-compose.production.yml`) includes container
+`healthcheck` entries and uses `depends_on` with `service_healthy` so that
+dependent services (API, indexer) wait for Postgres/Redis to be ready. Health
+checks are intentionally conservative: services will retry several times before
+being considered unhealthy to avoid false starts on noisy hosts.
+
+Every long-running production service has a restart policy and healthcheck.
+The `migrate` profile is the sole exception because it is not a daemon: Compose
+waits for its successful exit after Postgres is healthy before application
+services are started.
+
+Bring the stack up with:
+
+```bash
+cd infra
+docker compose -f docker-compose.production.yml up -d --build
+```
+
+If you need to bring an individual component up for debugging, run the subset
+explicitly:
+
+```bash
+docker compose -f docker-compose.production.yml up -d postgres redis api
+```
+
+```
+
+Then load [`prometheus/alerts.yml`](prometheus/alerts.yml) from `rule_files`:
+
+```yaml
+rule_files:
+  - /etc/prometheus/alerts.yml
+```
+
+Validate the rules before deploying:
+
+```bash
+promtool check rules infra/prometheus/alerts.yml
+```
+
+The rules define `IndexerStalled`, `HighRPCErrorRate`, `MarketStuck`,
+`HighAPILatency`, and `DatabaseSlow`. The `MarketStuck` rule expects
+`market_end_time_seconds{market_id}` and `market_resolved{market_id}` (0 or 1)
+to be exported. API and database latency must be Prometheus histograms with
+millisecond buckets.
+
+### Alertmanager (webhook / Slack)
+
+[`alertmanager.yml`](alertmanager.yml) receives every alert Prometheus raises
+from `prometheus/alerts.yml` and delivers it to a generic **webhook** receiver
+and — for `severity=critical` alerts — to a **Slack** channel as well.
+
+The routing tree:
+
+| Matcher | Receiver | When |
+|---|---|---|
+| `severity = "critical"` | `on-call-slack` (and webhook) | Indexer / market stuck, DB slow |
+| `severity =~ "warning\|info"` (or unset) | `webhook` | RPC error rate up, API p99 up |
+
+Local compose wires Alertmanager in automatically:
+
+```bash
+cd infra
+cp .env.monitoring.example .env       # optional; defaults are secret-free
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+- **UI**: http://localhost:9093
+- **Prometheus -> Status -> Alertmanagers** shows the `alertmanager:9093` target
+- The `alerting.alertmanagers` block in
+  [`prometheus/prometheus.yml`](prometheus/prometheus.yml) is what points
+  Prometheus at it
+
+Receiver URLs are injected from the environment at startup
+(`--config.expand-env=true`), so **no secret is stored in the repo**:
+
+| Variable | Where it lands | Default when unset |
+|---|---|---|
+| `ALERT_WEBHOOK_URL` | `receivers.webhook.webhook_configs[0].url` | `http://host.docker.internal:8090/ipredict-alerts` (no-op local sink) |
+| `SLACK_WEBHOOK_URL` | `global.slack_api_url` + `slack_configs.api_url` | empty → Slack receiver is a no-op |
+
+The default webhook URL is deliberately a no-op sink so the stack starts
+secret-free for a local smoke test. Point `ALERT_WEBHOOK_URL` at Slack's
+incoming-webhook URL (see
+[Slack's docs](https://api.slack.com/messaging/webhooks)), PagerDuty's Events
+API, or any Alertmanager webhook v2 endpoint to get real deliveries. Once a
+real URL is set, fire a test alert to confirm end-to-end delivery:
+
+```bash
+curl -X POST http://localhost:9093/api/v1/alerts -d '[
+  {
+    "labels": { "alertname": "TestAlert", "severity": "critical", "service": "indexer" },
+    "annotations": { "summary": "Test alert", "description": "Smoke-testing Alertmanager" }
+  }
+]'
+```
+
+Validate the Alertmanager config before deploying:
+
+```bash
+# with the monitoring stack running:
+docker compose -f docker-compose.monitoring.yml exec alertmanager \
+  amtool check-config /etc/alertmanager/alertmanager.yml
+```
+
+`amtool` also prints the effective routing tree with
+`amtool config routes show` when the Slack webhook URL is set.
+
+### Grafana dashboards
+
+Import [`grafana/business.json`](grafana/business.json) and
+[`grafana/oracle.json`](grafana/oracle.json) and
+[`grafana/system.json`](grafana/system.json) in Grafana, selecting the local
+Prometheus datasource when prompted. The business dashboard covers market
+creation, bets, XLM volume, and resolved markets. The oracle dashboard covers
+submissions, disputes, resolution lag, and oracle RPC failures. The system
+health dashboard covers scrape target availability, API latency and errors,
+indexer lag and throughput, RPC failures, and Postgres/Redis exporter health.
+
+The system dashboard expects the standard `postgres_exporter` and
+`redis_exporter` metric names: `pg_up`, `redis_up`, `redis_memory_used_bytes`,
+and `redis_commands_processed_total`. Run those exporters beside Postgres and
+Redis, then add scrape jobs similar to these (use the exporter hostnames and
+ports from your deployment):
+
+```yaml
+  - job_name: "ipredict-postgres"
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: "ipredict-redis"
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+```
+
+The existing `ipredict-backend` and `ipredict-indexer` jobs above provide the
+application metrics used by the remaining panels. A panel remains empty until
+its service or exporter is scraped and emits the corresponding metric.
+
+For a local smoke test, start Prometheus and Grafana, configure Prometheus to
+scrape the services' metrics endpoints and exporters, import the dashboards,
+and use
+Grafana's query inspector to confirm every panel returns without a PromQL
+error. An empty panel is expected until its service emits the corresponding
+metric.
+
+### Local Prometheus and Grafana Setup
+
+For local monitoring during development, you can run Prometheus and Grafana
+alongside your backend service to visualize business metrics in real-time.
+
+#### Prerequisites
+
+1. Docker and Docker Compose installed
+2. At least one app service running on the host with its `/metrics` endpoint:
+   - **Backend API** on port 4000 (default from `backend/.env.example`)
+   - **Indexer** with `METRICS_PORT=9091` (the code default 9090 collides with
+     the Prometheus container's published port) and `METRICS_HOST=0.0.0.0`
+   - **Oracle aggregator** on port 9101 (`ORACLE_METRICS_PORT`)
+
+#### Environment Variables (Optional)
+
+You can customize the monitoring setup using environment variables:
+
+```bash
+# Option 1: Copy and customize the example file
+cd infra
+cp .env.monitoring.example .env
+# Edit .env with your preferred values
+
+# Option 2: Set environment variable directly
+export GRAFANA_ADMIN_PASSWORD=your-secure-password
+
+# Then start the monitoring stack
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+#### Quick Start
+
+1. Start the monitoring stack:
+```bash
+cd infra
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+2. Start the app services (in separate terminals), e.g.:
+```bash
+cd backend
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict npx tsx src/index.ts
+
+cd indexer
+DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict \
+METRICS_PORT=9091 npx tsx src/index.ts
+```
+
+3. Access the services:
+   - **Grafana**: http://localhost:3000 (use GRAFANA_ADMIN_PASSWORD env var or default credentials)
+   - **Prometheus**: http://localhost:9090
+   - **Backend metrics**: http://localhost:4000/metrics
+   - **Indexer metrics**: http://localhost:9091/metrics (when the indexer runs)
+
+4. In Grafana, the business dashboard should be automatically available with:
+   - Market creation rate
+   - Bet placement rate  
+   - Total volume (XLM)
+   - Total bets placed
+   - Resolved markets count
+
+#### Verification Steps
+
+1. **Check Prometheus targets**: 
+   - Go to http://localhost:9090/targets
+   - Verify `prometheus` and `ipredict-backend` are UP
+   - Verify `ipredict-indexer` is UP when the indexer is running with
+     `METRICS_PORT=9091`
+   - Verify `ipredict-oracle` is UP when the aggregator is running
+
+   Or, from the repo root: `make metrics` curls all three and reports which
+   ones answer.
+   
+2. **Test metrics endpoint**:
+```bash
+curl http://localhost:4000/metrics
+```
+   Should return Prometheus text format with the backend request histogram, e.g.:
+   ```
+   api_request_duration_ms_bucket{route="GET /metrics",le="5"} 1
+   api_request_duration_ms_sum{route="GET /metrics"} 0.4
+   api_request_duration_ms_count{route="GET /metrics"} 1
+   ```
+   With the indexer running, `curl http://localhost:9091/metrics` returns
+   `indexer_lag_ledgers`, `events_processed_total`, and `rpc_errors_total`.
+
+3. **Grafana Dashboard**:
+   - Go to http://localhost:3000
+   - Login with default credentials (or use your custom GRAFANA_ADMIN_PASSWORD)
+   - Navigate to "iPredict Business Metrics" dashboard
+   - All panels should load without PromQL errors (values may be 0 initially)
+
+#### Stopping the Stack
+
+```bash
+cd infra
+docker compose -f docker-compose.monitoring.yml down
+```
+
+To remove all monitoring data:
+```bash
+docker compose -f docker-compose.monitoring.yml down -v
+```

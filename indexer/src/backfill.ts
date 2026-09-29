@@ -1,0 +1,359 @@
+import { rpc, scValToNative } from "@stellar/stellar-sdk";
+import { config } from "./config/index.js";
+import { pool } from "./db.js";
+import { insertProcessedEvent } from "./handlers/idempotency.js";
+import {
+  isRetentionExceededError,
+  extractOldestLedger,
+  formatRetentionExceededMessage,
+  RetentionExceededError,
+  checkRetentionBoundary,
+  DEFAULT_RETENTION_ALERT_THRESHOLD,
+} from "./rpc/getEvents.js";
+
+/**
+ * Backfill as a recovery path.
+ *
+ * Most database state (markets, bets, resolutions) derives from on-chain events
+ * and can be rebuilt by replaying them with `runBackfill()`. This is the
+ * **secondary** recovery path — the primary one is restoring a database backup
+ * (see `docs/DEPLOYMENT-GUIDE.md` § "Backup verification" and § "Disaster
+ * recovery").
+ *
+ * The hard limit is RPC event retention: `getEvents` only serves events for a
+ * bounded window (see `START_LEDGER` / the provider's retention). State older
+ * than that window is **not** reconstructible from chain — for that data the
+ * backup is load-bearing. `getBackfillCoverage()` reports where that boundary
+ * currently sits for a given database.
+ */
+export interface BackfillCoverage {
+  earliestLedger: number | null;
+  latestLedger: number | null;
+  eventCount: number;
+  /** Distinct markets seen in the events table. */
+  marketCount: number;
+}
+
+export async function getBackfillCoverage(
+  db: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: any[] }> } = pool,
+): Promise<BackfillCoverage> {
+  const { rows } = await db.query(
+    `SELECT
+       MIN(ledger_seq)::bigint          AS earliest,
+       MAX(ledger_seq)::bigint          AS latest,
+       COUNT(*)::bigint                 AS events,
+       COUNT(DISTINCT market_id)::bigint AS markets
+     FROM events`,
+  );
+  const r = rows[0] ?? {};
+  return {
+    earliestLedger: r.earliest === null || r.earliest === undefined ? null : Number(r.earliest),
+    latestLedger: r.latest === null || r.latest === undefined ? null : Number(r.latest),
+    eventCount: Number(r.events ?? 0),
+    marketCount: Number(r.markets ?? 0),
+  };
+}
+
+// Helper to detect 429 Rate Limit error
+export function isRateLimitError(err: any): boolean {
+  if (!err) return false;
+  const status = err.status || err.response?.status || err.response?.statusText;
+  if (status === 429) return true;
+  const msg = String(err).toLowerCase();
+  return msg.includes("429") || msg.includes("too many requests") || msg.includes("rate limit");
+}
+
+// Retry wrapper with exponential backoff
+export async function fetchWithRetry<T>(
+  fn: () => Promise<T>,
+  retries = 5,
+  delay = 1000
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (isRetentionExceededError(error)) {
+      throw error;
+    }
+    if (isRateLimitError(error) && retries > 0) {
+      console.warn(`[backfill] Rate limited (429). Retrying in ${delay}ms... (Retries left: ${retries})`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return fetchWithRetry(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
+// Ensure the dead-letter table exists
+async function ensureDeadLetterTable(): Promise<void> {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS dead_letter_events (\n      id BIGSERIAL PRIMARY KEY,\n      ledger_seq BIGINT NOT NULL,\n      tx_hash TEXT NOT NULL,\n      event_index INTEGER,\n      topic_b64 JSONB,\n      value_b64 TEXT,\n      error TEXT,\n      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n    )`
+  );
+}
+
+// Insert a decoding failure into the dead-letter table
+async function insertDeadLetterEvent(
+  event: rpc.Api.EventResponse,
+  eventIndex: number,
+  err: any
+): Promise<void> {
+  try {
+    const topic_b64 = event.topic.map((t: any) => t.toXDR("base64"));
+    const value_b64 = event.value.toXDR("base64");
+    await pool.query(
+      `INSERT INTO dead_letter_events (ledger_seq, tx_hash, event_index, topic_b64, value_b64, error)\n       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [
+        event.ledger,
+        event.txHash,
+        eventIndex,
+        JSON.stringify(topic_b64),
+        value_b64,
+        (err as Error).message,
+      ]
+    );
+  } catch (error) {
+    console.error(`[backfill] Failed to insert dead-letter event: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Number of events processed per chunk within a single RPC page.
+ *
+ * Events are decoded and written one at a time, but processing them in
+ * chunks lets us yield to the event loop between chunks so the GC can
+ * reclaim already-processed events and the process stays responsive
+ * (metrics, health checks, shutdown) even when a page is large.
+ */
+export const EVENTS_PROCESSING_CHUNK_SIZE = 50;
+
+/**
+ * Process a page of events in bounded chunks rather than materialising the
+ * whole page's decoded representation at once.
+ *
+ * The raw RPC page is already in memory (the SDK parses the full JSON
+ * response), so peak memory is primarily bounded by `EVENTS_PER_PAGE` (see
+ * `MAX_EVENTS_PER_PAGE` in `config/index.ts`). This chunked loop ensures we
+ * never hold more than `chunkSize` decoded events at a time and yields to
+ * the event loop between chunks.
+ */
+export async function processEventsInChunks(
+  events: rpc.Api.EventResponse[],
+  chunkSize: number = EVENTS_PROCESSING_CHUNK_SIZE,
+  processor: (event: rpc.Api.EventResponse, eventIndex: number) => Promise<void>,
+): Promise<void> {
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new Error("chunkSize must be a positive integer");
+  }
+  for (let i = 0; i < events.length; i += chunkSize) {
+    const chunk = events.slice(i, i + chunkSize);
+    for (const [chunkIndex, event] of chunk.entries()) {
+      await processor(event, i + chunkIndex);
+    }
+    // Yield to the event loop between chunks so processed events can be
+    // GC'd and the process can service other work (metrics, shutdown).
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Sample current process memory usage for logging/observability.
+ */
+export function sampleMemoryUsage(): { rss: number; heapUsed: number; heapTotal: number; external: number } {
+  const m = process.memoryUsage();
+  return {
+    rss: m.rss,
+    heapUsed: m.heapUsed,
+    heapTotal: m.heapTotal,
+    external: m.external,
+  };
+}
+
+// Parse and write a single event to the database
+export async function writeEventToDb(
+  ledgerSeq: number,
+  txHash: string,
+  topics: any[],
+  data: any,
+  eventIndex = 0,
+): Promise<void> {
+  const eventName = String(topics[0]);
+
+  // Write to audit events table first (if possible)
+  try {
+    const marketId = topics[1] ? Number(topics[1]) : (data?.market_id ? Number(data.market_id) : null);
+    const actor = topics[2] ? String(topics[2]) : (data?.user ? String(data.user) : null);
+    const inserted = await insertProcessedEvent(pool, {
+      event: { ledger: ledgerSeq, txHash, eventIndex },
+      eventType: eventName,
+      marketId,
+      actor,
+      payload: JSON.stringify(data),
+    });
+    if (!inserted) return;
+  } catch (err) {
+    // Audit table might not exist in target database, fail silently but log
+    console.debug("Optional events audit logging skipped:", (err as Error).message);
+  }
+
+  // Handle specific event actions
+  if (eventName === "market_created" || (eventName === "mkt" && topics[1] === "created")) {
+    const marketId = data.id ?? data[0] ?? (topics[1] ? Number(topics[1]) : 0);
+    const question = data.question ?? data[1] ?? "";
+    const category = data.category ?? data[2] ?? "Other";
+    const endTime = data.end_time ?? data[3] ?? 0;
+    const creator = data.creator ?? data[4] ?? "";
+    await pool.query(
+      `INSERT INTO markets (id, question, category, end_time, creator)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (id) DO NOTHING`,
+      [marketId, question, category, endTime, creator]
+    );
+  } else if (eventName === "market_resolved" || (eventName === "mkt" && topics[1] === "resolved")) {
+    const marketId = topics[1] ?? data.market_id ?? data[0];
+    const outcome = data.outcome ?? data[1] ?? false;
+    await pool.query(
+      `UPDATE markets SET resolved=true, outcome=$2, updated_at=NOW()\n       WHERE id=$1`,
+      [marketId, outcome]
+    );
+  } else if (eventName === "market_cancelled") {
+    const marketId = topics[1] ?? data.market_id;
+    await pool.query(
+      `UPDATE markets SET cancelled=true, updated_at=NOW()\n       WHERE id=$1`,
+      [marketId]
+    );
+  } else if (eventName === "bet_placed" || eventName === "bet") {
+    const marketId = topics[1] ?? data.market_id ?? data[0];
+    const bettor = topics[2] ?? data.bettor ?? data.user ?? data[1];
+    const netAmount = data.net_amount ?? data.amount ?? data.net ?? data[2] ?? 0;
+    const grossAmount = data.gross_amount ?? data.gross ?? netAmount;
+    const isYes = data.is_yes ?? data[3] ?? true;
+
+    await pool.query(
+      `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (market_id, bettor) DO UPDATE\n       SET net_amount = bets.net_amount + EXCLUDED.net_amount,\n           gross_amount = bets.gross_amount + EXCLUDED.gross_amount`,
+      [marketId, bettor, netAmount, grossAmount, isYes]
+    );
+  }
+}
+
+// Historical backfill main entry point
+export async function runBackfill(): Promise<number> {
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+
+  console.log(`[backfill] Fetching current network head ledger...`);
+  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
+    return await server.getLatestLedger();
+  });
+  const headLedger = latestLedgerResponse.sequence;
+
+  console.log(`[backfill] Network head ledger is ${headLedger}. Starting backfill from ${config.START_LEDGER}...`);
+
+  // Proactively check retention boundary if getHealth is supported
+  if (typeof (server as any).getHealth === "function") {
+    try {
+      const health = await (server as any).getHealth();
+      const oldestLedger = Number(health?.oldestLedger);
+      if (!isNaN(oldestLedger)) {
+        if (config.START_LEDGER < oldestLedger) {
+          const { message, unavailableRange } = formatRetentionExceededMessage(config.START_LEDGER, oldestLedger);
+          console.error(message);
+          throw new RetentionExceededError(config.START_LEDGER, oldestLedger, message, unavailableRange);
+        }
+        await checkRetentionBoundary(server, config.START_LEDGER, DEFAULT_RETENTION_ALERT_THRESHOLD);
+      }
+    } catch (err) {
+      if (err instanceof RetentionExceededError) throw err;
+    }
+  }
+
+  await ensureDeadLetterTable();
+
+  let currentLedger = config.START_LEDGER;
+  let cursor: string | undefined = undefined;
+
+  while (currentLedger <= headLedger) {
+    const request: rpc.Api.GetEventsRequest = cursor
+      ? {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          cursor,
+          limit: config.EVENTS_PER_PAGE,
+        }
+      : {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          startLedger: currentLedger,
+          limit: config.EVENTS_PER_PAGE,
+        };
+
+    console.log(
+      `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
+    );
+
+    let response: rpc.Api.GetEventsResponse;
+    try {
+      response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
+        return await server.getEvents(request);
+      });
+    } catch (err: any) {
+      if (isRetentionExceededError(err)) {
+        const msg = err instanceof Error ? err.message : String(err);
+        let oldestLedger = extractOldestLedger(msg);
+        if (oldestLedger === null && typeof (server as any).getHealth === "function") {
+          try {
+            const health = await (server as any).getHealth();
+            oldestLedger = Number(health?.oldestLedger);
+          } catch {}
+        }
+        const { message, unavailableRange } = formatRetentionExceededMessage(currentLedger, oldestLedger);
+        console.error(message);
+        throw new RetentionExceededError(currentLedger, oldestLedger, message, unavailableRange);
+      }
+      throw err;
+    }
+    const events = response.events || [];
+
+    if (events.length === 0) {
+      console.log(`[backfill] Page returned 0 events. latestLedger=${response.latestLedger}`);
+      if (response.latestLedger >= headLedger) {
+        currentLedger = response.latestLedger;
+        break;
+      }
+      currentLedger = response.latestLedger + 1;
+      cursor = undefined; // reset cursor as we are advancing startLedger
+      continue;
+    }
+
+    console.log(`[backfill] Processing ${events.length} events...`);
+    const pageStartMem = sampleMemoryUsage();
+    await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
+      let topics: any[];
+      let data: any;
+      try {
+        topics = event.topic.map((t: any) => scValToNative(t));
+        data = scValToNative(event.value);
+      } catch (err) {
+        console.error(`[backfill] Failed to decode event: `, err);
+        await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
+        return;
+      }
+      await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
+    });
+    const pageEndMem = sampleMemoryUsage();
+    console.log(
+      `[backfill] Page memory: heapUsed=${(pageEndMem.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+      `rss=${(pageEndMem.rss / 1024 / 1024).toFixed(1)}MB ` +
+      `heapDelta=${((pageEndMem.heapUsed - pageStartMem.heapUsed) / 1024 / 1024).toFixed(1)}MB`
+    );
+
+    const lastEventLedger = events[events.length - 1].ledger;
+    currentLedger = lastEventLedger;
+    cursor = response.cursor;
+
+    await checkRetentionBoundary(server, currentLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
+
+    console.log(`[backfill] Processed events up to ledger ${lastEventLedger}`);
+
+    if (lastEventLedger >= headLedger) {
+      break;
+    }
+  }
+
+  console.log(`[backfill] Completed backfill up to ledger ${currentLedger}`);
+  return currentLedger;
+}

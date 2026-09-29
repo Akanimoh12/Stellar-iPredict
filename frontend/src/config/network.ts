@@ -10,6 +10,11 @@
 
 const isTestnet = process.env.NEXT_PUBLIC_NETWORK === "testnet";
 
+// ── Backend Configuration ─────────────────────────────────────────────────────
+// Toggle between direct-RPC and backend reads.
+// Set NEXT_PUBLIC_USE_BACKEND=true to route reads through the backend API.
+export const USE_BACKEND = process.env.NEXT_PUBLIC_USE_BACKEND === "true";
+
 /**
  * Resolve the Soroban RPC URL the SDK talks to.
  *
@@ -53,7 +58,9 @@ export const NETWORK = {
     (isTestnet
       ? "Test SDF Network ; September 2015"
       : "Public Global Stellar Network ; September 2015"),
-  sorobanUrl: resolveSorobanUrl(),
+  get sorobanUrl() {
+    return resolveSorobanUrl();
+  },
   // Friendbot only exists on testnet — undefined on mainnet (not used)
   friendbotUrl: isTestnet
     ? (process.env.NEXT_PUBLIC_FRIENDBOT_URL || "https://friendbot.stellar.org")

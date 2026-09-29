@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createRateLimiter } from "@/services/limiter";
 
 /**
  * ── Soroban RPC Proxy ────────────────────────────────────────────────────────
@@ -117,25 +118,14 @@ function pruneCache(now: number) {
   }
 }
 
-// ── Per-IP rate limiting (sliding window, per edge instance) ──────────────────
+// ── Per-IP rate limiting (fixed window, per edge instance) ────────────────────
+// The limiter itself lives in services/limiter.ts so it can be unit-tested and
+// reused; here we only pick the budget.
 
-interface RateState {
-  count: number;
-  resetAt: number;
-}
-const RATE = new Map<string, RateState>();
 const RATE_LIMIT = 60; // requests
 const RATE_WINDOW_MS = 10_000; // per 10s per IP  → ~6 req/s sustained per client
 
-function rateLimited(ip: string, now: number): boolean {
-  const st = RATE.get(ip);
-  if (!st || now > st.resetAt) {
-    RATE.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return false;
-  }
-  st.count += 1;
-  return st.count > RATE_LIMIT;
-}
+const limiter = createRateLimiter({ limit: RATE_LIMIT, windowMs: RATE_WINDOW_MS });
 
 // ── Origin check ──────────────────────────────────────────────────────────────
 
@@ -173,10 +163,20 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
-  if (rateLimited(ip, now)) {
+  const rate = limiter.check(ip, now);
+  if (!rate.allowed) {
     return NextResponse.json(
       { error: "Rate limit exceeded" },
-      { status: 429 }
+      {
+        status: 429,
+        headers: {
+          // Standard hints so clients back off instead of hammering us harder.
+          "retry-after": String(Math.ceil(rate.retryAfterMs / 1000)),
+          "x-ratelimit-limit": String(rate.limit),
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(Math.ceil(rate.resetAt / 1000)),
+        },
+      }
     );
   }
 

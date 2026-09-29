@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { resolveFreshnessPolicy } from "../src/adapters/freshness.js";
 import {
   NormalizationError,
   normalizeCrypto,
+  normalizeCryptoQuote,
   normalizePolitics,
   normalizeScience,
   normalizeSports,

@@ -280,6 +280,41 @@ jobs:
           path: indexer/coverage/
           retention-days: 5
 
+  # ─── Job: Cross-package suite (backend + indexer + smoke suite) ─────────────
+  # `test/` at the repository root is the only place that can import from both
+  # backend and indexer, so it is the only place the full
+  # contract → indexer → database → API precision path and the deployment smoke
+  # suite can be tested. It has its own job rather than riding along with one
+  # workspace so a failure here is not mistaken for a backend-only regression.
+  cross-package-check:
+    name: Cross-package (Node 20)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.3
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build @ipredict/shared
+        run: npm run build --workspace=@ipredict/shared
+
+      - name: Run cross-package tests
+        # Runs the i128 precision boundaries and the smoke suite's own tests.
+        # No Postgres or Redis: every database is a fake, by design.
+        run: npm run test:cross
+
+      - name: Smoke suite lists cleanly
+        # The CLI must stay runnable as a deployment gate.
+        run: npm run smoke:list
+
   # ─── Job 6: Database package & Migration Idempotency check ───────────────────
   db-migrations-check:
     name: DB & Migration Runner (Postgres 16)

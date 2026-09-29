@@ -11,6 +11,10 @@ Common conventions
   resolve the value closest to that timestamp (used to resolve price at exact
   market deadline UTC). If a provider doesn't support historical queries the
   adapter will fall back to a current price query and document the limitation.
+- Price adapters check how old a quote is before trusting it, and downweight or
+  reject one that is too old. See `docs/ORACLE_ADAPTER_FRESHNESS.md` for the
+  per-provider support matrix, the per-adapter bounds, and the list of adapters
+  the check does **not** cover.
 
 Adapters
 --------
@@ -21,6 +25,9 @@ Adapters
     Uses `/coins/{id}/market_chart/range` when `params.at` is present (queries a
     small window around the timestamp and picks the closest point). Falls back
     to `/simple/price` when no historical point is available.
+  - Freshness: `last_updated_at` on the live path, and the selected point's own
+    timestamp on the historical path. A historical quote is judged against the
+    instant `params.at` asked for, not against the wall clock.
   - Quota: Free tier is rate-limited; the adapter respects retry/backoff and
     supports an optional API key header. Keep calls infrequent and prefer the
     `rateLimiter` and `responseCache` wrappers when resolving many markets.
@@ -31,6 +38,7 @@ Adapters
     endpoints on paid tiers; current implementation uses the current price
     endpoint. If historical resolution is required for deadlines, prefer
     `coingecko` or record a fixture.
+  - Freshness: `last_updated_timestamp` / `last_updated` on each quote.
   - Quota: Strict rate limits on free tiers. API key required for higher
     request volumes.
 
@@ -39,6 +47,9 @@ Adapters
   - Mapping: expects `params.symbol` to be a Binance trading pair (e.g.
     `BTCUSDT`). Binance supports klines / historical samples which adapters may
     use to select the price at a specific millisecond timestamp.
+  - Freshness: uses `/api/v3/ticker/24hr` and its `closeTime`. The shorter
+    `/api/v3/ticker/price` endpoint carries no timestamp at all, so freshness
+    would be unverifiable there.
   - Quota: Binance has per-endpoint weight limits; use `rateLimiter`.
 
 - `reuters` (Reuters/NLP feed)

@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { CoinMarketCapAdapter } from "../src/adapters/coinmarketcap.js";
+import { resolveFreshnessPolicy } from "../src/adapters/freshness.js";
 import type { Market } from "../src/adapters/index.js";
 
-// Recorded shape of a real `GET /v2/cryptocurrency/quotes/latest?symbol=BTC` response (trimmed).
+/** Recorded shape of a real `GET /v2/cryptocurrency/quotes/latest?symbol=BTC` response (trimmed). */
 const CMC_FIXTURE = {
   data: {
     BTC: [
       {
         quote: {
-          USD: { price: 52341.18 },
+          USD: {
+            price: 52341.18,
+            last_updated_timestamp: 1_735_775_999,
+            last_updated: "2025-01-15T23:59:59.000Z",
+          },
         },
       },
     ],
@@ -28,6 +33,26 @@ function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+/** The fixture re-stamped `ageMs` in the past, relative to the frozen clock. */
+function fixtureAt(now: number, ageMs: number) {
+  const observedAt = now - ageMs;
+  return {
+    data: {
+      BTC: [
+        {
+          quote: {
+            USD: {
+              price: 52341.18,
+              last_updated_timestamp: Math.floor(observedAt / 1000),
+              last_updated: new Date(observedAt).toISOString(),
+            },
+          },
+        },
+      ],
+    },
+  };
+}
+
 describe("CoinMarketCapAdapter", () => {
   it("requires an apiKey to construct", () => {
     expect(() => new CoinMarketCapAdapter({ apiKey: "" })).toThrow(/apiKey/);
@@ -40,7 +65,9 @@ describe("CoinMarketCapAdapter", () => {
   });
 
   it("maps the market symbol to a quotes query with the API key header and resolves gte outcomes", async () => {
-    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(CMC_FIXTURE));
+    const now = Date.now();
+    const body = fixtureAt(now, 1_000);
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(body));
     const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
 
     const result = await adapter.fetchOutcome(createMarket());
@@ -52,11 +79,79 @@ describe("CoinMarketCapAdapter", () => {
         headers: expect.objectContaining({ "X-CMC_PRO_API_KEY": "test-key" }),
       }),
     );
-    expect(result).toEqual({ outcome: true, confidence: 1, raw: CMC_FIXTURE });
+    expect(result.outcome).toBe(true);
+    expect(result.confidence).toBe(1);
+    expect(result.raw).toBe(body);
+  });
+
+  it("reads the provider's own timestamp rather than assuming the request time", async () => {
+    const now = Date.now();
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAt(now, 2_000)));
+    const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
+
+    const result = await adapter.fetchOutcome(createMarket());
+
+    expect(result.freshness).toEqual({
+      status: "fresh",
+      ageMs: expect.any(Number),
+      observedAtMs: expect.any(Number),
+      maxAgeMs: resolveFreshnessPolicy().maxAgeMs,
+    });
+  });
+
+  it("downweights a stale quote rather than resolving it at full confidence", async () => {
+    const now = Date.now();
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAt(now, 45_000)));
+    const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
+
+    const result = await adapter.fetchOutcome(createMarket());
+
+    expect(result.outcome).toBe(true);
+    expect(result.confidence).toBe(0.5);
+    expect(result.freshness?.status).toBe("stale");
+  });
+
+  it("rejects a quote past the hard freshness bound", async () => {
+    const now = Date.now();
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAt(now, 600_000)));
+    const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
+
+    await expect(adapter.fetchOutcome(createMarket())).rejects.toThrow(/freshness bound/);
+  });
+
+  it("downweights a quote the provider sent without a timestamp", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      jsonResponse({ data: { BTC: [{ quote: { USD: { price: 52341.18 } } }] } }),
+    );
+    const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
+
+    const result = await adapter.fetchOutcome(createMarket());
+
+    expect(result.confidence).toBe(0.5);
+    expect(result.freshness?.status).toBe("untimestamped");
+  });
+
+  it("applies a per-adapter freshness bound from configuration", async () => {
+    const now = Date.now();
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAt(now, 45_000)));
+    const adapter = new CoinMarketCapAdapter({
+      apiKey: "test-key",
+      fetchFn,
+      env: {
+        ORACLE_COINMARKETCAP_FRESHNESS_MAX_AGE_MS: "600000",
+        ORACLE_COINMARKETCAP_FRESHNESS_STALE_AFTER_MS: "120000",
+        ORACLE_BINANCE_FRESHNESS_STALE_AFTER_MS: "1000",
+      },
+    });
+
+    const result = await adapter.fetchOutcome(createMarket());
+
+    expect(result.confidence).toBe(1);
   });
 
   it("resolves lte threshold outcomes as false when price is above threshold", async () => {
-    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(CMC_FIXTURE));
+    const now = Date.now();
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAt(now, 1_000)));
     const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
 
     const result = await adapter.fetchOutcome(
@@ -67,10 +162,11 @@ describe("CoinMarketCapAdapter", () => {
   });
 
   it("retries on a 5xx error and succeeds on a later attempt", async () => {
+    const now = Date.now();
     const fetchFn = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 503))
-      .mockResolvedValueOnce(jsonResponse(CMC_FIXTURE));
+      .mockResolvedValueOnce(jsonResponse(fixtureAt(now, 1_000)));
     const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn, retryBackoffMs: 1 });
 
     const result = await adapter.fetchOutcome(createMarket());

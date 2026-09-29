@@ -366,6 +366,7 @@ CREATE INDEX idx_events_ledger   ON events(ledger_seq DESC);
 import { rpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 
 const POLL_INTERVAL_MS = 5_000;
+// Capped at 1000 (MAX_EVENTS_PER_PAGE) to bound backfill memory usage.
 const EVENTS_PER_PAGE = 200;
 
 async function indexEvents(fromLedger: number): Promise<number> {
@@ -379,10 +380,16 @@ async function indexEvents(fromLedger: number): Promise<number> {
     limit: EVENTS_PER_PAGE
   });
 
-  for (const event of response.events) {
-    const topics = event.topic.map(t => scValToNative(t));
-    const data = scValToNative(event.value);
-    await writeEventToDb(event.ledger, event.txHash, topics, data);
+  // Process in chunks to bound memory and yield to the event loop.
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < response.events.length; i += CHUNK_SIZE) {
+    const chunk = response.events.slice(i, i + CHUNK_SIZE);
+    for (const event of chunk) {
+      const topics = event.topic.map(t => scValToNative(t));
+      const data = scValToNative(event.value);
+      await writeEventToDb(event.ledger, event.txHash, topics, data);
+    }
+    await new Promise(resolve => setImmediate(resolve));
   }
 
   return response.latestLedger;

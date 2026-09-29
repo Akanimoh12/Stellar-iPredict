@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  shutdown,
   queryWithCancel,
   QueryCancelledError,
   type CancellablePool,
@@ -208,3 +209,13 @@ describe("queryWithCancel", () => {
 function flushMicrotasks(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+it("shutdown does not initialize an unused database pool", async () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  try {
+    await expect(shutdown()).resolves.toBeUndefined();
+  } finally {
+    if (databaseUrl !== undefined) process.env.DATABASE_URL = databaseUrl;
+  }
+});

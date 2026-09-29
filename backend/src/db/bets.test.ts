@@ -70,4 +70,3 @@ describe('getBetsByBettor', () => {
     expect(typeof result[0].net_amount).toBe('string');
   });
 });
-

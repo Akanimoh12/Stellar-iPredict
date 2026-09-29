@@ -21,6 +21,12 @@ export interface PollDb {
   getCheckpointLedger(): Promise<number | null>;
   saveCheckpointLedger(ledger: number): Promise<void>;
   insertEvents(events: RpcEvent[]): Promise<void>;
+  /**
+   * Optional atomic persistence of events and checkpoint ledger in a single transaction.
+   * If provided, pollOnce will use this to ensure cursor position and event effects
+   * commit atomically.
+   */
+  processEventsWithCheckpoint?(events: RpcEvent[], checkpointLedger: number): Promise<void>;
 }
 
 export interface PollOnceConfig {
@@ -47,11 +53,20 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
 
   const { events, latestLedger } = await rpc.getEvents({ startLedger, contractIds });
 
-  if (events.length > 0) {
-    await db.insertEvents(events);
-  }
+  if (typeof db.processEventsWithCheckpoint === "function") {
+    // Atomic commit: cursor advances in the same transaction as the event effects
+    await db.processEventsWithCheckpoint(events, latestLedger);
+  } else {
+    // Deliberate ordering for at-least-once processing:
+    // Process event effects FIRST, then advance cursor SECOND.
+    // If a crash happens between the two, events are reprocessed on recovery
+    // rather than permanently skipped (idempotent handlers guarantee no duplicates).
+    if (events.length > 0) {
+      await db.insertEvents(events);
+    }
 
-  await db.saveCheckpointLedger(latestLedger);
+    await db.saveCheckpointLedger(latestLedger);
+  }
 
   // Compute and update indexer lag metric
   const lag = latestLedger - (checkpoint ?? defaultStartLedger);

@@ -6,7 +6,7 @@ export interface ParsedAuditArgs {
   format: AuditFormat;
 }
 
-/** Parses `--format <csv|json>` from CLI argv, defaulting to JSON. */
+/** Parses `--format <csv|json|raw-csv>` from CLI argv, defaulting to JSON. */
 export function parseAuditArgs(argv: readonly string[]): ParsedAuditArgs {
   let format: AuditFormat = "json";
 
@@ -15,8 +15,8 @@ export function parseAuditArgs(argv: readonly string[]): ParsedAuditArgs {
     if (flag === "--format") {
       const raw = argv[++i];
       const value = raw?.toLowerCase();
-      if (value === "csv" || value === "json") format = value;
-      else throw new Error(`--format must be "csv" or "json", got "${raw ?? ""}"`);
+      if (value === "csv" || value === "json" || value === "raw-csv") format = value;
+      else throw new Error(`--format must be "csv", "json" or "raw-csv", got "${raw ?? ""}"`);
     }
   }
 

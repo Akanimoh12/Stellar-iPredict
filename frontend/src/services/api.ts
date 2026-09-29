@@ -160,7 +160,7 @@ function createDataSource(useBackend: boolean): ApiDataSource {
   return {
     getMarkets(query = {}) {
       return request<MarketsResponse>(
-        `/api/markets${queryString(query)}`,
+        `/api/markets${queryString({ ...query })}`,
         useBackend
       );
     },
@@ -174,7 +174,7 @@ function createDataSource(useBackend: boolean): ApiDataSource {
 
     getLeaderboard(query = {}) {
       return request<LeaderboardResponse>(
-        `/api/leaderboard${queryString(query)}`,
+        `/api/leaderboard${queryString({ ...query })}`,
         useBackend
       );
     },

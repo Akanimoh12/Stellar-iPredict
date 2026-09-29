@@ -500,3 +500,83 @@ describe("GET /api/markets/:id — cancellation on client disconnect (#475)", ()
     await server.close();
   });
 });
+
+describe("GET /api/markets/unmappable (issue #745)", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  function candidate(overrides: Partial<{ id: string; question: string; category: string; end_time: string }> = {}) {
+    return {
+      id: "1",
+      question: "Will NOPE reach $1?",
+      // Title case, as `markets.category` stores it.
+      category: "Crypto",
+      end_time: String(nowSec + 3600),
+      ...overrides,
+    };
+  }
+
+  it("returns open, un-cancelled markets ordered by soonest expiry", async () => {
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [candidate({ id: "expired-1", end_time: String(nowSec - 7200) }), candidate({ id: "soon" })],
+    });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    // Static route must not be swallowed by /api/markets/:id.
+    expect(queryMock.mock.calls[0][0]).toContain("resolved = false");
+    expect(queryMock.mock.calls[0][0]).toContain("cancelled = false");
+    expect(queryMock.mock.calls[0][0]).toContain("ORDER BY end_time ASC");
+    expect(body.checked).toBe(2);
+    expect(body.candidates[0].id).toBe("expired-1");
+    expect(body.candidates[1].id).toBe("soon");
+    expect(body.windowSeconds).toBeGreaterThan(0);
+    expect(body.checkedAt).toBeTruthy();
+  });
+
+  it("returns the storage-form category the sweep needs, not a normalised one", async () => {
+    // The oracle normalises "Crypto" → "crypto" itself. Doing it here would
+    // hide a mismatch in the two definitions rather than surfacing it.
+    const queryMock = vi.fn().mockResolvedValue({ rows: [candidate()] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/unmappable" })).json();
+
+    expect(body.candidates[0].category).toBe("Crypto");
+  });
+
+  it("returns an empty list, not an error, when everything is resolvable", async () => {
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows: [] }) as Queryable["query"],
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().candidates).toEqual([]);
+    expect(response.json().checked).toBe(0);
+  });
+
+  it("includes past-expiry markets by default, since those hold the most at risk", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/unmappable" })).json();
+
+    expect(body.includePastExpiry).toBe(true);
+    // $1 is the `includePastExpiry` boolean; the OR must admit past expiries.
+    expect(queryMock.mock.calls[0][1]?.[0]).toBe(true);
+  });
+
+  it("is cached briefly — it drives a sweep, not a user-facing view", async () => {
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows: [] }) as Queryable["query"],
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.headers["cache-control"]).toBe("public, max-age=60");
+  });
+});

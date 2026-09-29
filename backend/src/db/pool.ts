@@ -146,7 +146,8 @@ export async function getClient(): Promise<PoolClient> {
 }
 
 export async function shutdown(): Promise<void> {
-  await getPool().end();
+  // Shutdown must not create a lazy pool (or require configuration) just to close it.
+  await _pool?.end();
 }
 
 process.on("SIGTERM", shutdown);

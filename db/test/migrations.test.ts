@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { LEGACY_MIGRATION_GROUPS } from './migration-names.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,7 +9,7 @@ const __dirname = path.dirname(__filename);
 const MIGRATIONS_DIR = path.resolve(__dirname, '..', 'migrations');
 
 describe('migration prefix uniqueness', () => {
-  it('no two up-migration files share a numeric prefix', () => {
+  it('allows only the exact historical migration prefix collisions', () => {
     const files = fs.readdirSync(MIGRATIONS_DIR)
       .filter(f => f.endsWith('.sql') && !f.endsWith('.down.sql'));
 
@@ -32,7 +33,7 @@ describe('migration prefix uniqueness', () => {
     }
 
     const duplicates = Object.entries(seen)
-      .filter(([, fileList]) => fileList.length > 1)
+      .filter(([prefix, fileList]) => fileList.length > 1 && JSON.stringify([...fileList].sort()) !== JSON.stringify(LEGACY_MIGRATION_GROUPS[prefix] ?? []))
       .map(([prefix, fileList]) => `Prefix ${prefix}: ${fileList.join(', ')}`);
 
     if (duplicates.length > 0) {

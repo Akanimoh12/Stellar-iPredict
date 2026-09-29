@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
-import { buildServer } from "../src/server.js";
+import { buildServer } from "../server.js";
 
 // ---------------------------------------------------------------------------
 // Contract tests — verify that API response shapes match the types the

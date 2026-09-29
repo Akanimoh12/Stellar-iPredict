@@ -11,7 +11,7 @@ import {
   createEphemeralPostgres,
   isPostgresServerAvailable,
   type EphemeralPostgres,
-} from "./db.js";
+} from "../../test/db.js";
 
 const serverAvailable = await isPostgresServerAvailable();
 
@@ -107,7 +107,7 @@ describe.skipIf(!serverAvailable)("ephemeral Postgres bootstrap", () => {
   it("is safe to re-run migrations against an already migrated database", async () => {
     // Imported lazily inside the describe block so the top-level doesn't pull
     // the full app in when the suite is skipped.
-    const { runMigrations } = await import("./setup.js");
+    const { runMigrations } = await import("../../test/setup.js");
     await expect(runMigrations(db.pool)).resolves.toBeUndefined();
 
     const { rows } = await db.pool.query<{ count: string }>(

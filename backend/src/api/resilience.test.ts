@@ -17,13 +17,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Redis } from "ioredis";
 
-import { getOrSet } from "../src/cache/cacheAside.js";
-import { statsKey } from "../src/cache/cacheKeys.js";
-import { createTestRedis } from "../src/test/fakeRedis.js";
-import { createFakePool } from "../src/test/fakePool.js";
+import { getOrSet } from "../cache/cacheAside.js";
+import { statsKey } from "../cache/cacheKeys.js";
+import { createTestRedis } from "../test/fakeRedis.js";
+import { createFakePool } from "../test/fakePool.js";
 
 // PostgreSQL is unreachable for every suite in this file.
-vi.mock("../src/db/pool.js", () => ({
+vi.mock("../db/pool.js", () => ({
   pool: {
     query: vi.fn(async () => {
       throw new Error("ECONNREFUSED");
@@ -49,9 +49,9 @@ vi.mock("ioredis", async (importOriginal) => {
   };
 });
 
-import { pingDb } from "../src/db/health.js";
-import { pingRedis } from "../src/db/redis.js";
-import { buildServer } from "../src/server.js";
+import { pingDb } from "../db/health.js";
+import { pingRedis } from "../db/redis.js";
+import { buildServer } from "../server.js";
 
 function failingPool(): never {
   throw new Error("Database is unreachable");

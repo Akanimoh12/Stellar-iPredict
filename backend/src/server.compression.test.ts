@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "@/server";
-import { createFakePool } from "../test/fakePool.js";
+import { createFakePool } from "./test/fakePool.js";
 
 let server: FastifyInstance | undefined;
 

@@ -431,6 +431,68 @@ systemctl restart ipredict-aggregator
 systemctl status ipredict-aggregator
 ```
 
+#### Council Deadline Exceeded
+
+**Symptom:** An escalated market has passed its `council_deadline` without reaching quorum (4-of-7 votes).
+
+**Diagnosis:**
+```bash
+# Check for markets past deadline
+psql $DATABASE_URL -c "
+  SELECT market_id, escalated_at, council_deadline,
+         NOW() as current_time,
+         EXTRACT(EPOCH FROM (NOW() - council_deadline))/3600 as hours_past_deadline
+  FROM oracle_disputes
+  WHERE status = 'escalated' AND council_deadline < NOW()
+  ORDER BY council_deadline ASC;
+"
+
+# Check council votes for the market
+psql $DATABASE_URL -c "
+  SELECT member, outcome, submitted_at
+  FROM council_votes
+  WHERE market_id = '<market-id>'
+  ORDER BY submitted_at ASC;
+"
+```
+
+**Impact:** High severity — the market and its escrowed bonds are in limbo indefinitely. Neither the submitter nor challenger can recover their bonds, and the market cannot be resolved.
+
+**Fallback Options (Governance Decision Required):**
+
+The fallback behavior is a governance decision, not purely technical. The following options have different consequences for bond holders:
+
+1. **Admin Force-Resolution** (recommended for clear-cut cases):
+   - An authorized admin calls `resolve_market()` with the correct outcome
+   - Bonds are distributed according to the resolution rules
+   - Requires consensus on the correct outcome from available data
+   - Consequence: One party loses their bond, but funds are unlocked
+
+2. **Market Cancellation** (recommended for ambiguous cases):
+   - An authorized admin cancels the market via the contract
+   - Both parties receive their bonds back
+   - Consequence: No one loses funds, but no resolution is reached
+   - May require recreating the market if resolution is still needed
+
+3. **Council Extension** (temporary measure):
+   - If the deadline was missed due to technical issues, consider extending the window
+   - Requires protocol owner intervention to update the deadline
+   - Consequence: Gives council more time to vote, but delays resolution
+
+**Decision Process:**
+1. Determine why the council failed to reach quorum (technical issue vs. lack of participation)
+2. Assess whether the outcome is objectively determinable from available data
+3. Choose the fallback option based on the situation:
+   - Clear outcome + technical failure → Admin force-resolution
+   - Ambiguous outcome + technical failure → Market cancellation
+   - Lack of participation → Council extension (if time allows) or cancellation
+4. Execute the chosen fallback via the appropriate governance mechanism (council multisig, protocol owner, etc.)
+
+**Prevention:**
+- The monitor alerts when a deadline is approaching (default: 12 hours before)
+- Use this alert to contact inactive council members before the deadline passes
+- Review council participation regularly and replace inactive members
+
 ---
 
 ## Security Best Practices
@@ -564,6 +626,22 @@ The review is not closed until every SEV1 action item is done.
 
 ## Monitoring & Alerts
 
+### Council Deadline Monitoring
+
+The monitor tracks the council voting window and raises alerts at two stages:
+
+1. **Deadline Approaching** (`oracle.monitor.council_deadline_approaching`):
+   - Triggered when an escalated market has less than 12 hours remaining before its `council_deadline`
+   - Only fires if the market has no council votes yet
+   - Purpose: Give operators time to contact inactive council members
+
+2. **Deadline Exceeded** (`oracle.monitor.council_window_exceeded`):
+   - Triggered when an escalated market has passed its `council_deadline` without reaching quorum
+   - Indicates a governance decision is needed (see troubleshooting section)
+   - Purpose: Force action to prevent indefinite limbo
+
+The deadline is populated when a dispute escalates (via the `OracleEscalatedEvent`), which sets `oracle_disputes.council_deadline` to `escalated_at + COUNCIL_WINDOW_SECONDS` (default: 72 hours).
+
 ### Key Metrics
 
 | Metric | Threshold | Action |
@@ -573,6 +651,8 @@ The review is not closed until every SEV1 action item is done.
 | **Conflict rate** | > 30% dissent | Review data sources |
 | **Aggregator uptime** | < 99% | Investigate crashes |
 | **Submission rate** | < 4 per expired market | Contact inactive members |
+| **Council deadline approaching** | < 12 hours remaining | Alert council members |
+| **Council deadline exceeded** | Deadline passed | Initiate fallback procedure |
 
 ### Prometheus Metrics
 
@@ -613,6 +693,20 @@ groups:
           severity: warning
         annotations:
           summary: "High conflict rate in council votes"
+
+      - alert: CouncilDeadlineApproaching
+        expr: council_deadline - time() < 43200  # 12 hours
+        labels:
+          severity: warning
+        annotations:
+          summary: "Council deadline approaching for market {{ $labels.market_id }}"
+
+      - alert: CouncilDeadlineExceeded
+        expr: time() - council_deadline > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Council deadline exceeded for market {{ $labels.market_id }}"
 ```
 
 ---

@@ -12,7 +12,7 @@ export type AlertType =
   | "oracle.monitor.bond_below_minimum"
   | "oracle.monitor.council_inactive"
   | "oracle.monitor.council_window_exceeded"
-  | "oracle.monitor.council_deadline_approaching";
+  | "oracle.monitor.council_deadline_approaching"
   | "oracle.adapter.stale_data";
 
 export interface Alert {

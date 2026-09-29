@@ -12,7 +12,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test:contract": "vitest run test/contract.test.ts test/contract-helpers.test.ts test/frontend-contract.test.ts"
+    "test:contract": "vitest run src/api/contract.test.ts src/api/contract-helpers.test.ts src/api/frontend-contract.test.ts"
   },
   "dependencies": {
     "@ipredict/shared": "*",

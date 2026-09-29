@@ -29,18 +29,27 @@ for the full design.
 ```
 backend/
   src/
-    api/         route handlers (markets, leaderboard, stats, oracle)
-    db/          query layer (shared schema lives in ../db migrations)
-    cache/       Redis client + cache helpers
-    config/      env loading & validation
-    lib/         shared utilities
-    server.ts    Fastify bootstrap
+    api/         route handlers and colocated tests (*.test.ts)
+    db/          query layer and colocated tests (*.test.ts)
+    cache/       Redis client, cache helpers and colocated tests (*.test.ts)
+    config/      env loading, validation and colocated tests (*.test.ts)
+    lib/         shared utilities and colocated tests (*.test.ts)
+    server.ts    Fastify bootstrap and colocated test
     index.ts     entrypoint
-  test/
+  test/          shared test setup, helpers (setup.ts, db.ts, contract-helpers.ts) & load testing
   package.json
   tsconfig.json
   .env.example
 ```
+
+## Testing Convention
+
+All backend tests follow a single, unified convention:
+- **Colocation beside sources**: Tests live directly beside the modules they verify in `src/**/*.test.ts` (e.g. `src/api/markets.test.ts`, `src/db/markets.test.ts`, `src/lib/pagination.test.ts`).
+- **No separate `__tests__` directories**: Standalone test folders like `src/__tests__/` and `src/db/__tests__/` are deprecated and consolidated into colocated `*.test.ts` files.
+- **Shared test doubles & harnesses**: Global setup and database/bootstrap fixtures live in `src/test/` (e.g., `fakePool.ts`, `fakeRedis.ts`, `vitest.setup.ts`) and `test/` (e.g., `setup.ts`, `db.ts`).
+- **Vitest configuration**: Vitest is configured to run `include: ["src/**/*.test.ts"]`.
+
 
 ## Getting started
 
@@ -351,7 +360,7 @@ All 16 documented operations have a response validated with AJV 2020, including
 oracle authentication failures. Database queries and dependency probes use test
 doubles; route handlers, query modules, serialization, and error handling remain
 real. The route inventory assertion requires a new case whenever an operation is
-added. Existing frontend shape contracts remain in `test/frontend-contract.test.ts`.
+added. Existing frontend shape contracts remain in `src/api/frontend-contract.test.ts`.
 
 Every exercised response is compared recursively with its handler payload captured
 before serialization. Mutation tests add an undeclared field to market and bet rows

@@ -1,10 +1,21 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { seedBets, clearBets } from "@/db/bets";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
-  upsertLeaderboardEntry,
-  clearLeaderboard,
-} from "@/db/leaderboard";
-import { getPlatformStats, type PlatformStats } from "@/db/stats";
+  getGlobalStats,
+  getPlatformStats,
+  GLOBAL_STATS_QUERY,
+  type PlatformStats,
+  type Queryable,
+} from "./stats.js";
+import { seedBets, clearBets } from "./bets.js";
+import { upsertLeaderboardEntry, clearLeaderboard } from "./leaderboard.js";
+
+function makeQueryable(
+  handler: (sql: string, values?: unknown[]) => Promise<{ rows: unknown[] }>
+): Queryable {
+  return {
+    query: vi.fn(handler),
+  } as unknown as Queryable;
+}
 
 function emptyStats(): PlatformStats {
   return {
@@ -28,13 +39,95 @@ function emptyStats(): PlatformStats {
   };
 }
 
+describe("getGlobalStats", () => {
+  it("computes live aggregates from database rows matching a seeded fixture", async () => {
+    const db = makeQueryable(async (sql) => {
+      expect(sql).toContain("FROM markets");
+      expect(sql).toContain("FROM leaderboard");
+      expect(sql).toContain("FROM bets");
+      return {
+        rows: [
+          {
+            total_markets: "3",
+            total_volume: "6450.0000000",
+            total_users: "3",
+            total_bets: "4",
+          },
+        ],
+      };
+    });
+
+    const stats = await getGlobalStats(db);
+
+    expect(stats).toEqual({
+      totalMarkets: 3,
+      totalVolume: "6450.0000000",
+      volume: 6450n,
+      totalUsers: 3,
+      totalBets: 4,
+    });
+
+    expect(typeof stats.totalMarkets).toBe("number");
+    expect(typeof stats.totalVolume).toBe("string");
+    expect(typeof stats.volume).toBe("bigint");
+    expect(typeof stats.totalUsers).toBe("number");
+    expect(typeof stats.totalBets).toBe("number");
+  });
+
+  it("handles empty database state with zeroed values", async () => {
+    const db = makeQueryable(async () => ({
+      rows: [
+        {
+          total_markets: "0",
+          total_volume: "0",
+          total_users: "0",
+          total_bets: "0",
+        },
+      ],
+    }));
+
+    const stats = await getGlobalStats(db);
+
+    expect(stats).toEqual({
+      totalMarkets: 0,
+      totalVolume: "0",
+      volume: 0n,
+      totalUsers: 0,
+      totalBets: 0,
+    });
+  });
+
+  it("handles missing/null row gracefully", async () => {
+    const db = makeQueryable(async () => ({
+      rows: [],
+    }));
+
+    const stats = await getGlobalStats(db);
+
+    expect(stats).toEqual({
+      totalMarkets: 0,
+      totalVolume: "0",
+      volume: 0n,
+      totalUsers: 0,
+      totalBets: 0,
+    });
+  });
+
+  it("executes the expected aggregate SQL query", () => {
+    expect(GLOBAL_STATS_QUERY).toContain("SELECT (SELECT COUNT(*)::text FROM markets) AS total_markets");
+    expect(GLOBAL_STATS_QUERY).toContain("COALESCE(SUM(total_yes + total_no), 0)::text FROM markets");
+    expect(GLOBAL_STATS_QUERY).toContain("SELECT COUNT(DISTINCT address)::text FROM leaderboard");
+    expect(GLOBAL_STATS_QUERY).toContain("SELECT COUNT(*)::text FROM bets");
+  });
+});
+
 describe("getPlatformStats", () => {
   beforeEach(() => {
     clearBets();
     clearLeaderboard();
   });
 
-  it("returns empty stats when no data exists", () => {
+  it("returns empty stats when no in-memory data exists", () => {
     expect(getPlatformStats()).toEqual(emptyStats());
   });
 

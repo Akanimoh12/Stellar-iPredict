@@ -53,7 +53,7 @@ export interface BinanceAdapterOptions extends FetchWithRetryOptions {
  */
 export class BinanceAdapter implements DataAdapter {
   readonly id = "binance";
-  private readonly responseCache: AdapterResponseCache<AdapterOutcome>;
+  private readonly responseCache: AdapterResponseCache<{ price: number; body: BinanceTickerResponse; observedAtMs: number | null }>;
 
   private readonly fetchOptions: FetchWithRetryOptions;
   private readonly rateLimiter: ProviderRateLimiter;
@@ -77,16 +77,14 @@ export class BinanceAdapter implements DataAdapter {
     if (!isCryptoMarketParams(market.params)) {
       throw new Error(`BinanceAdapter cannot resolve market ${market.id}: missing/invalid crypto params`);
     }
-    const params = market.params;
-    return this.responseCache.getOrSet(marketCacheKey(market), async () => {
-      const { symbol, comparator, threshold } = params;
+    const { symbol, comparator, threshold } = market.params;
+
+    const cached = await this.responseCache.getOrSet(marketCacheKey(market), async () => {
       const url = `${BINANCE_TICKER_URL}?symbol=${encodeURIComponent(symbol)}`;
       await this.rateLimiter.acquire(this.id);
       const response = await fetchWithRetry(url, { method: "GET" }, this.fetchOptions);
       const body = (await response.json()) as BinanceTickerResponse;
 
-      // `lastPrice` is the 24h rolling-window price, the same value
-      // `/ticker/price` returns for the same symbol.
       const price = Number(body.lastPrice);
       if (!Number.isFinite(price)) {
         throw new Error(`BinanceAdapter received a non-numeric price for ${symbol}: ${String(body.lastPrice)}`);
@@ -94,37 +92,40 @@ export class BinanceAdapter implements DataAdapter {
 
       const now = Date.now();
       const observedAtMs = extractTimestampMs(body, TIMESTAMP_KEYS, now);
-      const freshness = assessQuote(observedAtMs, this.freshness, now);
-      recordQuoteStatus(this.id, freshness.status, now);
-
-      if (freshness.status === "expired") {
-        throw new StaleQuoteError(this.id, {
-          ageMs: freshness.ageMs ?? 0,
-          maxAgeMs: this.freshness.maxAgeMs,
-          observedAtMs: freshness.observedAtMs,
-        });
-      }
-
-      const { outcome, confidence } = normalizeCryptoQuote({
-        price,
-        threshold,
-        comparator,
-        observedAtMs,
-        freshness: this.freshness,
-        now,
-      });
-
-      return {
-        outcome,
-        confidence,
-        raw: body,
-        freshness: {
-          status: freshness.status,
-          ageMs: freshness.ageMs,
-          observedAtMs: freshness.observedAtMs,
-          maxAgeMs: this.freshness.maxAgeMs,
-        },
-      };
+      return { price, body, observedAtMs };
     });
+
+    const now = Date.now();
+    const freshness = assessQuote(cached.observedAtMs, this.freshness, now);
+    recordQuoteStatus(this.id, freshness.status, now);
+
+    if (freshness.status === "expired") {
+      throw new StaleQuoteError(this.id, {
+        ageMs: freshness.ageMs ?? 0,
+        maxAgeMs: this.freshness.maxAgeMs,
+        observedAtMs: freshness.observedAtMs,
+      });
+    }
+
+    const { outcome, confidence } = normalizeCryptoQuote({
+      price: cached.price,
+      threshold,
+      comparator,
+      observedAtMs: cached.observedAtMs,
+      freshness: this.freshness,
+      now,
+    });
+
+    return {
+      outcome,
+      confidence,
+      raw: cached.body,
+      freshness: {
+        status: freshness.status,
+        ageMs: freshness.ageMs,
+        observedAtMs: freshness.observedAtMs,
+        maxAgeMs: this.freshness.maxAgeMs,
+      },
+    };
   }
 }

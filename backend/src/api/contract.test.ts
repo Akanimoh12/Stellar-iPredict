@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 import type { FastifyInstance, InjectOptions } from "fastify";
-import { createFakePool } from "../src/test/fakePool.js";
+import { createFakePool } from "../test/fakePool.js";
 import { detectDroppedFields, getOpenApiSpec, validateResponseAgainstSpec } from "./contract-helpers.js";
+import {
+  PROTECTED_ROUTES,
+  PUBLIC_ROUTES,
+  ROUTE_AUTH_REGISTRY,
+  classifyFastifyRoutes,
+  assertAllRoutesClassified,
+} from "./index.js";
+import { buildServer } from "../server.js";
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
 // Exercise the real query modules, including routes that use the default pool.
@@ -15,18 +23,10 @@ vi.mock("pg", async importOriginal => {
     async connect() { return { query: mocks.query, release() {} }; }
   } };
 });
-vi.mock("../src/db/redis.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../src/db/redis.js")>(),
+vi.mock("../db/redis.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../db/redis.js")>(),
   pingRedis: vi.fn(async () => ({ ok: true })),
 }));
-import { buildServer } from "../src/server.js";
-import {
-  PROTECTED_ROUTES,
-  PUBLIC_ROUTES,
-  ROUTE_AUTH_REGISTRY,
-  classifyFastifyRoutes,
-  assertAllRoutesClassified,
-} from "../src/api/index.js";
 
 const address = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1)).publicKey();
 const market = { id: 1, question: "Will XLM reach $1?", image_url: null, category: "Crypto", end_time: "1770000000", total_yes: "10.0000000", total_no: "5.0000000", resolved: false, outcome: null, cancelled: false, creator: address, bet_count: 1, created_at: new Date("2026-01-01T00:00:00Z"), updated_at: new Date("2026-01-02T00:00:00Z") };

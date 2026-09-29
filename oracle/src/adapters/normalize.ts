@@ -222,7 +222,10 @@ export function normalizeCrypto(raw: CryptoRawPayload): NormalizedOutcome {
     throw new NormalizationError(source, "threshold", threshold, "must be non-zero to compute confidence");
   }
 
-  const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
+  // Exact equality semantics (Issue #567):
+  // gte: price >= threshold (at or above threshold)
+  // lte: price < threshold (strictly below threshold)
+  const outcome = comparator === "gte" ? price >= threshold : price < threshold;
 
   // Relative distance from the decision boundary, clamped to [0, 1].
   const distance = Math.abs(price - threshold) / Math.abs(threshold);
@@ -283,7 +286,10 @@ export function normalizeCryptoQuote(input: CryptoQuoteInput): NormalizedOutcome
     return { outcome: false, confidence: 0 };
   }
 
-  const outcome = comparator === "gte" ? price >= threshold : price <= threshold;
+  // Exact equality semantics (Issue #567):
+  // gte: price >= threshold (at or above threshold)
+  // lte: price < threshold (strictly below threshold)
+  const outcome = comparator === "gte" ? price >= threshold : price < threshold;
 
   if (!freshness) {
     return { outcome, confidence: Math.max(0, Math.min(1, base)) };

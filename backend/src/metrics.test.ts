@@ -32,9 +32,9 @@ import {
   serializeMetrics,
   isMetricsRequestAuthorized,
   METRICS_TOKEN_HEADER,
-} from "../metrics.js";
+} from "./metrics.js";
 import { buildServer } from "@/server";
-import { createFakePool } from "../test/fakePool.js";
+import { createFakePool } from "./test/fakePool.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

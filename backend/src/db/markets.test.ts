@@ -185,3 +185,172 @@ describe("getMarketById", () => {
     expect(typeof result?.total_no).toBe("string");
   });
 });
+
+// ── SQL generation, ORDER BY clauses, and WHERE predicates ──────────────────
+
+function makeCapture(): { db: Queryable; calls: string[] } {
+  const calls: string[] = [];
+  const db: Queryable = {
+    query: vi.fn(async (text: string) => {
+      calls.push(text);
+      return { rows: [] };
+    }),
+  };
+  return { db, calls };
+}
+
+function extractOrderBy(sql: string): string {
+  const match = sql.match(/ORDER BY\s+(.+?)\s+LIMIT/si);
+  if (!match) throw new Error(`No ORDER BY found in:\n${sql}`);
+  return match[1].replace(/\s+/g, " ").trim();
+}
+
+function extractWhere(sql: string): string {
+  const match = sql.match(/WHERE\s+(.+?)\s+ORDER BY/si);
+  if (!match) return "";
+  return match[1].replace(/\s+/g, " ").trim();
+}
+
+describe("getMarkets ORDER BY clause", () => {
+  it("newest → ORDER BY created_at DESC, id ASC", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "newest", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("created_at DESC, id ASC");
+  });
+
+  it("volume → ORDER BY (total_yes + total_no) DESC, created_at DESC, id ASC", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "volume", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe(
+      "(total_yes + total_no) DESC, created_at DESC, id ASC"
+    );
+  });
+
+  it("ending_soon → ORDER BY end_time ASC, id ASC", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "ending_soon", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("end_time ASC, id ASC");
+  });
+
+  it("bettors → ORDER BY bet_count DESC, created_at DESC, id ASC", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "bettors", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC, id ASC");
+  });
+});
+
+describe("getMarkets WHERE predicates", () => {
+  it("filter=all produces no WHERE clause", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "all", sort: "newest" }, db);
+    expect(calls[0]).not.toMatch(/\bWHERE\b/i);
+  });
+
+  it("filter=active produces resolved=false AND cancelled=false AND end_time > now() predicate", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "active", sort: "newest" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("resolved = false");
+    expect(where).toContain("cancelled = false");
+    expect(where).toContain("end_time >");
+  });
+
+  it("filter=resolved produces resolved=true predicate", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "resolved", sort: "newest" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("resolved = true");
+  });
+
+  it("filter=cancelled produces cancelled=true predicate", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "cancelled", sort: "newest" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("cancelled = true");
+  });
+
+  it("filter=ended produces resolved=false AND cancelled=false AND end_time <= now() predicate", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "ended", sort: "newest" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("resolved = false");
+    expect(where).toContain("cancelled = false");
+    expect(where).toContain("end_time <=");
+  });
+
+  it("sort=ending_soon always appends active-only predicate even with filter=all", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "all", sort: "ending_soon" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("resolved = false");
+    expect(where).toContain("cancelled = false");
+    expect(where).toContain("end_time >");
+  });
+});
+
+describe("getMarkets category filter", () => {
+  it("category adds a category = $1 predicate and uses $1 as the first bind value", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "all", sort: "newest", category: "Crypto" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("category = $1");
+  });
+
+  it("category combined with filter=active: category clause comes first in WHERE", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ filter: "active", sort: "newest", category: "Sports" }, db);
+    const where = extractWhere(calls[0]);
+    expect(where).toContain("category = $1");
+    expect(where).toContain("resolved = false");
+  });
+});
+
+describe("ORDER BY expressions match migration 0028 index definitions with id tiebreaker", () => {
+  it("newest ORDER BY matches idx_markets_created_at definition", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "newest", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("created_at DESC, id ASC");
+  });
+
+  it("volume ORDER BY matches idx_markets_volume_tiebreak definition", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "volume", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe(
+      "(total_yes + total_no) DESC, created_at DESC, id ASC"
+    );
+  });
+
+  it("bettors ORDER BY matches idx_markets_bettors definition", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "bettors", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC, id ASC");
+  });
+
+  it("ending_soon ORDER BY matches idx_markets_active_partial definition", async () => {
+    const { db, calls } = makeCapture();
+    await getMarkets({ sort: "ending_soon", filter: "all" }, db);
+    expect(extractOrderBy(calls[0])).toBe("end_time ASC, id ASC");
+  });
+});
+
+describe("getMarkets pagination bind parameters", () => {
+  it("LIMIT and OFFSET appear at the end of bind values for filter=all/no-category", async () => {
+    const { db } = makeCapture();
+    const querySpy = vi.spyOn(db, "query");
+    await getMarkets({ filter: "all", sort: "newest", page: 2, limit: 10 }, db);
+    const [, values] = querySpy.mock.calls[0] as [string, unknown[]];
+    expect(values).toEqual([10, 10]);
+  });
+
+  it("LIMIT and OFFSET shift by one when category is present", async () => {
+    const { db } = makeCapture();
+    const querySpy = vi.spyOn(db, "query");
+    await getMarkets(
+      { filter: "all", sort: "newest", page: 1, limit: 5, category: "Crypto" },
+      db
+    );
+    const [, values] = querySpy.mock.calls[0] as [string, unknown[]];
+    expect(values).toEqual(["Crypto", 5, 0]);
+  });
+});
+

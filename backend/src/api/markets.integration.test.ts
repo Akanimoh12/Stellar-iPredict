@@ -1,9 +1,9 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { createMarketsRoutes } from "../src/api/markets.js";
-import { registerErrorHandler, registerNotFoundHandler } from "../src/lib/errors.js";
-import type { MarketRow, Queryable } from "../src/db/markets.js";
+import { createMarketsRoutes } from "./markets.js";
+import { registerErrorHandler, registerNotFoundHandler } from "../lib/errors.js";
+import type { MarketRow, Queryable } from "../db/markets.js";
 import { makeMarket } from "@ipredict/test-fixtures";
 
 function makeMarketRow(overrides: Partial<MarketRow> = {}): MarketRow {

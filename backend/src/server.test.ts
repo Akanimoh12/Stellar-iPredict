@@ -1,9 +1,9 @@
 
 import { describe, expect, it, vi, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { registerGracefulShutdown } from "../server.js";
+import { registerGracefulShutdown } from "./server.js";
 import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
-import { createFakePool } from "../test/fakePool.js";
+import { createFakePool } from "./test/fakePool.js";
 
 function makeFakeServer(close: ReturnType<typeof vi.fn>): FastifyInstance {
   return {
@@ -104,7 +104,7 @@ describe("registerGracefulShutdown", () => {
     const sigtermListenersBefore = process.listeners("SIGTERM").length;
     const sigintListenersBefore = process.listeners("SIGINT").length;
 
-    await import("../db/pool.js");
+    await import("./db/pool.js");
 
     const sigtermListenersAfter = process.listeners("SIGTERM").length;
     const sigintListenersAfter = process.listeners("SIGINT").length;

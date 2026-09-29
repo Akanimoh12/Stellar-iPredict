@@ -211,4 +211,22 @@ describe("BinanceAdapter", () => {
     const adapter = new BinanceAdapter();
     await expect(adapter.fetchOutcome(createMarket({ params: {} }))).rejects.toThrow(/missing\/invalid/);
   });
+
+  it("evaluates exact equality correctly and prevents two opposed markets from both resolving YES", async () => {
+    const now = Date.now();
+    // Price exactly equal to threshold (50,000)
+    const bodyAtThreshold = { ...BINANCE_FIXTURE, lastPrice: "50000.00000000", closeTime: now - 1000 };
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(bodyAtThreshold));
+    const adapter = new BinanceAdapter({ fetchFn });
+
+    const gteMarket = createMarket({ params: { symbol: "BTCUSDT", comparator: "gte", threshold: 50_000 } });
+    const lteMarket = createMarket({ id: "market-opposed", params: { symbol: "BTCUSDT", comparator: "lte", threshold: 50_000 } });
+
+    const gteResult = await adapter.fetchOutcome(gteMarket);
+    const lteResult = await adapter.fetchOutcome(lteMarket);
+
+    expect(gteResult.outcome).toBe(true);
+    expect(lteResult.outcome).toBe(false);
+    expect(gteResult.outcome && lteResult.outcome).toBe(false);
+  });
 });

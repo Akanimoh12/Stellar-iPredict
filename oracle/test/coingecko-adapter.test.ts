@@ -254,4 +254,44 @@ describe("CoinGeckoAdapter", () => {
       expect((await adapter.fetchOutcome(createMarket())).confidence).toBe(1);
     });
   });
+
+  describe("response caching & exact equality (issues #555 & #567)", () => {
+    it("caches response for identical market requests within TTL", async () => {
+      const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fresh()));
+      const adapter = new CoinGeckoAdapter({ fetchFn, cacheTtlMs: 60_000 });
+
+      const market = createMarket();
+      const res1 = await adapter.fetchOutcome(market);
+      const res2 = await adapter.fetchOutcome(market);
+
+      expect(res1).toEqual(res2);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("evaluates exact equality correctly and prevents two opposed markets from both resolving YES", async () => {
+      // Price exactly equal to threshold (50,000)
+      const now = Date.now();
+      const fixtureAtThreshold = {
+        bitcoin: {
+          usd: 50_000,
+          last_updated_at: Math.floor((now - 1000) / 1000),
+        },
+      };
+      const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAtThreshold));
+      const adapter = new CoinGeckoAdapter({ fetchFn });
+
+      const gteMarket = createMarket({ params: { symbol: "bitcoin", comparator: "gte", threshold: 50_000 } });
+      const lteMarket = createMarket({ id: "market-opposed", params: { symbol: "bitcoin", comparator: "lte", threshold: 50_000 } });
+
+      const gteResult = await adapter.fetchOutcome(gteMarket);
+      const lteResult = await adapter.fetchOutcome(lteMarket);
+
+      // gte (>= 50,000) at 50,000 is true
+      expect(gteResult.outcome).toBe(true);
+      // lte (< 50,000) at 50,000 is false
+      expect(lteResult.outcome).toBe(false);
+      // They cannot both be true
+      expect(gteResult.outcome && lteResult.outcome).toBe(false);
+    });
+  });
 });

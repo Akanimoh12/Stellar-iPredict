@@ -33,6 +33,15 @@ export interface PoliticsMarketParams {
   expectedOutcome: string;
 }
 
+export interface SportsMarketParams {
+  sportKey: string;
+  homeTeam: string;
+  awayTeam: string;
+  selectedTeam: string;
+  eventId?: string;
+  season?: string;
+}
+
 export interface Market {
   id: string;
   category: AdapterMarketCategory;
@@ -137,6 +146,35 @@ export function isPoliticsMarketParams(
     params.expectedOutcome.length > 0
   );
 }
+
+/** Type guard shared by sports adapters (SportDataAPI, TheOddsAPI, ...) to validate `market.params`. */
+export function isSportsMarketParams(
+  params: Record<string, unknown>,
+): params is Record<string, unknown> & SportsMarketParams {
+  return (
+    typeof params.sportKey === "string" &&
+    params.sportKey.length > 0 &&
+    typeof params.homeTeam === "string" &&
+    params.homeTeam.length > 0 &&
+    typeof params.awayTeam === "string" &&
+    params.awayTeam.length > 0 &&
+    typeof params.selectedTeam === "string" &&
+    params.selectedTeam.length > 0
+  );
+}
+
+export { CoinGeckoAdapter } from "./coingecko.js";
+export type { CoinGeckoAdapterOptions } from "./coingecko.js";
+export { BinanceAdapter } from "./binance.js";
+export type { BinanceAdapterOptions } from "./binance.js";
+export { CoinMarketCapAdapter } from "./coinmarketcap.js";
+export type { CoinMarketCapAdapterOptions } from "./coinmarketcap.js";
+export { SportDataApiAdapter } from "./sportdataapi.js";
+export type { SportDataApiAdapterOptions } from "./sportdataapi.js";
+export { TheOddsApiAdapter } from "./theoddsapi.js";
+export type { TheOddsApiAdapterOptions } from "./theoddsapi.js";
+export { ReutersAdapter } from "./reuters.js";
+export { PolymarketFeedAdapter } from "./polymarketfeed.js";
 
 /**
  * Selects data adapters for a market by category and optional metadata tags. Adapters are tried in

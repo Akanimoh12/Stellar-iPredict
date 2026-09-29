@@ -189,4 +189,36 @@ describe("CoinMarketCapAdapter", () => {
 
     await expect(adapter.fetchOutcome(createMarket())).rejects.toThrow(/no usable USD price/);
   });
+
+  it("evaluates exact equality correctly and prevents two opposed markets from both resolving YES", async () => {
+    const now = Date.now();
+    const observedAt = now - 1000;
+    const fixtureAtThreshold = {
+      data: {
+        BTC: [
+          {
+            quote: {
+              USD: {
+                price: 50000.0,
+                last_updated_timestamp: Math.floor(observedAt / 1000),
+                last_updated: new Date(observedAt).toISOString(),
+              },
+            },
+          },
+        ],
+      },
+    };
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(fixtureAtThreshold));
+    const adapter = new CoinMarketCapAdapter({ apiKey: "test-key", fetchFn });
+
+    const gteMarket = createMarket({ params: { symbol: "BTC", comparator: "gte", threshold: 50_000 } });
+    const lteMarket = createMarket({ id: "market-opposed", params: { symbol: "BTC", comparator: "lte", threshold: 50_000 } });
+
+    const gteResult = await adapter.fetchOutcome(gteMarket);
+    const lteResult = await adapter.fetchOutcome(lteMarket);
+
+    expect(gteResult.outcome).toBe(true);
+    expect(lteResult.outcome).toBe(false);
+    expect(gteResult.outcome && lteResult.outcome).toBe(false);
+  });
 });

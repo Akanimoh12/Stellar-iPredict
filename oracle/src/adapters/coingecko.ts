@@ -1,5 +1,7 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
+import { AdapterResponseCache, marketCacheKey } from "./responseCache.js";
 import { type AdapterOutcome, type DataAdapter, isCryptoMarketParams, type Market } from "./index.js";
+import { ProviderRateLimiter, sharedProviderRateLimiter } from "./rateLimiter.js";
 import { probeHttp } from "./health.js";
 import { normalizeCryptoQuote } from "./normalize.js";
 import {
@@ -32,6 +34,8 @@ export interface CoinGeckoAdapterOptions extends FetchWithRetryOptions {
   apiKey?: string;
   /** Whether to use market cap instead of price for resolution. Defaults to false. */
   useMarketCap?: boolean;
+  /** Rate limiter instance for coordinating request quota. */
+  rateLimiter?: ProviderRateLimiter;
   /** Overrides for the freshness bounds applied to each quote. */
   freshness?: Partial<FreshnessPolicy>;
   /** Environment the freshness bounds are read from. Injectable for tests. */
@@ -53,10 +57,15 @@ export interface CoinGeckoAdapterOptions extends FetchWithRetryOptions {
  */
 export class CoinGeckoAdapter implements DataAdapter {
   readonly id = "coingecko";
+  private readonly responseCache: AdapterResponseCache<{ value: number; raw: unknown; observedAtMs?: number; referenceNow: number }>;
+  private readonly rateLimiter: ProviderRateLimiter;
   private readonly freshness: FreshnessPolicy;
 
   constructor(private readonly options: CoinGeckoAdapterOptions = {}) {
-    this.freshness = freshnessPolicyFromEnv("ORACLE_COINGECKO", options.env, options.freshness);
+    const { rateLimiter, env, freshness } = options;
+    this.rateLimiter = rateLimiter ?? sharedProviderRateLimiter;
+    this.responseCache = new AdapterResponseCache(options.cacheTtlMs);
+    this.freshness = freshnessPolicyFromEnv("ORACLE_COINGECKO", env, freshness);
   }
 
   supports(market: Market): boolean {
@@ -73,102 +82,84 @@ export class CoinGeckoAdapter implements DataAdapter {
     if (!isCryptoMarketParams(market.params)) {
       throw new Error(`CoinGeckoAdapter cannot resolve market ${market.id}: missing/invalid crypto params`);
     }
+
     const { symbol, comparator, threshold } = market.params;
     const useMarketCap = this.options.useMarketCap ?? false;
 
-    // If a timestamp (`at`) is provided in params, request a narrow range
-    // around that unix epoch (seconds) so we can pick the price closest to
-    // the market deadline (UTC). Otherwise use the simple current price API.
-    const at = typeof (market.params as any).at === "number" ? Number((market.params as any).at) : undefined;
-    let value: number | undefined;
-    let raw: unknown;
-    /** Provider observation time, once a code path that supplies one is taken. */
-    let observedAtMs: number | undefined;
-    /**
-     * The instant the quote is meant to describe. A historical resolution is
-     * judged against the deadline it asked for; a live one against now.
-     */
-    let referenceNow: number = Date.now();
+    const cached = await this.responseCache.getOrSet(marketCacheKey(market), async () => {
+      await this.rateLimiter.acquire(this.id);
+      const at = typeof (market.params as any).at === "number" ? Number((market.params as any).at) : undefined;
+      let value: number | undefined;
+      let raw: unknown;
+      let observedAtMs: number | undefined;
+      let referenceNow: number = Date.now();
 
-    if (typeof at === "number" && Number.isFinite(at) && at > 0) {
-      // use market_chart/range: /coins/{id}/market_chart/range?vs_currency=usd&from={from}&to={to}
-      // Coingecko expects `from` and `to` as unix seconds. Query a 60s window.
-      const from = Math.max(0, Math.floor(at) - HISTORICAL_WINDOW_SECONDS);
-      const to = Math.floor(at) + HISTORICAL_WINDOW_SECONDS;
-      const url = `${COINGECKO_MARKET_CHART_RANGE}/${encodeURIComponent(symbol)}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
+      if (typeof at === "number" && Number.isFinite(at) && at > 0) {
+        const from = Math.max(0, Math.floor(at) - HISTORICAL_WINDOW_SECONDS);
+        const to = Math.floor(at) + HISTORICAL_WINDOW_SECONDS;
+        const url = `${COINGECKO_MARKET_CHART_RANGE}/${encodeURIComponent(symbol)}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
 
-      const headers: Record<string, string> = { Accept: "application/json" };
-      if (this.options.apiKey) headers["x-cg-demo-api-key"] = this.options.apiKey;
+        const headers: Record<string, string> = { Accept: "application/json" };
+        if (this.options.apiKey) headers["x-cg-demo-api-key"] = this.options.apiKey;
 
-      const response = await fetchWithRetry(url, { method: "GET", headers }, this.options);
-      const body = await response.json();
-      raw = body;
+        const response = await fetchWithRetry(url, { method: "GET", headers }, this.options);
+        const body = await response.json();
+        raw = body;
 
-      // body.prices is [[msTimestamp, price], ...]
-      const prices: unknown = (body as any).prices;
-      if (Array.isArray(prices) && prices.length > 0) {
-        // pick entry closest to `at` (convert at -> ms)
-        const atMs = at * 1000;
-        referenceNow = atMs;
-        let best: { ts: number; price: number } | null = null;
-        for (const item of prices) {
-          if (!Array.isArray(item) || item.length < 2) continue;
-          const ts = Number(item[0]);
-          const p = Number(item[1]);
-          if (!Number.isFinite(ts) || !Number.isFinite(p)) continue;
-          const cand = { ts, price: p };
-          if (!best || Math.abs(cand.ts - atMs) < Math.abs(best.ts - atMs)) best = cand;
-        }
-        if (best) {
-          value = best.price;
-          // Reassign: the observation is the point's own timestamp, and the
-          // window it is judged against is the one we requested.
-          observedAtMs = best.ts;
+        const prices: unknown = (body as any).prices;
+        if (Array.isArray(prices) && prices.length > 0) {
+          const atMs = at * 1000;
+          referenceNow = atMs;
+          let best: { ts: number; price: number } | null = null;
+          for (const item of prices) {
+            if (!Array.isArray(item) || item.length < 2) continue;
+            const ts = Number(item[0]);
+            const p = Number(item[1]);
+            if (!Number.isFinite(ts) || !Number.isFinite(p)) continue;
+            const cand = { ts, price: p };
+            if (!best || Math.abs(cand.ts - atMs) < Math.abs(best.ts - atMs)) best = cand;
+          }
+          if (best) {
+            value = best.price;
+            observedAtMs = best.ts;
+          }
         }
       }
-      // If no value found in range, fall through to current price fallback below.
-    }
 
-    if (value === undefined) {
-      const queryParams = new URLSearchParams({
-        ids: symbol,
-        vs_currencies: "usd",
-        include_market_cap: useMarketCap ? "true" : "false",
-      });
+      if (value === undefined) {
+        const queryParams = new URLSearchParams({
+          ids: symbol,
+          vs_currencies: "usd",
+          include_market_cap: useMarketCap ? "true" : "false",
+        });
 
-      const url = `${COINGECKO_PRICE_URL}?${queryParams.toString()}`;
-    
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-    };
-    
-    if (this.options.apiKey) {
-      headers["x-cg-demo-api-key"] = this.options.apiKey;
-    }
+        const url = `${COINGECKO_PRICE_URL}?${queryParams.toString()}`;
+        const headers: Record<string, string> = { Accept: "application/json" };
+        if (this.options.apiKey) {
+          headers["x-cg-demo-api-key"] = this.options.apiKey;
+        }
 
-    const response = await fetchWithRetry(
-      url,
-      { method: "GET", headers },
-      this.options,
-    );
-    
-      const body = (await response.json()) as CoinGeckoPriceResponse;
-      raw = body;
+        const response = await fetchWithRetry(url, { method: "GET", headers }, this.options);
+        const body = (await response.json()) as CoinGeckoPriceResponse;
+        raw = body;
 
-      const coinData = (body as CoinGeckoPriceResponse)[symbol];
-      if (!coinData) {
-        throw new Error(`CoinGeckoAdapter received no data for symbol ${symbol}`);
+        const coinData = (body as CoinGeckoPriceResponse)[symbol];
+        if (!coinData) {
+          throw new Error(`CoinGeckoAdapter received no data for symbol ${symbol}`);
+        }
+
+        value = useMarketCap ? coinData.usd_market_cap : coinData.usd;
+        observedAtMs = extractTimestampMs(coinData, ["last_updated_at"], referenceNow);
       }
 
-      value = useMarketCap ? coinData.usd_market_cap : coinData.usd;
-      observedAtMs = extractTimestampMs(coinData, ["last_updated_at"], referenceNow);
-    }
-    
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      throw new Error(`CoinGeckoAdapter received invalid ${useMarketCap ? "market cap" : "price"} for ${symbol}: ${String(value)}`);
-    }
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`CoinGeckoAdapter received invalid ${useMarketCap ? "market cap" : "price"} for ${symbol}: ${String(value)}`);
+      }
 
-    const freshness = assessQuote(observedAtMs, this.freshness, referenceNow);
+      return { value, raw, observedAtMs, referenceNow };
+    });
+
+    const freshness = assessQuote(cached.observedAtMs, this.freshness, cached.referenceNow);
     recordQuoteStatus(this.id, freshness.status, Date.now());
 
     if (freshness.status === "expired") {
@@ -180,18 +171,18 @@ export class CoinGeckoAdapter implements DataAdapter {
     }
 
     const { outcome, confidence } = normalizeCryptoQuote({
-      price: value,
+      price: cached.value,
       threshold,
       comparator,
-      observedAtMs,
+      observedAtMs: cached.observedAtMs,
       freshness: this.freshness,
-      now: referenceNow,
+      now: cached.referenceNow,
     });
 
     return {
       outcome,
       confidence,
-      raw,
+      raw: cached.raw,
       freshness: {
         status: freshness.status,
         ageMs: freshness.ageMs,

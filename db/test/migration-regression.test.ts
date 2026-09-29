@@ -16,7 +16,6 @@ const SCRATCH_SCHEMA = "migration_regression_check";
  * frozen. The list must never grow: a new collision fails the test.
  */
 const LEGACY_SHARED_PREFIXES: ReadonlySet<string> = new Set([
-  "0006", // up/down pair only; listed defensively for symmetric handling
   "0011",
   "0013",
   "0014",

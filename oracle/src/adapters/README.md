@@ -91,3 +91,25 @@ Testing
 If a specific adapter is missing a documented capability (e.g. historical
 queries), open an issue and prefer either adding historical support or
 marking the limitation in this README.
+
+## Confidence weighting
+
+`AdapterOutcome.confidence` (0-1) decides how much a source's vote counts.
+`resolveMarket` aggregates as follows:
+
+1. **Weight** of a source is `clamp(confidence, 0, 1)`. Failed sources carry no vote.
+2. **Outcome** is the side (yes/no) with the larger total weight. If every
+   source reports `0`, the vote falls back to head-count and the
+   `minConfidence` floor sends it to review.
+3. **Conflict**: if the losing side holds more than `conflictThreshold` of the
+   total weight, the result is `conflict` (or `review` with a queue).
+4. **Too close to call**: if both sides have votes and the weighted margin
+   `|yes - no| / total` is below `minWeightedMargin` (default `0.1`), the result
+   is held with reason code `inconclusive` instead of picking the marginally
+   heavier side.
+5. **Result confidence** is the mean confidence of successful sources and must
+   still meet `minConfidence`.
+
+Adapters derive confidence from real signal quality: distance from the
+threshold, quote freshness (`freshness.ts` ceilings), sports final vs.
+provisional state, and provider-reported values. Do not hardcode `1`.

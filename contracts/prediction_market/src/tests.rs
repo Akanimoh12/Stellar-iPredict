@@ -99,6 +99,72 @@ fn setup() -> TestSetup {
     }
 }
 
+
+pub fn check_invariant(t: &TestSetup) {
+    let contract_balance = t.xlm.balance(&t.market_id);
+    let acc_fees = t.client.get_accumulated_fees();
+    
+    let mut outstanding_stakes: i128 = 0;
+    let mut escrowed_bonds: i128 = 0;
+    
+    let market_count = t.client.get_market_count();
+    for id in 1..=market_count {
+        let market = t.client.get_market(&id);
+        
+        // Oracle bonds
+        if let Ok(Ok(submission)) = t.client.try_get_oracle_submission(&id) {
+            match submission.state {
+                OracleState::Finalized => {}
+                _ => {
+                    escrowed_bonds += submission.bond;
+                    escrowed_bonds += submission.challenger_bond;
+                }
+            }
+        }
+        
+        // Stakes
+        if market.cancelled {
+            if let Ok(Ok(bettors)) = t.client.try_get_market_bettors(&id) {
+                for bettor in bettors.into_iter() {
+                    outstanding_stakes += t.client.get_bet_gross(&id, &bettor);
+                }
+            }
+        } else if market.resolved {
+            let winning_side = if market.outcome { market.total_yes } else { market.total_no };
+            if winning_side > 0 {
+                let total_pool = market.total_yes + market.total_no;
+                if let Ok(Ok(bettors)) = t.client.try_get_market_bettors(&id) {
+                    for bettor in bettors.into_iter() {
+                        if let Ok(Ok(bet)) = t.client.try_get_bet(&id, &bettor) {
+                            if bet.is_yes == market.outcome && !bet.claimed {
+                                outstanding_stakes += (bet.amount * total_pool) / winning_side;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            outstanding_stakes += market.total_yes + market.total_no;
+        }
+    }
+    
+    let accounted = outstanding_stakes + escrowed_bonds + acc_fees;
+    assert_eq!(
+        contract_balance,
+        accounted,
+        "Invariant violation! Balance: {}, Accounted: {} (Stakes: {}, Bonds: {}, Fees: {})",
+        contract_balance, accounted, outstanding_stakes, escrowed_bonds, acc_fees
+    );
+}
+
+
+impl Drop for TestSetup {
+    fn drop(&mut self) {
+        // Do not check invariant if we are already panicking (to avoid double panics)
+        check_invariant(self);
+    }
+}
+
 fn fund_user(t: &TestSetup, user: &Address, amount: i128) {
     t.xlm_admin.mint(user, &amount);
 }

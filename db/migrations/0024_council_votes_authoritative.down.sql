@@ -1,0 +1,1 @@
+COMMENT ON TABLE council_votes IS NULL;

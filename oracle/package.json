@@ -1,0 +1,37 @@
+{
+  "name": "ipredict-oracle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iPredict oracle \u2014 council aggregator, data adapters, submitter, monitor",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "start:monitor": "node dist/monitor/run.js",
+    "dev:monitor": "tsx watch src/monitor/run.ts",
+    "submit": "tsx src/aggregator/submit-cli.ts",
+    "audit:export": "tsx src/aggregator/audit-cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check:sdk-version": "node ../scripts/check-sdk-version.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ipredict/shared": "*",
+    "@stellar/stellar-sdk": "^16.2.0",
+    "pg": "^8.13.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

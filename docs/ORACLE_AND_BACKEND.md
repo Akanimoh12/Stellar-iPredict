@@ -664,8 +664,10 @@ const METRICS = {
 
   // Application health
   "api_request_duration_ms":  "histogram",
-  "cache_hit_rate":           "gauge",
-  "db_query_duration_ms":     "histogram",
+  "cache_hit_rate":           "gauge",    // whole cache, windowed in PromQL
+  "cache_namespace_hit_rate": "gauge",    // per key namespace: market, bets, …
+  "negative_cache_hit_rate":  "gauge",    // not-found lookups, counted apart
+  "db_query_duration_ms":     "histogram", // the load cache misses create
 
   // Business metrics
   "markets_created_total":    "counter",
@@ -686,8 +688,28 @@ const ALERTS = [
   { name: "MarketStuck",        condition: "market unresolved > 48h past expiry" },
   { name: "HighAPILatency",     condition: "api_p99 > 2000ms" },
   { name: "DatabaseSlow",       condition: "db_query_p99 > 500ms" },
+  { name: "LowCacheHitRate",    condition: "cache hit rate < 50% over 10m" },
+  { name: "CacheHitRateBelowBaseline",
+    condition: "one namespace < 80% of its own 6h baseline, ≥100 lookups" },
 ];
 ```
+
+Per-namespace hit rate is what makes a hit-rate alert actionable: the
+aggregate tells you *something* changed, while `market` vs `bets` vs
+`leaderboard` tells you which key structure broke. `CacheHitRateBelowBaseline`
+compares each namespace against its own recent history rather than a fixed
+number, so a namespace that normally runs cold does not page and one that
+normally runs hot does not hide a regression behind an absolute floor.
+Negative-cache lookups (answers of "this does not exist") are a separate
+metric family: folding them into `cache_hit_rate` would let a 404 storm prop
+the hit rate up while Postgres ran the same zero-row query over and over.
+
+The **Cache & Database Load** Grafana dashboard (`infra/grafana/cache.json`)
+plots hit rate by namespace, misses falling through to the database, the
+negative-cache hit rate, `db_query_duration_ms` rate and latency, pool
+occupancy and API latency on one time axis with a shared crosshair, so a
+hit-rate dip and the query spike it causes are read as one event.
+
 
 ---
 

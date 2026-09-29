@@ -25,6 +25,11 @@ import {
   recordStatus,
   getStatusCounts,
   resetStatusCounts,
+  observeDbQuery,
+  getDbQueryHistogram,
+  resetDbQueryHistogram,
+  serializeDbQueryMetrics,
+  serializeMetrics,
   isMetricsRequestAuthorized,
   METRICS_TOKEN_HEADER,
 } from "../metrics.js";
@@ -37,6 +42,7 @@ import { createFakePool } from "../test/fakePool.js";
 beforeEach(() => {
   resetHistogram();
   resetErrorCounts();
+  resetDbQueryHistogram();
 });
 
 // ---------------------------------------------------------------------------
@@ -512,5 +518,94 @@ describe("registerMetricsEndpoint access control (Fastify integration)", () => {
     const res = await app.inject({ method: "GET", url: "/metrics", headers: { [METRICS_TOKEN_HEADER]: "secret" } });
     expect(res.statusCode).toBe(200);
     await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Database query histogram — the database-load series the cache dashboard
+// plots against hit rate, and the one DatabaseSlow already reads
+// ---------------------------------------------------------------------------
+describe("observeDbQuery", () => {
+  it("starts empty with the default bucket ladder", () => {
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(0);
+    expect(snapshot.sum).toBe(0);
+    expect(snapshot.buckets[snapshot.buckets.length - 1]).toBe(Infinity);
+  });
+
+  it("accumulates observations into the right bucket", () => {
+    observeDbQuery(7); // ≤10
+    observeDbQuery(7); // ≤10
+    observeDbQuery(600); // ≤1000
+
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(3);
+    expect(snapshot.sum).toBe(614);
+    expect(snapshot.counts[snapshot.buckets.indexOf(10)]).toBe(2);
+    expect(snapshot.counts[snapshot.buckets.indexOf(1000)]).toBe(1);
+    // The buckets hold disjoint counts, so they sum to the total.
+    expect(snapshot.counts.reduce((total, count) => total + count, 0)).toBe(3);
+  });
+
+  it("handles a very fast query and an extremely slow one", () => {
+    observeDbQuery(0.2); // below the first bucket → bucket[0]
+    observeDbQuery(60_000); // above the last finite bucket → Infinity
+
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(2);
+    expect(snapshot.counts[0]).toBe(1);
+    expect(snapshot.counts[snapshot.counts.length - 1]).toBe(1);
+  });
+
+  it("resetDbQueryHistogram clears it", () => {
+    observeDbQuery(10);
+    resetDbQueryHistogram();
+
+    expect(getDbQueryHistogram().count).toBe(0);
+    expect(getDbQueryHistogram().sum).toBe(0);
+  });
+});
+
+describe("serializeDbQueryMetrics", () => {
+  it("is emitted before the first query, so the alert and panels have a series", () => {
+    const body = serializeDbQueryMetrics();
+
+    expect(body).toContain("# TYPE db_query_duration_ms histogram");
+    expect(body).toContain("db_query_duration_ms_bucket{le=\"+Inf\"} 0");
+    expect(body).toContain("db_query_duration_ms_sum 0");
+    expect(body).toContain("db_query_duration_ms_count 0");
+    expect(body.endsWith("\n")).toBe(true);
+  });
+
+  it("emits cumulative buckets", () => {
+    observeDbQuery(7);
+    observeDbQuery(7);
+    observeDbQuery(600);
+
+    const samples: Record<string, string> = {};
+    for (const line of serializeDbQueryMetrics().split("\n")) {
+      if (line === "" || line.startsWith("#")) continue;
+      const separator = line.lastIndexOf(" ");
+      samples[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+
+    expect(samples['db_query_duration_ms_bucket{le="10"}']).toBe("2");
+    expect(samples['db_query_duration_ms_bucket{le="1000"}']).toBe("3");
+    expect(samples['db_query_duration_ms_bucket{le="+Inf"}']).toBe("3");
+    expect(samples.db_query_duration_ms_count).toBe("3");
+    expect(samples.db_query_duration_ms_sum).toBe("614");
+  });
+});
+
+describe("serializeMetrics exposition", () => {
+  it("always carries the cache, negative-cache and database-query families", () => {
+    // A series that only appears once traffic arrives is one nobody can build
+    // a panel or an alert against before the incident.
+    const body = serializeMetrics();
+
+    expect(body).toContain("cache_hit_rate NaN");
+    expect(body).toContain("negative_cache_hit_rate NaN");
+    expect(body).toContain("db_query_duration_ms_count 0");
+    expect(body.endsWith("\n")).toBe(true);
   });
 });

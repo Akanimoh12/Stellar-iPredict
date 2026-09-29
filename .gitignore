@@ -17,6 +17,7 @@ out/
 frontend/.next/
 frontend/out/
 frontend/node_modules/
+backend/dist/
 
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env

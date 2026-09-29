@@ -49,6 +49,10 @@ describe("selectThresholdOutcome", () => {
     expect(selectThresholdOutcome(votes, 3)).toBeNull();
   });
 
+  it("completely ignores blank member submissions so they never satisfy a threshold", () => {
+    expect(selectThresholdOutcome([yes("   "), no("")], 1)).toBeNull();
+  });
+
   it("is deterministic regardless of vote ordering", () => {
     const base = [yes("a"), yes("b"), no("c"), no("d"), yes("e")];
     const shuffled = [base[3], base[0], base[4], base[2], base[1]];
@@ -88,6 +92,29 @@ describe("selectThresholdOutcome", () => {
         totalMembers: 4,
         ambiguous: false,
         outcome: true,
+      }),
+    );
+  });
+
+  it("returns true when YES strictly exceeds the threshold (> threshold)", () => {
+    const votes = [yes("a"), yes("b"), yes("c"), yes("d"), no("e")];
+    expect(selectThresholdOutcome(votes, 3)).toBe(true);
+  });
+
+  it("returns false when NO strictly exceeds the threshold (> threshold)", () => {
+    const votes = [no("a"), no("b"), no("c"), no("d"), yes("e")];
+    expect(selectThresholdOutcome(votes, 3)).toBe(false);
+  });
+
+  it("logs marketId as null when marketId is omitted/undefined", () => {
+    const info = vi.fn();
+    const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    type LoggerArg = Parameters<typeof selectThresholdOutcome>[2];
+    selectThresholdOutcome([yes("a")], 1, logger as unknown as LoggerArg);
+    expect(info).toHaveBeenCalledWith(
+      "vote tally",
+      expect.objectContaining({
+        marketId: null,
       }),
     );
   });

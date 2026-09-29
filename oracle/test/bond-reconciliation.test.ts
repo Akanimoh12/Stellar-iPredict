@@ -108,23 +108,56 @@ describe("runBondReconciliation", () => {
     expect(result.discrepancies).toHaveLength(0);
   });
 
-  it("calls onDiscrepancy for each unsettled submission", async () => {
+  it("calls onDiscrepancy for each unsettled submission and logs discrepancies", async () => {
     const pool = buildPool(
       [
-        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
-        { market_id: "2", submitter: "GYYY", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
+        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01T00:00:00Z" },
+        { market_id: "2", submitter: "GYYY", bond_amount: "2500000000", status: "cancelled", finalized_at: "2026-01-02T00:00:00Z" },
       ],
-      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02" }],
+      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02T00:00:00Z" }],
     );
 
     const alerts: string[] = [];
+    const warn = vi.fn();
+    const info = vi.fn();
+    const logger = { warn, info, error: vi.fn(), debug: vi.fn() };
     const options: BondReconciliationOptions = {
       onDiscrepancy: (d) => { alerts.push(d.marketId); },
+      logger: logger as unknown as BondReconciliationOptions["logger"],
     };
 
     const result = await runBondReconciliation(pool, options);
+    expect(result.checkedCount).toBe(2);
+    expect(result.settledCount).toBe(1);
     expect(result.discrepancies).toHaveLength(1);
+    expect(result.discrepancies[0]).toMatchObject({
+      marketId: "2",
+      submitter: "GYYY",
+      expectedAmount: 2500000000n,
+      status: "cancelled",
+    });
     expect(alerts).toEqual(["2"]);
+    expect(warn).toHaveBeenCalledWith(
+      "bond refund discrepancy detected",
+      expect.objectContaining({
+        marketId: "2",
+        submitter: "GYYY",
+        expectedAmountStroops: "2500000000",
+        status: "cancelled",
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "bond reconciliation complete",
+      expect.objectContaining({
+        checkedCount: 2,
+        settledCount: 1,
+        discrepancyCount: 1,
+      }),
+    );
+
+    // Verify SQL filter includes finalized, cancelled, and expired statuses
+    const [subQuery] = (pool.query as any).mock.calls[0];
+    expect(subQuery).toContain("WHERE status IN ('finalized', 'cancelled', 'expired')");
   });
 
   it("returns ranAt as an ISO timestamp", async () => {
@@ -252,7 +285,7 @@ describe("recordSettlement", () => {
     expect(result).toBe(false);
   });
 
-  it("passes marketId, recipient, and amount to the query", async () => {
+  it("passes marketId, recipient, and amount to the query at exact positional indices", async () => {
     const pool = {
       query: vi.fn().mockResolvedValue({ rows: [{ market_id: "5" }] }),
     };
@@ -263,8 +296,8 @@ describe("recordSettlement", () => {
     });
     const [sql, params] = pool.query.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("ON CONFLICT");
-    expect(params).toContain("5");
-    expect(params).toContain("GABC");
-    expect(params).toContain("2000000000");
+    expect(params[0]).toBe("5");
+    expect(params[1]).toBe("GABC");
+    expect(params[2]).toBe("2000000000");
   });
 });

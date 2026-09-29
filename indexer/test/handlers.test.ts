@@ -357,9 +357,7 @@ describe("registry handlers write and invalidate", () => {
       data: { market_id: 5, user: USER, payout_xlm: 500000000n },
     };
     await handleClaim(event, context);
-    expect(context.db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("UPDATE bets SET claimed"),
+    expect(context.db.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE bets SET claimed"),
       [5, USER],
     );
     expect(context.redis!.del).toHaveBeenCalled();
@@ -403,8 +401,8 @@ describe("router handlers write through inserted-event guards", () => {
       creator: ADMIN,
     });
     await handleMarketCreatedEvent(event, db, mockRedis);
-    expect(db.query).toHaveBeenNthCalledWith(1, expect.stringContaining("INSERT INTO events"), expect.any(Array));
-    expect(db.query).toHaveBeenNthCalledWith(2, expect.stringContaining("INSERT INTO markets"), expect.any(Array));
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"), expect.any(Array));
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO markets"), expect.any(Array));
     expect(mockRedis.del).toHaveBeenCalled();
   });
 
@@ -418,20 +416,20 @@ describe("router handlers write through inserted-event guards", () => {
       creator: ADMIN,
     });
     await handleMarketCreatedEvent(event, dbReplay, mockRedis);
-    expect(dbReplay.query).toHaveBeenCalledTimes(1);
+    expect(dbReplay.query).toHaveBeenCalledTimes(3);
     expect(mockRedis.del).not.toHaveBeenCalled();
   });
 
   it("handleMarketCancelledEvent marks a market cancelled", async () => {
     const db = mockDb();
     await handleMarketCancelledEvent(contractEvent(["mkt", "cancelled"], { market_id: 42 }), db, mockRedis);
-    expect(db.query).toHaveBeenNthCalledWith(2, expect.stringContaining("SET cancelled = TRUE"), [42]);
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("SET cancelled = TRUE"), [42]);
   });
 
   it("handleMarketResolvedEvent marks a market resolved", async () => {
     const db = mockDb();
     await handleMarketResolvedEvent(contractEvent(["market_resolved"], { market_id: 42, outcome: true }), db, mockRedis);
-    expect(db.query).toHaveBeenNthCalledWith(2, expect.stringContaining("SET resolved = TRUE"), [42, true]);
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("SET resolved = TRUE"), [42, true]);
   });
 
   it("handleOracleChallengedEvent inserts a dispute", async () => {
@@ -440,7 +438,7 @@ describe("router handlers write through inserted-event guards", () => {
       market_id: 7, challenger: CHALLENGER, outcome: false, bond: 200_0000000n,
       submitter: SUBMITTER, submitter_bond: 100_0000000n, challenged_at: 1_700_000_000n,
     }), db, mockRedis);
-    expect(db.query).toHaveBeenNthCalledWith(2, expect.stringContaining("INSERT INTO oracle_disputes"), expect.any(Array));
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO oracle_disputes"), expect.any(Array));
   });
 
   it("handleOracleFinalizedEvent finalizes the submission and updates the market", async () => {
@@ -450,7 +448,7 @@ describe("router handlers write through inserted-event guards", () => {
       submitter_payout: 100_0000000n, challenger_payout: 0n, council_fee: 0n,
       protocol_credit: 20_000000n, finalized_at: 1_700_086_400n,
     }), db, mockRedis);
-    expect(db.query).toHaveBeenNthCalledWith(2, expect.stringContaining("SET resolved = TRUE"), expect.any(Array));
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("SET resolved = TRUE"), expect.any(Array));
     expect(mockRedis.del).toHaveBeenCalled();
   });
 });

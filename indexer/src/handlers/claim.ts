@@ -1,5 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
-import { insertProcessedEvent } from "./idempotency.js";
+import { processEventAtomically } from "./idempotency.js";
 import { invalidateOnBetPlaced } from "../cache.js";
 
 export const REWARD_CLAIMED_TOPIC = "reward_claimed";
@@ -64,19 +64,19 @@ export function decodeClaim(event: DecodedEvent): ClaimPayload {
 export async function handleClaim(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeClaim(event);
 
-  const inserted = await insertProcessedEvent(context.db, {
+  const inserted = await processEventAtomically(context.db, {
     event,
     eventType: REWARD_CLAIMED_TOPIC,
     marketId: payload.market_id,
     actor: payload.user,
     payload,
+  }, async (tx) => {
+    await tx.query(
+      `UPDATE bets SET claimed = true WHERE market_id = $1 AND bettor = $2`,
+      [payload.market_id, payload.user],
+    );
   });
   if (!inserted) return;
-
-  await context.db.query(
-    `UPDATE bets SET claimed = true WHERE market_id = $1 AND bettor = $2`,
-    [payload.market_id, payload.user],
-  );
 
   await context.redis?.del(`bets:${payload.market_id}`, "leaderboard:top20");
   if (context.redis) {

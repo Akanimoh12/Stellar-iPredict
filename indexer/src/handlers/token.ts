@@ -54,7 +54,7 @@
  */
 
 import type { DecodedEvent, HandlerContext } from "./types.js";
-import { insertProcessedEvent } from "./idempotency.js";
+import { processEventAtomically } from "./idempotency.js";
 
 export const TOKEN_MINT_TOPIC = "token_mint";
 export const TOKEN_TRANSFER_TOPIC = "token_transfer";
@@ -147,22 +147,22 @@ export async function handleTokenMint(
 ): Promise<void> {
   const payload = decodeTokenMint(event);
 
-  const inserted = await insertProcessedEvent(context.db, {
+  const inserted = await processEventAtomically(context.db, {
     event,
     eventType: TOKEN_MINT_TOPIC,
     actor: payload.to,
     payload,
+  }, async (tx) => {
+    await tx.query(
+      `INSERT INTO token_balances (address, balance, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (address) DO UPDATE
+       SET balance = token_balances.balance + EXCLUDED.balance,
+           updated_at = NOW()`,
+      [payload.to, payload.amount],
+    );
   });
   if (!inserted) return;
-
-  await context.db.query(
-    `INSERT INTO token_balances (address, balance, updated_at)
-     VALUES ($1, $2, NOW())
-     ON CONFLICT (address) DO UPDATE
-     SET balance = token_balances.balance + EXCLUDED.balance,
-         updated_at = NOW()`,
-    [payload.to, payload.amount],
-  );
 
   // Invalidate caches
   await context.redis?.del(
@@ -195,21 +195,16 @@ export async function handleTokenTransfer(
 ): Promise<void> {
   const payload = decodeTokenTransfer(event);
 
-  const inserted = await insertProcessedEvent(context.db, {
+  const inserted = await processEventAtomically(context.db, {
     event,
     eventType: TOKEN_TRANSFER_TOPIC,
     actor: payload.from,
     payload,
-  });
-  if (!inserted) return;
-
-  // Use transaction to ensure atomic debit/credit
-  await context.db.query("BEGIN");
-  try {
+  }, async (tx) => {
     // Debit sender
-    await context.db.query(
+    await tx.query(
       `INSERT INTO token_balances (address, balance, updated_at)
-       VALUES ($1, -$2, NOW())
+       VALUES ($1, -$2::NUMERIC, NOW())
        ON CONFLICT (address) DO UPDATE
        SET balance = token_balances.balance - $2,
            updated_at = NOW()`,
@@ -217,7 +212,7 @@ export async function handleTokenTransfer(
     );
 
     // Credit recipient
-    await context.db.query(
+    await tx.query(
       `INSERT INTO token_balances (address, balance, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (address) DO UPDATE
@@ -225,12 +220,8 @@ export async function handleTokenTransfer(
            updated_at = NOW()`,
       [payload.to, payload.amount],
     );
-
-    await context.db.query("COMMIT");
-  } catch (error) {
-    await context.db.query("ROLLBACK");
-    throw error;
-  }
+  });
+  if (!inserted) return;
 
   // Check if sender balance went negative (indicates indexer gap)
   const result = (await context.db.query(

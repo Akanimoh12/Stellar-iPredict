@@ -1,7 +1,7 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "./config/index.js";
 import { pool } from "./db.js";
-import { insertProcessedEvent } from "./handlers/idempotency.js";
+import { processEventAtomically } from "./handlers/idempotency.js";
 import {
   isRetentionExceededError,
   extractOldestLedger,
@@ -178,59 +178,53 @@ export async function writeEventToDb(
 ): Promise<void> {
   const eventName = String(topics[0]);
 
-  // Write to audit events table first (if possible)
-  try {
-    const marketId = topics[1] ? Number(topics[1]) : (data?.market_id ? Number(data.market_id) : null);
-    const actor = topics[2] ? String(topics[2]) : (data?.user ? String(data.user) : null);
-    const inserted = await insertProcessedEvent(pool, {
-      event: { ledger: ledgerSeq, txHash, eventIndex },
-      eventType: eventName,
-      marketId,
-      actor,
-      payload: JSON.stringify(data),
-    });
-    if (!inserted) return;
-  } catch (err) {
-    // Audit table might not exist in target database, fail silently but log
-    console.debug("Optional events audit logging skipped:", (err as Error).message);
-  }
+  const structuredTopic = ["mkt", "bet"].includes(eventName) && typeof topics[1] === "string";
+  const marketId = Number(data?.market_id ?? data?.id ?? (structuredTopic ? topics[2] : topics[1]) ?? data?.[0]);
+  const actor = data?.bettor ?? data?.user ?? (structuredTopic ? topics[3] : topics[2]) ?? null;
+  const createsMarket = eventName === "market_created" || (eventName === "mkt" && topics[1] === "created");
+  await processEventAtomically(pool, {
+    event: { ledger: ledgerSeq, txHash, eventIndex },
+    eventType: eventName,
+    marketId: createsMarket || !Number.isFinite(marketId) ? null : marketId,
+    actor,
+    payload: JSON.stringify(data),
+  }, async (tx) => {
+    // Handle specific event actions
+    if (eventName === "market_created" || (eventName === "mkt" && topics[1] === "created")) {
+      const question = data.question ?? data[1] ?? "";
+      const category = data.category ?? data[2] ?? "Other";
+      const endTime = data.end_time ?? data[3] ?? 0;
+      const creator = data.creator ?? data[4] ?? "";
+      await tx.query(
+        `INSERT INTO markets (id, question, category, end_time, creator)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (id) DO NOTHING`,
+        [marketId, question, category, endTime, creator]
+      );
+    } else if (eventName === "market_resolved" || (eventName === "mkt" && topics[1] === "resolved")) {
+      const outcome = data.outcome ?? data[1] ?? false;
+      await tx.query(
+        `UPDATE markets SET resolved=true, outcome=$2, updated_at=NOW()\n       WHERE id=$1`,
+        [marketId, outcome]
+      );
+    } else if (eventName === "market_cancelled") {
+      await tx.query(
+        `UPDATE markets SET cancelled=true, updated_at=NOW()\n       WHERE id=$1`,
+        [marketId]
+      );
+    } else if (eventName === "bet_placed" || eventName === "bet") {
+      const bettor = actor;
+      const netAmount = data.net_amount ?? data.amount ?? data.net ?? data[2] ?? 0;
+      const grossAmount = data.gross_amount ?? data.gross ?? netAmount;
+      const isYes = data.is_yes ?? data[3] ?? true;
 
-  // Handle specific event actions
-  if (eventName === "market_created" || (eventName === "mkt" && topics[1] === "created")) {
-    const marketId = data.id ?? data[0] ?? (topics[1] ? Number(topics[1]) : 0);
-    const question = data.question ?? data[1] ?? "";
-    const category = data.category ?? data[2] ?? "Other";
-    const endTime = data.end_time ?? data[3] ?? 0;
-    const creator = data.creator ?? data[4] ?? "";
-    await pool.query(
-      `INSERT INTO markets (id, question, category, end_time, creator)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (id) DO NOTHING`,
-      [marketId, question, category, endTime, creator]
-    );
-  } else if (eventName === "market_resolved" || (eventName === "mkt" && topics[1] === "resolved")) {
-    const marketId = topics[1] ?? data.market_id ?? data[0];
-    const outcome = data.outcome ?? data[1] ?? false;
-    await pool.query(
-      `UPDATE markets SET resolved=true, outcome=$2, updated_at=NOW()\n       WHERE id=$1`,
-      [marketId, outcome]
-    );
-  } else if (eventName === "market_cancelled") {
-    const marketId = topics[1] ?? data.market_id;
-    await pool.query(
-      `UPDATE markets SET cancelled=true, updated_at=NOW()\n       WHERE id=$1`,
-      [marketId]
-    );
-  } else if (eventName === "bet_placed" || eventName === "bet") {
-    const marketId = topics[1] ?? data.market_id ?? data[0];
-    const bettor = topics[2] ?? data.bettor ?? data.user ?? data[1];
-    const netAmount = data.net_amount ?? data.amount ?? data.net ?? data[2] ?? 0;
-    const grossAmount = data.gross_amount ?? data.gross ?? netAmount;
-    const isYes = data.is_yes ?? data[3] ?? true;
-
-    await pool.query(
-      `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (market_id, bettor) DO UPDATE\n       SET net_amount = bets.net_amount + EXCLUDED.net_amount,\n           gross_amount = bets.gross_amount + EXCLUDED.gross_amount`,
-      [marketId, bettor, netAmount, grossAmount, isYes]
-    );
-  }
+      await tx.query(
+        `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)\n       VALUES ($1, $2, $3, $4, $5)\n       ON CONFLICT (market_id, bettor) DO UPDATE\n       SET net_amount = bets.net_amount + EXCLUDED.net_amount,\n           gross_amount = bets.gross_amount + EXCLUDED.gross_amount`,
+        [marketId, bettor, netAmount, grossAmount, isYes]
+      );
+    }
+    if (createsMarket) {
+      await tx.query("UPDATE events SET market_id = $1 WHERE tx_hash = $2 AND event_index = $3", [marketId, txHash, eventIndex]);
+    }
+  });
 }
 
 // Historical backfill main entry point

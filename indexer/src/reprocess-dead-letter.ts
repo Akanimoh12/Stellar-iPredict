@@ -31,7 +31,7 @@ import {
 } from "./deadLetter.js";
 import { refreshDeadLetterQueueDepth } from "./metrics.js";
 import { createLogger, parseLogLevel } from "./log.js";
-import type { DbClient, RedisClient } from "./types.js";
+import type { RedisClient } from "./types.js";
 
 // ── CLI argument helpers ──────────────────────────────────────────────────
 
@@ -67,9 +67,18 @@ async function main(): Promise<void> {
 
   const pool = new Pool({ connectionString });
 
-  // Minimal DbClient wrapper around the pool — each query gets a fresh
-  // connection so individual event replay failures don't poison the session.
-  const db: DbClient = {
+  // Preserve connection leasing so handlers can commit dedupe and effects together.
+  const db = {
+    async connect() {
+      const client = await pool.connect();
+      return {
+        async query<T = unknown>(text: string, params?: readonly unknown[]) {
+          const result = await client.query(text, params ? [...params] : undefined);
+          return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
+        },
+        release: () => client.release(),
+      };
+    },
     async query<T = unknown>(text: string, params?: readonly unknown[]) {
       const result = await pool.query(text, params ? [...params] : undefined);
       return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };

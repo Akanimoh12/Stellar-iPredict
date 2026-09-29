@@ -54,14 +54,10 @@ describe("market_resolved handler", () => {
       outcome: true,
     });
 
-    expect(db.query).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining("INSERT INTO events"),
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"),
       [123456, "abc123", 0, "market_resolved", 42, null, JSON.stringify({ market_id: 42, outcome: true })],
     );
-    expect(db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("SET resolved = TRUE"),
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("SET resolved = TRUE"),
       [42, true],
     );
     expect(redis.del).toHaveBeenCalledWith(

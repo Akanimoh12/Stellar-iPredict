@@ -1,7 +1,7 @@
 import { invalidateOnMarketResolved } from "../cache.js";
 import { marketResolvedPayloadSchema, type MarketResolvedPayload } from "../schemas.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
-import { insertProcessedEvent } from "./idempotency.js";
+import { processEventAtomically } from "./idempotency.js";
 
 export const MARKET_RESOLVED_TOPIC = ["market_resolved"] as const;
 export const LEGACY_MARKET_RESOLVED_TOPIC = ["mkt", "resolved"] as const;
@@ -26,23 +26,23 @@ export async function handleMarketResolvedEvent(
 ): Promise<MarketResolvedPayload> {
   const payload = decodeMarketResolvedEvent(event);
 
-  const inserted = await insertProcessedEvent(db, {
+  const inserted = await processEventAtomically(db, {
     event,
     eventType: "market_resolved",
     marketId: payload.market_id,
     payload: JSON.stringify(payload),
+  }, async (tx) => {
+    await tx.query(
+      `UPDATE markets
+       SET resolved = TRUE,
+           outcome = $2,
+           cancelled = FALSE,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [payload.market_id, payload.outcome],
+    );
   });
   if (!inserted) return payload;
-
-  await db.query(
-    `UPDATE markets
-     SET resolved = TRUE,
-         outcome = $2,
-         cancelled = FALSE,
-         updated_at = NOW()
-     WHERE id = $1`,
-    [payload.market_id, payload.outcome],
-  );
 
   await invalidateOnMarketResolved(redis, payload.market_id);
 

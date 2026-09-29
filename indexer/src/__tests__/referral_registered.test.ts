@@ -117,14 +117,10 @@ describe("referral_registered handler", () => {
       referrer_points: 5,
     });
 
-    expect(db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("INSERT INTO leaderboard"),
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, "Alice", 5],
     );
-    expect(db.query).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining("INSERT INTO leaderboard"),
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO leaderboard"),
       [BOB, 5],
     );
     expect(redis.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");
@@ -136,10 +132,8 @@ describe("referral_registered handler", () => {
 
     await handleReferralRegisteredEvent(sampleEvent({ user: ALICE, display_name: "Alice" }), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(2);
-    expect(db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("INSERT INTO leaderboard"),
+    expect(db.query).toHaveBeenCalledTimes(4);
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO leaderboard"),
       [ALICE, "Alice", 5],
     );
     expect(redis.del).toHaveBeenCalledWith("ipredict:v1:leaderboard:top20");

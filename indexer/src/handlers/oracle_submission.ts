@@ -1,5 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
-import { insertProcessedEvent } from "./idempotency.js";
+import { processEventAtomically } from "./idempotency.js";
 
 /**
  * Optimistic-oracle `submit_outcome` event.
@@ -82,23 +82,21 @@ export function decodeOracleSubmission(event: DecodedEvent): OracleSubmissionPay
 export async function handleOracleSubmission(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeOracleSubmission(event);
 
-  const inserted = await insertProcessedEvent(context.db, {
+  await processEventAtomically(context.db, {
     event,
     eventType: ORACLE_SUBMISSION_TOPIC,
     marketId: payload.market_id,
     actor: payload.submitter,
     payload,
+  }, async (tx) => {
+    // `oracle_submissions` is UNIQUE on market_id (migration 0008). The
+    // ON CONFLICT DO NOTHING keeps the first submission and prevents any
+    // second submission from overwriting a market already being resolved.
+    await tx.query(
+      `INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status)
+       VALUES ($1, $2, $3, $4, 'submitted')
+       ON CONFLICT (market_id) DO NOTHING`,
+      [payload.market_id, payload.submitter, payload.outcome.toUpperCase(), payload.bond_amount],
+    );
   });
-  // Idempotency guard: a replayed event is a no-op, so no double-submit row.
-  if (!inserted) return;
-
-  // `oracle_submissions` is UNIQUE on market_id (migration 0008). The
-  // ON CONFLICT DO NOTHING keeps the first submission and prevents any
-  // second submission from overwriting a market already being resolved.
-  await context.db.query(
-    `INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, status)
-     VALUES ($1, $2, $3, $4, 'submitted')
-     ON CONFLICT (market_id) DO NOTHING`,
-    [payload.market_id, payload.submitter, payload.outcome, payload.bond_amount],
-  );
 }

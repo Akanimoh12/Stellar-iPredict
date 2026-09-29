@@ -1,3 +1,4 @@
+import { inTransaction } from "./transaction.js";
 import { Pool } from "pg";
 
 export interface Queryable {
@@ -80,17 +81,9 @@ export async function withTransaction<T>(
 ): Promise<T> {
   const client = await db.connect();
   try {
-    await client.query("BEGIN");
-    const result = await action(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
+    return await inTransaction(client, action);
   } finally {
-    if (typeof client.release === "function") {
-      client.release();
-    }
+    client.release?.();
   }
 }
 

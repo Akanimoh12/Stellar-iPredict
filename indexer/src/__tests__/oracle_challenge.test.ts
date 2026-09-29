@@ -95,17 +95,13 @@ describe("handleOracleChallengedEvent", () => {
 
     await handleOracleChallengedEvent(challengedEvent(challengedData), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(3);
-    expect(db.query).toHaveBeenNthCalledWith(1, expect.stringContaining("INSERT INTO events"), expect.any(Array));
-    expect(db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("INSERT INTO oracle_disputes"),
-      [42, SUBMITTER, CHALLENGER, "no", "1000000000", "2000000000", new Date(1_700_000_000_000)],
+    expect(db.query).toHaveBeenCalledTimes(5);
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"), expect.any(Array));
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO oracle_disputes"),
+      [42, SUBMITTER, CHALLENGER, "NO", "1000000000", "2000000000", new Date(1_700_000_000_000)],
     );
-    expect((db.query as ReturnType<typeof vi.fn>).mock.calls[1][0]).toContain("ON CONFLICT (market_id) DO NOTHING");
-    expect(db.query).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining("UPDATE oracle_submissions SET status = 'challenged'"),
+    expect((db.query as ReturnType<typeof vi.fn>).mock.calls[2][0]).toContain("ON CONFLICT (market_id) DO NOTHING");
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE oracle_submissions SET status = 'challenged'"),
       [42],
     );
   });
@@ -117,7 +113,7 @@ describe("handleOracleChallengedEvent", () => {
     await handleOracleChallengedEvent(challengedEvent(challengedData), db, redis);
 
     // Only the events-table insert ran; the dedupe guard skipped the dispute write.
-    expect(db.query).toHaveBeenCalledTimes(1);
+    expect(db.query).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -128,10 +124,8 @@ describe("handleOracleEscalatedEvent", () => {
 
     await handleOracleEscalatedEvent(escalatedEvent(escalatedData), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(2);
-    expect(db.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("WHERE market_id = $1 AND status = 'challenged'"),
+    expect(db.query).toHaveBeenCalledTimes(4);
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("WHERE market_id = $1 AND status = 'challenged'"),
       // total_bond is a GENERATED column (submitter_bond + challenger_bond,
       // migration 0015) and is therefore never written by the handler.
       [42, new Date(1_700_000_000_000), new Date(1_700_259_200_000)],
@@ -144,6 +138,6 @@ describe("handleOracleEscalatedEvent", () => {
 
     await handleOracleEscalatedEvent(escalatedEvent(escalatedData), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(1);
+    expect(db.query).toHaveBeenCalledTimes(3);
   });
 });

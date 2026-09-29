@@ -1,0 +1,185 @@
+groups:
+  - name: ipredict.monitoring
+    rules:
+      - alert: IndexerStalled
+        expr: indexer_lag_ledgers > 100
+        for: 10m
+        labels:
+          severity: critical
+          service: indexer
+        annotations:
+          summary: Indexer is more than 100 ledgers behind
+          description: "Indexer lag is {{ $value }} ledgers for 10 minutes."
+
+      - alert: HighRPCErrorRate
+        expr: sum by (service) (rate(rpc_errors_total[5m])) > (5 / 60)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High RPC error rate for {{ $labels.service }}
+          description: "RPC failures have exceeded 5 per minute for 5 minutes (current: {{ $value | humanize }}/s)."
+
+      - alert: MarketStuck
+        expr: (time() - market_end_time_seconds) > (48 * 60 * 60) and on (market_id) market_resolved == 0
+        for: 15m
+        labels:
+          severity: critical
+          service: oracle
+        annotations:
+          summary: Market {{ $labels.market_id }} is stuck
+          description: "Market {{ $labels.market_id }} remains unresolved more than 48 hours after expiry."
+
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.99, sum by (le) (rate(api_request_duration_ms_bucket[5m]))) > 2000
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: API p99 latency is above 2 seconds
+          description: "API p99 latency is {{ $value | humanize }} ms."
+
+      - alert: DatabaseSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(db_query_duration_ms_bucket[5m]))) > 500
+        for: 10m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: Database p99 query latency is above 500 ms
+          description: "Database p99 query latency is {{ $value | humanize }} ms."
+
+      # Windowed, not the lifetime cache_hit_rate gauge: the gauge averages
+      # over the whole process lifetime, so a cache that stopped working an
+      # hour ago barely moves it. The rate ratio reacts within the window.
+      # clamp_min keeps a zero-traffic window from dividing by zero, and the
+      # 100-lookup floor stops a handful of requests at 3am from paging anyone.
+      - alert: LowCacheHitRate
+        expr: |
+          (
+            sum(rate(cache_hits_total[10m]))
+            / clamp_min(sum(rate(cache_hits_total[10m])) + sum(rate(cache_misses_total[10m])), 0.001)
+          ) < 0.5
+          and
+          (sum(increase(cache_hits_total[10m])) + sum(increase(cache_misses_total[10m]))) > 100
+        for: 15m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Cache hit rate is below 50%
+          description: "Redis is serving {{ $value | humanizePercentage }} of cache lookups; the rest are hitting Postgres. Check for a key-shape change or over-eager invalidation."
+
+      # Per-namespace, baseline-relative companion to LowCacheHitRate.
+      #
+      # LowCacheHitRate asks "is the cache healthy at all?" — one number for
+      # every namespace combined, against an absolute 50% floor. This one asks
+      # "is this key namespace worse than it was?", because the failure modes
+      # it exists for (a deploy that changes key structure, an invalidation
+      # that clears too aggressively) hit the namespace whose keys changed
+      # while the aggregate stays afloat on the namespaces that did not.
+      #
+      #   current    windowed 10m hit rate for one namespace
+      #   baseline   the same ratio averaged over 6h, via a subquery so the
+      #              range can exceed the 10m the rate itself uses
+      #   material   below 80% of baseline — a fifth of that namespace's
+      #              usual cache work turning into Postgres load
+      #
+      # 6h is long enough that the first minutes of a bad deploy move the
+      # baseline by far less than the threshold, and short enough to follow
+      # diurnal drift in what traffic asks for. The 100-lookup floor keeps a
+      # quiet namespace from paging on a handful of requests; NaN — a
+      # namespace with no lookups in one of the two windows — never compares
+      # true, so cold namespaces stay silent.
+      - alert: CacheHitRateBelowBaseline
+        expr: |
+          (
+            (
+              sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+              / clamp_min(
+                  sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                  + sum by (namespace) (rate(cache_namespace_misses_total[10m])),
+                  0.01
+                )
+            )
+            <
+            0.8
+            * avg_over_time(
+                (
+                  sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                  / clamp_min(
+                      sum by (namespace) (rate(cache_namespace_hits_total[10m]))
+                      + sum by (namespace) (rate(cache_namespace_misses_total[10m])),
+                      0.01
+                    )
+                )[6h:5m]
+              )
+          )
+          and
+          (
+            sum by (namespace) (increase(cache_namespace_hits_total[10m]))
+            + sum by (namespace) (increase(cache_namespace_misses_total[10m]))
+          ) > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: 'Cache hit rate for the {{ $labels.namespace }} namespace is below its baseline'
+          description: 'Redis is serving {{ $value | humanizePercentage }} of {{ $labels.namespace }} lookups over the last 10m, against a 6h baseline for the same namespace. The difference is reaching Postgres — check this namespace for a key-shape change or over-eager invalidation, and compare with db_query_duration_ms on the Cache & Database Load dashboard.'
+
+      # The oracle serves scrapes from a cached snapshot, so a broken collector
+      # returns stale numbers with a 200 rather than failing the scrape. Only
+      # this alert distinguishes the two.
+      - alert: OracleMetricsStale
+        expr: (time() - oracle_metrics_last_refresh_timestamp_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: oracle
+        annotations:
+          summary: Oracle metrics have not refreshed in over 5 minutes
+          description: "The oracle metrics collector last succeeded {{ $value | humanizeDuration }} ago; oracle_submissions_total and oracle_disputes_total are stale."
+
+      # ── Oracle endpoint authentication failures (issue #576) ────────────────
+      #
+      # The endpoint authenticates with an API key, and until #576 a rejected
+      # key left no trace beyond the 4xx, so a provider integration that broke
+      # overnight was indistinguishable from a scripted guessing attempt.
+      # `oracle_auth_failures_total{reason}` and
+      # `oracle_auth_failure_sources_distinct` make the two separable: only
+      # `invalid_key` can come from guessing, and guessing is distributed
+      # across origins, whereas a broken provider retries from one place.
+      #
+      # Baseline: 10 failures over 5 minutes (10/300 per second).
+
+      - alert: OracleAuthFailureMisconfiguredProvider
+        expr: |
+          (
+            sum(rate(oracle_auth_failures_total[5m])) > (10 / 300)
+            and
+            max(oracle_auth_failure_sources_distinct) < 5
+          )
+          or
+          sum(rate(oracle_auth_failures_total{reason="provider_mismatch"}[5m])) > (1 / 300)
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Oracle authentication failures match a misconfigured provider
+          description: "Failures are concentrated on fewer than 5 client origins, or include a valid key used for the wrong provider. One integration is broken rather than being probed — check recent ORACLE_API_KEYS rotations and the failing provider's key binding."
+
+      - alert: OracleAuthFailureDistributedGuessing
+        expr: |
+          sum(rate(oracle_auth_failures_total{reason="invalid_key"}[5m])) > (10 / 300)
+          and
+          max(oracle_auth_failure_sources_distinct) >= 5
+        for: 5m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: Distributed oracle API-key guessing attempt
+          description: "Unrecognised keys are failing at {{ $value | humanize }}/s from 5 or more distinct client origins. This is the signature of a credential-guessing attempt, not a misconfiguration; the attempted keys are never logged, so use the source addresses in the oracle auth-failure lines to identify the traffic."

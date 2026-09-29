@@ -1,0 +1,1080 @@
+import crypto from "node:crypto";
+import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { Pool } from "pg";
+import { Keypair } from "@stellar/stellar-sdk";
+import { z } from "zod";
+import {
+  badRequest,
+  unauthorized,
+  conflict,
+  forbidden,
+  notFound,
+  type HttpError,
+} from "../lib/errors.js";
+import {
+  logOracleAuthFailure,
+  logOracleAuthFailureSpike,
+  logOracleSubmissionAttempt,
+  type OracleAuthScheme,
+} from "../lib/log.js";
+import {
+  configureOracleAuthFailureThresholds,
+  recordOracleAuthAttempt,
+  recordOracleAuthFailure,
+  type OracleAuthFailureReason,
+} from "../lib/oracleAuthFailures.js";
+import {
+  recordOracleSubmission,
+  recordOracleSubmissionWithCount,
+  getOracleSubmissionsCount,
+  hasNonceBeenUsed,
+  cleanupExpiredNonces,
+  isRegisteredProvider,
+  getIdempotencyRecord,
+  storeIdempotencyRecord,
+  cleanupExpiredIdempotencyKeys,
+  normalizeOutcome,
+  CANONICAL_OUTCOMES,
+  type Queryable,
+} from "../db/oracle.js";
+import { getMarketById } from "../db/markets.js";
+import { config } from "../config/index.js";
+import {
+  credentialCanSubmitFor,
+  credentialIdentity,
+  resolveOracleCredential,
+  type OracleCredential,
+  DEFAULT_DEV_API_KEY,
+  WILDCARD_PROVIDER,
+} from "../config/oracleApiKeys.js";
+
+/**
+ * Authentication failure carrying its reason code (#576).
+ *
+ * The reason is attached to the thrown error rather than recorded at the throw
+ * site so the pure credential helpers stay free of request state, while the
+ * failure is still counted and logged exactly once — in the request handler,
+ * which is the only layer that knows the client address.
+ */
+export type OracleAuthFailureCarrier = HttpError & {
+  authFailureReason?: OracleAuthFailureReason;
+};
+
+function tagged<T extends HttpError>(error: T, reason: OracleAuthFailureReason): T {
+  return Object.assign(error, { authFailureReason: reason }) as T;
+}
+
+/**
+ * Which header carried the credential, without capturing the credential.
+ *
+ * Recorded so a rejected request remains diagnosable — a provider that starts
+ * sending a bare key where its integration used to send `Bearer` reads as a
+ * wrong key until the scheme is visible.
+ */
+export function detectAuthScheme(headers: {
+  authorization?: string;
+  "x-api-key"?: string | string[];
+}): OracleAuthScheme {
+  const raw =
+    headers.authorization ??
+    (Array.isArray(headers["x-api-key"])
+      ? headers["x-api-key"][0]
+      : headers["x-api-key"]);
+  if (!raw) return "none";
+  const token = raw.trim();
+  if (token.startsWith("Bearer ")) return "bearer";
+  if (token.startsWith("API-Key ")) return "api-key";
+  return "raw";
+}
+
+/**
+ * Count and log an authentication failure, then return the assessment so the
+ * caller can act on a spike.
+ *
+ * This is the single funnel every rejected oracle request passes through. It
+ * reads the reason off the tagged error, records the failure by reason and by
+ * source, and emits exactly one audit line — plus one spike line when this
+ * failure is the one that crosses the baseline. It never receives, derives, or
+ * logs the attempted key: the request is already reduced to its source address,
+ * scheme, and reason by the time it gets here.
+ *
+ * Returns `null` when `error` is not an authentication failure, so a caller can
+ * safely pass any thrown value.
+ */
+export function reportOracleAuthFailure(
+  error: unknown,
+  request: FastifyRequest,
+  extra: { provider?: string } = {},
+): ReturnType<typeof recordOracleAuthFailure> | null {
+  const reason = (error as OracleAuthFailureCarrier).authFailureReason;
+  if (!reason) return null;
+
+  const source = request.ip;
+  const scheme = detectAuthScheme(request.headers);
+  const assessment = recordOracleAuthFailure({ reason, source });
+
+  logOracleAuthFailure(
+    {
+      requestId: request.id,
+      reason,
+      source,
+      scheme,
+      ...(extra.provider !== undefined && { provider: extra.provider }),
+      message: error instanceof Error ? error.message : undefined,
+    },
+    request.log,
+  );
+
+  if (assessment.shouldAlert) {
+    logOracleAuthFailureSpike(
+      {
+        requestId: request.id,
+        level: assessment.level === "critical" ? "critical" : "warning",
+        pattern: assessment.pattern,
+        windowFailures: assessment.windowFailures,
+        distinctSources: assessment.distinctSources,
+        ...(assessment.topSource !== undefined && {
+          topSource: assessment.topSource,
+        }),
+        byReason: assessment.byReason,
+      },
+      request.log,
+    );
+  }
+
+  return assessment;
+}
+
+export function compareSecretValues(
+  candidate: string | undefined,
+  expected: string,
+): boolean {
+  if (candidate === undefined) {
+    return false;
+  }
+
+  const candidateHash = crypto
+    .createHash("sha256")
+    .update(Buffer.from(candidate, "utf8"))
+    .digest();
+  const expectedHash = crypto
+    .createHash("sha256")
+    .update(Buffer.from(expected, "utf8"))
+    .digest();
+
+  return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
+
+/**
+ * Strip the scheme from an `Authorization` / `x-api-key` value.
+ *
+ * `x-api-key` carries a bare key; `Authorization` may use either scheme this
+ * API has historically accepted.
+ */
+export function extractApiKeyToken(headerValue: string): string {
+  const token = headerValue.trim();
+  if (token.startsWith("Bearer ")) {
+    return token.slice(7).trim();
+  }
+  if (token.startsWith("API-Key ")) {
+    return token.slice(8).trim();
+  }
+  return token;
+}
+
+/**
+ * Authenticate a request against the per-provider credential set (#429).
+ *
+ * Returns the credential the presented key resolves to. The caller must then
+ * check that the body's `provider` matches it — see
+ * `assertCredentialMayActFor`. Authentication and identity binding are
+ * deliberately two steps: the body cannot be parsed until after the key is
+ * accepted, and a valid key naming someone else's provider is a different
+ * failure (403) from an unrecognised key (401).
+ */
+export function authenticateOracleRequest(
+  headers: {
+    authorization?: string;
+    "x-api-key"?: string | string[];
+  },
+  credentials: readonly OracleCredential[] = config.oracleApiKeys,
+): OracleCredential {
+  const rawHeader =
+    headers.authorization ??
+    (Array.isArray(headers["x-api-key"])
+      ? headers["x-api-key"][0]
+      : headers["x-api-key"]);
+
+  if (!rawHeader) {
+    throw tagged(unauthorized("Missing authorization header"), "missing_header");
+  }
+
+  const token = extractApiKeyToken(rawHeader);
+
+  const credential = resolveOracleCredential(
+    token,
+    credentials,
+  );
+
+  if (credential) {
+    return credential;
+  }
+
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.ORACLE_API_KEY &&
+    compareSecretValues(token, process.env.ORACLE_API_KEY)
+  ) {
+    return {
+      provider: WILDCARD_PROVIDER,
+      keyHash: Buffer.alloc(0),
+      hashed: false,
+    };
+  }
+
+  // Deliberately identical to the pre-existing message and status: an
+  // unrecognised key learns nothing about which providers are configured.
+  throw tagged(unauthorized("Invalid API key"), "invalid_key");
+}
+
+/**
+ * Reject a submission whose body names a provider the key is not bound to.
+ *
+ * This is the half that matters. Without it a provider's key still
+ * authenticates every submission, so a single compromised or careless key can
+ * post an outcome attributed to any other provider — which, for an oracle
+ * feeding market resolution, is the whole attack.
+ *
+ * 403 rather than 401: the caller is authenticated, just not authorised for
+ * this identity, and retrying with the same key will never help.
+ */
+export function assertCredentialMayActFor(
+  credential: OracleCredential,
+  provider: string,
+): void {
+  if (!credentialCanSubmitFor(credential, provider)) {
+    throw tagged(
+      forbidden(
+        `API key is bound to provider "${credentialIdentity(credential)}" and cannot submit on behalf of "${provider}"`,
+      ),
+      "provider_mismatch",
+    );
+  }
+}
+
+/**
+ * Values that make up the exact canonical message a provider signs.
+ *
+ * Field order, separators and stringification are part of the protocol: a
+ * signer must reproduce this byte-for-byte or verification fails intermittently.
+ * Bound/user data beyond these fields is never part of the message nor the
+ * logs — see the canonical format note below.
+ */
+export interface OracleVerificationInput {
+  marketId: number;
+  outcome: string;
+  provider: string;
+  /** Unix timestamp in seconds, as carried in the request body (0 when absent). */
+  timestamp?: number;
+  /** Opaque nonce from the request body (empty when absent). */
+  nonce?: string;
+}
+
+/**
+ * Build the canonical, deterministic message a provider signs.
+ *
+ * Format (each line on its own, LF-separated, no trailing newline):
+ *
+ * ```
+ * ipredict-oracle-submit
+ * market_id:<marketId>
+ * outcome:<outcome>
+ * provider:<provider>
+ * timestamp:<timestamp>
+ * nonce:<nonce>
+ * ```
+ *
+ * Missing `timestamp`/`nonce` serialise as `0` / empty string so the message
+ * is still deterministic — a signer uses the exact same values it put in the
+ * request body. Do not reorder fields or change stringification; that would
+ * break every existing signature.
+ */
+export function buildCanonicalOracleMessage(
+  input: OracleVerificationInput,
+): string {
+  const timestamp = input.timestamp ?? 0;
+  const nonce = input.nonce ?? "";
+  return [
+    "ipredict-oracle-submit",
+    `market_id:${input.marketId}`,
+    `outcome:${input.outcome}`,
+    `provider:${input.provider}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join("\n");
+}
+
+export const outcomeSchema = z
+  .union([z.string(), z.boolean()])
+  .transform((raw, ctx): "YES" | "NO" => {
+    const normalized = normalizeOutcome(raw);
+    if (normalized === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `outcome must be one of ${CANONICAL_OUTCOMES.join(
+          ", ",
+        )} (accepts yes/no, true/false, y/n, 1/0 — case-insensitive)`,
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  });
+
+/**
+ * Verify that the signature over the canonical oracle message matches the provider key.
+ */
+export function verifyOracleSubmissionSignature(
+  input: OracleVerificationInput,
+  signature: string,
+): boolean {
+  if (!signature) {
+    return false;
+  }
+  const message = buildCanonicalOracleMessage(input);
+  try {
+    return Keypair.fromPublicKey(input.provider).verify(
+      Buffer.from(message, "utf8"),
+      Buffer.from(signature, "base64"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Sign the canonical message with a provider keypair (helper for tests/docs/clients). */
+export function signOracleMessage(
+  input: OracleVerificationInput,
+  kp: Keypair,
+): string {
+  const message = buildCanonicalOracleMessage(input);
+  return kp.sign(Buffer.from(message, "utf8")).toString("base64");
+}
+
+const DEFAULT_ORACLE_THRESHOLD = 3;
+
+const oracleSubmitBodySchema = z.object({
+  marketId: z.number().int().positive(),
+  outcome: outcomeSchema,
+  signature: z.string().min(1),
+  provider: z.string().min(1),
+  bondAmount: z.union([z.string().min(1), z.number().positive()]).optional(),
+  nonce: z.string().min(1).optional(),
+  timestamp: z.number().int().positive().optional(),
+});
+
+export const ORACLE_SUBMIT_PATH = "/oracle/submit";
+export const LEGACY_ORACLE_SUBMIT_PATH = "/api/oracle/submit";
+
+/**
+ * Oracle routes as a Fastify plugin for proper versioning.
+ * Mounted under /api/v1 by the main API router.
+ */
+export const oracleRoutes: FastifyPluginAsync = async (routes) => {
+  // Thresholds are configuration, not constants: a deployment that knows its
+  // baseline (e.g. a provider that rotates keys on a schedule) can widen the
+  // window rather than muting the alert (#576).
+  configureOracleAuthFailureThresholds({
+    windowMs: config.ORACLE_AUTH_FAILURE_WINDOW_SEC * 1000,
+    minFailures: config.ORACLE_AUTH_FAILURE_MIN_COUNT,
+    distributedSourceThreshold: config.ORACLE_AUTH_FAILURE_DISTINCT_SOURCES,
+    cooldownMs: config.ORACLE_AUTH_FAILURE_COOLDOWN_SEC * 1000,
+  });
+
+  const pool = routes.hasDecorator("pool") ? (routes as any).pool : undefined;
+
+  routes.post(
+    "/oracle/submit",
+    {
+      config: {
+        auth: "protected",
+      },
+      schema: {
+        summary: "Provider submission intake",
+        description:
+          "Submit an oracle outcome for a market guarded by API-key auth with replay protection",
+        tags: ["oracle"],
+        security: [{ oracleApiKey: [] }],
+        body: {
+          type: "object",
+          required: ["marketId", "outcome", "signature", "provider"],
+          properties: {
+            marketId: { type: "number" },
+            outcome: {
+              description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
+              anyOf: [{ type: "string" }, { type: "boolean" }],
+            },
+            signature: { type: "string" },
+            provider: { type: "string" },
+            bondAmount: { anyOf: [{ type: "string" }, { type: "number" }] },
+            nonce: { type: "string" },
+            timestamp: { type: "number" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            required: ["accepted", "count", "threshold", "submissionsNeeded"],
+            properties: {
+              accepted: { type: "boolean" },
+              count: {
+                type: "number",
+                description: "Current number of accepted submissions for this market including this one",
+              },
+              threshold: {
+                type: "number",
+                description: "Configured submission threshold needed for consensus",
+              },
+              submissionsNeeded: {
+                type: "number",
+                description: "Remaining submissions needed to meet or exceed threshold",
+              },
+            },
+          },
+          400: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+          401: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+          409: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                  marketId: { type: "number" },
+                },
+              },
+            },
+          },
+          403: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+          404: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const db: Queryable = pool;
+      const now = Date.now();
+
+      // Counted before authenticating so the failure *share* has a
+      // denominator: a provider retrying a wrong key all night should read as
+      // a high failure rate, not an unknown one (#576).
+      recordOracleAuthAttempt();
+
+      let credential: OracleCredential;
+      try {
+        credential = authenticateOracleRequest(request.headers);
+      } catch (error) {
+        reportOracleAuthFailure(error, request);
+        throw error;
+      }
+
+      const parsed = oracleSubmitBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: {
+            code: "BAD_REQUEST",
+            message: "Invalid request body",
+            issues: parsed.error.issues,
+            requestId: request.id,
+          },
+        });
+      }
+
+      const { marketId, outcome, signature, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Identity binding (#429): the key decides which provider this request
+      // may speak for. Checked before signature verification and before any
+      // database read, so a key that is not entitled to this provider never
+      // reaches the rest of the pipeline.
+      try {
+        assertCredentialMayActFor(credential, provider);
+      } catch (error) {
+        // A valid key naming the wrong provider is a misconfiguration, not a
+        // guess — see the classifier in `oracleAuthFailures.ts`.
+        reportOracleAuthFailure(error, request, { provider });
+        throw error;
+      }
+
+      // Validate signature
+      if (
+        !verifyOracleSubmissionSignature(
+          {
+            marketId,
+            outcome: String(outcome),
+            provider,
+            timestamp,
+            nonce,
+          },
+          signature,
+        )
+      ) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "bad_signature",
+            message: "Invalid signature for provider",
+          },
+          request.log,
+        );
+        throw unauthorized("Invalid signature for provider");
+      }
+
+      // Validate bond amount against configured minimum if provided
+      if (bondAmount !== undefined) {
+        const bondNumeric = Number(bondAmount);
+        const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+        if (bondNumeric < minBondStroops) {
+          throw badRequest(
+            `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+          );
+        }
+      }
+
+      // Replay protection: validate timestamp window
+      if (timestamp !== undefined) {
+        const timestampMs = timestamp * 1000;
+        const windowMs = config.ORACLE_TIMESTAMP_WINDOW_SEC * 1000;
+
+        if (Math.abs(now - timestampMs) > windowMs) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "bad_request",
+              message: `Timestamp outside acceptance window`,
+            },
+            request.log,
+          );
+          throw badRequest(
+            `Timestamp outside acceptance window of ${config.ORACLE_TIMESTAMP_WINDOW_SEC}s`,
+          );
+        }
+      }
+
+      // Replay protection: check nonce uniqueness
+      if (nonce !== undefined) {
+        const nonceUsed = await hasNonceBeenUsed(nonce, db);
+        if (nonceUsed) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "bad_request",
+              message: `Nonce has already been used`,
+            },
+            request.log,
+          );
+          throw badRequest(`Nonce "${nonce}" has already been used`);
+        }
+      }
+
+      // Issue #441: Idempotency key support
+      const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
+      if (idempotencyKey) {
+        const existing = await getIdempotencyRecord(idempotencyKey, db);
+        if (existing) {
+          const payloadHash = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(request.body))
+            .digest("hex");
+          if (existing.payload_hash !== payloadHash) {
+            throw conflict(
+              `Idempotency key "${idempotencyKey}" was used with a different payload`,
+            );
+          }
+          return reply
+            .status(existing.status_code as 200 | 400 | 401 | 403 | 404 | 409)
+            .send(existing.response_body);
+        }
+      }
+
+      let responseStatus: 200 | 400 | 401 | 403 | 404 | 409 = 200;
+      let responseBody: unknown;
+
+      let count: number;
+      try {
+        const result = await recordOracleSubmissionWithCount(
+          {
+            marketId,
+            provider,
+            outcome: String(outcome),
+            bondAmount:
+              bondAmount !== undefined
+                ? bondAmount
+                : config.SUBMITTER_BOND_XLM * 10_000_000,
+            nonce,
+            requestTimestamp: timestamp
+              ? new Date(timestamp * 1000)
+              : undefined,
+            requestId: request.id,
+          },
+          db,
+        );
+        count = result.count;
+      } catch (error: any) {
+        // Handle duplicate market submission (SQLSTATE 23505)
+        if (
+          error.code === "23505" &&
+          error.constraint === "uq_oracle_submissions_market_id"
+        ) {
+          logOracleSubmissionAttempt(
+            {
+              requestId: request.id,
+              provider,
+              marketId,
+              outcome: "duplicate_market",
+              message: `Market ${marketId} already has an oracle submission`,
+            },
+            request.log,
+          );
+          throw conflict(
+            `Oracle submission for market ${marketId} already exists. Each market can only have one submission.`,
+          );
+        }
+        // Re-throw other errors
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider,
+            marketId,
+            outcome: "internal_error",
+            message: error.message || "Failed to record submission",
+          },
+          request.log,
+        );
+        throw error;
+      }
+
+      logOracleSubmissionAttempt(
+        {
+          requestId: request.id,
+          provider,
+          marketId,
+          outcome: "accepted",
+        },
+        request.log,
+      );
+
+      const threshold = config.ORACLE_THRESHOLD;
+      const submissionsNeeded = Math.max(
+        0,
+        threshold - count,
+      );
+
+      responseBody = { accepted: true, count, threshold, submissionsNeeded };
+      responseStatus = 200;
+
+      // Store idempotency record if key was provided
+      if (idempotencyKey) {
+        const payloadHash = crypto
+          .createHash("sha256")
+          .update(JSON.stringify(request.body))
+          .digest("hex");
+        await storeIdempotencyRecord(
+          idempotencyKey,
+          payloadHash,
+          responseBody,
+          responseStatus,
+          db,
+        );
+      }
+
+      // Periodic nonce cleanup (every 10th request)
+      if (nonce !== undefined && Math.random() < 0.1) {
+        cleanupExpiredNonces(config.ORACLE_NONCE_RETENTION_SEC, db).catch(
+          (err) =>
+            request.log.error({ err }, "Failed to cleanup expired nonces"),
+        );
+      }
+
+      // Periodic idempotency key cleanup (every 20th request)
+      if (idempotencyKey !== undefined && Math.random() < 0.05) {
+        cleanupExpiredIdempotencyKeys(
+          config.ORACLE_IDEMPOTENCY_RETENTION_SEC,
+          db,
+        ).catch((err) =>
+          request.log.error({ err }, "Failed to cleanup expired idempotency keys"),
+        );
+      }
+
+      return reply.status(responseStatus).send(responseBody);
+    },
+  );
+};
+
+/**
+ * Legacy registration function for backward compatibility.
+ * @deprecated Use oracleRoutes plugin registered through API router instead.
+ */
+export function registerOracleRoutes(
+  server: FastifyInstance,
+  pool: Pool | Queryable,
+  dbOverride?: Queryable,
+): void {
+  // Validate that a database is available at registration time, not per-request.
+  // This fails loudly at startup when the route is misconfigured.
+  if (!pool && !dbOverride) {
+    throw new Error(
+      "Oracle routes require a database pool. Pass options.pool to buildServer or dbOverride to registerOracleRoutes.",
+    );
+  }
+
+  server.post(
+    "/api/oracle/submit",
+    {
+      config: {
+        auth: "protected",
+      },
+      schema: {
+        deprecated: true,
+        summary: "[DEPRECATED] Use /api/v1/oracle/submit instead",
+        description: "Legacy endpoint. Migrating to versioned API.",
+        tags: ["oracle"],
+        security: [{ oracleApiKey: [] }],
+        body: {
+          type: "object",
+          required: ["marketId", "outcome", "signature", "provider"],
+          properties: {
+            marketId: { type: "number" },
+            outcome: {
+              description: "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised.",
+              anyOf: [{ type: "string" }, { type: "boolean" }],
+            },
+            signature: { type: "string" },
+            provider: { type: "string" },
+            bondAmount: { anyOf: [{ type: "string" }, { type: "number" }] },
+            nonce: { type: "string" },
+            timestamp: { type: "number" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            required: ["accepted", "count", "threshold", "submissionsNeeded"],
+            properties: {
+              accepted: { type: "boolean" },
+              count: {
+                type: "number",
+                description: "Current number of accepted submissions for this market including this one",
+              },
+              threshold: {
+                type: "number",
+                description: "Configured submission threshold needed for consensus",
+              },
+              submissionsNeeded: {
+                type: "number",
+                description: "Remaining submissions needed to meet or exceed threshold",
+              },
+            },
+          },
+          400: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+          401: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                },
+              },
+            },
+          },
+          409: {
+            type: "object",
+            required: ["error"],
+            properties: {
+              error: {
+                type: "object",
+                required: ["code", "message"],
+                properties: {
+                  code: { type: "string" },
+                  message: { type: "string" },
+                  requestId: { type: "string" },
+                  marketId: { type: "number" },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const db: Queryable = dbOverride ?? pool;
+      const now = Date.now();
+      request.log.warn(
+        "DEPRECATED: /api/oracle/submit called. Use /api/v1/oracle/submit instead.",
+      );
+
+      recordOracleAuthAttempt();
+
+      try {
+        const authHeader =
+          request.headers.authorization ||
+          (request.headers["x-api-key"] as string | undefined);
+
+        if (!authHeader) {
+          throw tagged(unauthorized("Missing authorization header"), "missing_header");
+        }
+
+        const token = extractApiKeyToken(authHeader);
+        const expectedApiKey = process.env.ORACLE_API_KEY;
+        const isDevKey = process.env.NODE_ENV !== "production" && token === DEFAULT_DEV_API_KEY;
+        const matchesConfigured = expectedApiKey && (token === expectedApiKey || compareSecretValues(token, expectedApiKey));
+
+        if (!isDevKey && !matchesConfigured) {
+          if (!expectedApiKey) {
+            throw tagged(unauthorized("Oracle API key is not configured"), "not_configured");
+          }
+          throw tagged(unauthorized("Invalid API key"), "invalid_key");
+        }
+      } catch (error) {
+        reportOracleAuthFailure(error, request);
+        throw error;
+      }
+
+      const parsed = oracleSubmitBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        logOracleSubmissionAttempt(
+          {
+            requestId: request.id,
+            provider: (request.body as any)?.provider || "unknown",
+            marketId: (request.body as any)?.marketId || 0,
+            outcome: "bad_request",
+            message: "Invalid request body",
+          },
+          request.log,
+        );
+        return reply.status(400).send({
+          error: {
+            code: "BAD_REQUEST",
+            message: "Invalid request body",
+            issues: parsed.error.issues,
+            requestId: request.id,
+          },
+        });
+      }
+
+      const { marketId, outcome, signature, provider, bondAmount, nonce, timestamp } = parsed.data;
+
+      // Validate signature
+      if (
+        !verifyOracleSubmissionSignature(
+          {
+            marketId,
+            outcome: String(outcome),
+            provider,
+            timestamp,
+            nonce,
+          },
+          signature,
+        )
+      ) {
+        throw unauthorized("Invalid signature for provider");
+      }
+
+      // Validate bond amount against configured minimum if provided
+      if (bondAmount !== undefined) {
+        const bondNumeric = Number(bondAmount);
+        const minBondStroops = config.SUBMITTER_BOND_XLM * 10_000_000; // Convert XLM to stroops
+        if (bondNumeric < minBondStroops) {
+          throw badRequest(
+            `Bond amount ${bondNumeric} stroops is below minimum ${minBondStroops} stroops (${config.SUBMITTER_BOND_XLM} XLM)`
+          );
+        }
+      }
+
+      // Replay protection: validate timestamp window
+      if (timestamp !== undefined) {
+        const timestampMs = timestamp * 1000;
+        const windowMs = config.ORACLE_TIMESTAMP_WINDOW_SEC * 1000;
+
+        if (Math.abs(now - timestampMs) > windowMs) {
+          throw badRequest(
+            `Timestamp outside acceptance window of ${config.ORACLE_TIMESTAMP_WINDOW_SEC}s`,
+          );
+        }
+      }
+
+      // Replay protection: check nonce uniqueness
+      if (nonce !== undefined) {
+        const nonceUsed = await hasNonceBeenUsed(nonce, db);
+        if (nonceUsed) {
+          throw badRequest(`Nonce "${nonce}" has already been used`);
+        }
+      }
+
+      // Issue #441: Idempotency key support
+      const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
+      if (idempotencyKey) {
+        const existing = await getIdempotencyRecord(idempotencyKey, db);
+        if (existing) {
+          const payloadHash = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(request.body))
+            .digest("hex");
+          if (existing.payload_hash !== payloadHash) {
+            throw conflict(
+              `Idempotency key "${idempotencyKey}" was used with a different payload`,
+            );
+          }
+          return reply
+            .status(existing.status_code as 200 | 400 | 401 | 409)
+            .send(existing.response_body);
+        }
+      }
+
+      let count: number;
+      try {
+        const result = await recordOracleSubmissionWithCount(
+          {
+            marketId,
+            provider,
+            outcome: String(outcome),
+            bondAmount:
+              bondAmount !== undefined
+                ? bondAmount
+                : config.SUBMITTER_BOND_XLM * 10_000_000,
+            nonce,
+            requestTimestamp: timestamp
+              ? new Date(timestamp * 1000)
+              : undefined,
+            requestId: request.id,
+          },
+          db,
+        );
+        count = result.count;
+      } catch (error: any) {
+        if (
+          error.code === "23505" &&
+          error.constraint === "uq_oracle_submissions_market_id"
+        ) {
+          throw conflict(
+            `Oracle submission for market ${marketId} already exists. Each market can only have one submission.`,
+          );
+        }
+        throw error;
+      }
+
+      const threshold = config.ORACLE_THRESHOLD;
+      const submissionsNeeded = Math.max(
+        0,
+        threshold - count,
+      );
+
+      const responseBody = { accepted: true, count, threshold, submissionsNeeded };
+
+      if (idempotencyKey) {
+        const payloadHash = crypto
+          .createHash("sha256")
+          .update(JSON.stringify(request.body))
+          .digest("hex");
+        await storeIdempotencyRecord(
+          idempotencyKey,
+          payloadHash,
+          responseBody,
+          200,
+          db,
+        );
+      }
+
+      if (nonce !== undefined && Math.random() < 0.1) {
+        cleanupExpiredNonces(config.ORACLE_NONCE_RETENTION_SEC, db).catch(
+          (err) =>
+            request.log.error({ err }, "Failed to cleanup expired nonces"),
+        );
+      }
+
+      return reply.status(200).send(responseBody);
+    },
+  );
+}

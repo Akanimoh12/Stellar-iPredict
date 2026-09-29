@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# iPredict — reverse proxy / TLS termination.
+#
+# Sits in front of the replicated API service and terminates TLS, so clients
+# only ever talk HTTPS while the API stays on the private compose network.
+#
+# Variables (Compose injects these from infra/.env; see the "Reverse proxy"
+# section of infra/.env.example):
+#
+#   PROXY_DOMAIN  Public hostname to serve. Defaults to `localhost`, which
+#                 Caddy serves over HTTPS with an internally-trusted
+#                 certificate — ideal for local testing (`curl -k
+#                 https://localhost/healthz`). Set it to your real domain
+#                 (e.g. api.ipredict.app) and Caddy provisions and renews a
+#                 Let's Encrypt certificate automatically; ports 80 and 443
+#                 must be reachable and DNS must point at this host.
+#   ACME_EMAIL    Let's Encrypt account email for expiry notifications.
+#                 Empty = Caddy's default account (works, but you get no
+#                 warnings before a certificate expires).
+#   API_UPSTREAM  Upstream on the compose network. Defaults to the `api`
+#                 service: Docker's built-in DNS round-robins its replicas,
+#                 so no explicit upstream list is needed here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+{
+	# Certificate expiry / renewal notifications. Compose always provides a
+	# non-empty value (ACME_EMAIL, defaulting to the admin@localhost
+	# placeholder). localhost and tls-internal sites never contact an ACME
+	# server, and Let's Encrypt issues certificates even with a placeholder
+	# contact — the address only receives expiry notices.
+	email {$ACME_EMAIL}
+
+	# The API is the only thing this container serves; the admin endpoint is
+	# localhost-only and unneeded here.
+	admin off
+}
+
+# Container-internal liveness probe used by the compose healthcheck. Plain
+# HTTP on a non-published port, so it works regardless of PROXY_DOMAIN and
+# independent of the TLS certificate state.
+:8080 {
+	respond "ok" 200
+}
+
+{$PROXY_DOMAIN:localhost} {
+	# Compress text responses — JSON API payloads win big here.
+	encode gzip
+
+	# Liveness probe for the proxy itself, reachable from outside (e.g. a
+	# load balancer or `curl -k https://localhost/healthz`).
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# Everything else goes to the API.
+	handle {
+		reverse_proxy {$API_UPSTREAM:api:4000}
+	}
+}

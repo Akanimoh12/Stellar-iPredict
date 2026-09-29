@@ -1,0 +1,611 @@
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import type { FastifyInstance } from "fastify";
+import {
+  observe,
+  getSnapshot,
+  getHistogram,
+  resetHistogram,
+  configureBuckets,
+  normaliseLabel,
+  cumulativeCounts,
+  DEFAULT_BUCKETS,
+  registerMetricsHook,
+  registerMetricsEndpoint,
+  recordError,
+  getErrorCount,
+  getErrorCounts,
+  resetErrorCounts,
+  recordStatus,
+  getStatusCounts,
+  resetStatusCounts,
+  observeDbQuery,
+  getDbQueryHistogram,
+  resetDbQueryHistogram,
+  serializeDbQueryMetrics,
+  serializeMetrics,
+  isMetricsRequestAuthorized,
+  METRICS_TOKEN_HEADER,
+} from "../metrics.js";
+import { buildServer } from "@/server";
+import { createFakePool } from "../test/fakePool.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+beforeEach(() => {
+  resetHistogram();
+  resetErrorCounts();
+  resetDbQueryHistogram();
+});
+
+// ---------------------------------------------------------------------------
+// normaliseLabel
+// ---------------------------------------------------------------------------
+describe("normaliseLabel", () => {
+  it("upper-cases the method", () => {
+    expect(normaliseLabel("get", "/api/markets")).toBe("GET /api/markets");
+  });
+
+  it("preserves path as-is", () => {
+    expect(normaliseLabel("POST", "/api/markets/:id/bets")).toBe(
+      "POST /api/markets/:id/bets"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// configureBuckets validation
+// ---------------------------------------------------------------------------
+describe("configureBuckets", () => {
+  afterEach(() => {
+    // Restore default buckets so other tests are unaffected.
+    // Re-import is not needed — resetHistogram() clears entries; the buckets
+    // setting only affects *new* entries, so resetting to defaults here is
+    // enough for isolation.
+    configureBuckets([...DEFAULT_BUCKETS]);
+    resetErrorCounts();
+  });
+
+  it("throws when buckets array is empty", () => {
+    expect(() => configureBuckets([])).toThrow(RangeError);
+  });
+
+  it("throws when buckets are not strictly ascending", () => {
+    expect(() => configureBuckets([10, 10, Infinity])).toThrow(RangeError);
+    expect(() => configureBuckets([50, 10, Infinity])).toThrow(RangeError);
+  });
+
+  it("throws when the last bucket is not Infinity", () => {
+    expect(() => configureBuckets([10, 50, 100])).toThrow(RangeError);
+  });
+
+  it("accepts a valid custom bucket list", () => {
+    expect(() => configureBuckets([10, 50, 100, Infinity])).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// observe / getSnapshot
+// ---------------------------------------------------------------------------
+describe("observe + getSnapshot", () => {
+  it("returns undefined when no observations have been made", () => {
+    expect(getSnapshot("GET", "/api/markets")).toBeUndefined();
+  });
+
+  it("creates an entry on the first observation", () => {
+    observe("GET", "/api/markets", 42);
+    const snap = getSnapshot("GET", "/api/markets");
+    expect(snap).not.toBeUndefined();
+    expect(snap!.count).toBe(1);
+    expect(snap!.sum).toBeCloseTo(42);
+  });
+
+  it("places the observation in the correct bucket", () => {
+    // 42 ms → should land in the ≤50 ms bucket (index 3 in DEFAULT_BUCKETS)
+    observe("GET", "/api/markets", 42);
+    const snap = getSnapshot("GET", "/api/markets")!;
+    const idx = snap.buckets.findIndex((b) => b >= 42);
+    expect(snap.counts[idx]).toBe(1);
+    // Every other bucket must be zero.
+    snap.counts.forEach((c, i) => {
+      if (i !== idx) expect(c).toBe(0);
+    });
+  });
+
+  it("accumulates multiple observations correctly", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets", 300);
+
+    const snap = getSnapshot("GET", "/api/markets")!;
+    expect(snap.count).toBe(3);
+    expect(snap.sum).toBeCloseTo(320);
+  });
+
+  it("tracks separate histograms per route", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/markets/:id", 200);
+
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+    expect(getSnapshot("GET", "/api/markets/:id")!.count).toBe(1);
+  });
+
+  it("tracks separate histograms per method", () => {
+    observe("GET", "/api/markets", 10);
+    observe("POST", "/api/markets", 100);
+
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+    expect(getSnapshot("POST", "/api/markets")!.count).toBe(1);
+  });
+
+  it("places a very fast request (< first bucket) in bucket[0]", () => {
+    observe("GET", "/healthz", 1); // 1 ms < 5 ms (DEFAULT_BUCKETS[0])
+    const snap = getSnapshot("GET", "/healthz")!;
+    expect(snap.counts[0]).toBe(1);
+  });
+
+  it("places an extremely slow request in the Infinity bucket", () => {
+    observe("GET", "/healthz", 99_999);
+    const snap = getSnapshot("GET", "/healthz")!;
+    const lastIdx = snap.buckets.length - 1;
+    expect(snap.buckets[lastIdx]).toBe(Infinity);
+    expect(snap.counts[lastIdx]).toBe(1);
+  });
+
+  it("snapshot is immutable (frozen)", () => {
+    observe("GET", "/api/markets", 50);
+    const snap = getSnapshot("GET", "/api/markets")!;
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.counts)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getHistogram
+// ---------------------------------------------------------------------------
+describe("getHistogram", () => {
+  it("returns an empty array when no observations exist", () => {
+    expect(getHistogram()).toEqual([]);
+  });
+
+  it("returns all routes sorted alphabetically by label", () => {
+    observe("GET", "/api/markets", 10);
+    observe("GET", "/api/leaderboard", 20);
+    observe("GET", "/api/stats", 30);
+
+    const routes = getHistogram().map((s) => s.route);
+    expect(routes).toEqual([
+      "GET /api/leaderboard",
+      "GET /api/markets",
+      "GET /api/stats",
+    ]);
+  });
+
+  it("includes correct count and sum for each route", () => {
+    observe("GET", "/api/markets", 40);
+    observe("GET", "/api/markets", 60);
+    observe("GET", "/api/stats", 100);
+
+    const hist = getHistogram();
+    const markets = hist.find((s) => s.route === "GET /api/markets")!;
+    const stats = hist.find((s) => s.route === "GET /api/stats")!;
+
+    expect(markets.count).toBe(2);
+    expect(markets.sum).toBeCloseTo(100);
+    expect(stats.count).toBe(1);
+    expect(stats.sum).toBeCloseTo(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resetHistogram
+// ---------------------------------------------------------------------------
+describe("resetHistogram", () => {
+  it("clears all entries", () => {
+    observe("GET", "/api/markets", 10);
+    resetHistogram();
+    expect(getHistogram()).toEqual([]);
+    expect(getSnapshot("GET", "/api/markets")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cumulativeCounts
+// ---------------------------------------------------------------------------
+describe("cumulativeCounts", () => {
+  it("produces running totals from per-bucket counts", () => {
+    expect(cumulativeCounts([0, 3, 1, 0, 2])).toEqual([0, 3, 4, 4, 6]);
+  });
+
+  it("handles all-zero input", () => {
+    expect(cumulativeCounts([0, 0, 0])).toEqual([0, 0, 0]);
+  });
+
+  it("handles a single bucket", () => {
+    expect(cumulativeCounts([7])).toEqual([7]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error counter API
+// ---------------------------------------------------------------------------
+describe("recordError + getErrorCount", () => {
+  it("returns undefined when no errors have been recorded", () => {
+    expect(getErrorCount("GET", "/api/markets")).toBeUndefined();
+  });
+
+  it("increments error count for a route", () => {
+    recordError("GET", "/api/markets");
+    expect(getErrorCount("GET", "/api/markets")).toBe(1);
+  });
+
+  it("accumulates multiple errors for the same route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    expect(getErrorCount("GET", "/api/markets")).toBe(3);
+  });
+
+  it("tracks separate error counts per route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets/:id");
+    recordError("GET", "/api/markets");
+
+    expect(getErrorCount("GET", "/api/markets")).toBe(2);
+    expect(getErrorCount("GET", "/api/markets/:id")).toBe(1);
+  });
+
+  it("tracks separate error counts per method", () => {
+    recordError("GET", "/api/markets");
+    recordError("POST", "/api/markets");
+
+    expect(getErrorCount("GET", "/api/markets")).toBe(1);
+    expect(getErrorCount("POST", "/api/markets")).toBe(1);
+  });
+});
+
+describe("getErrorCounts", () => {
+  it("returns an empty array when no errors have been recorded", () => {
+    expect(getErrorCounts()).toEqual([]);
+  });
+
+  it("returns all routes with errors sorted alphabetically by label", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/leaderboard");
+    recordError("GET", "/api/stats");
+
+    const routes = getErrorCounts().map((s) => s.route);
+    expect(routes).toEqual([
+      "GET /api/leaderboard",
+      "GET /api/markets",
+      "GET /api/stats",
+    ]);
+  });
+
+  it("includes correct error count for each route", () => {
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/markets");
+    recordError("GET", "/api/stats");
+
+    const errors = getErrorCounts();
+    const markets = errors.find((s) => s.route === "GET /api/markets")!;
+    const stats = errors.find((s) => s.route === "GET /api/stats")!;
+
+    expect(markets.count).toBe(2);
+    expect(stats.count).toBe(1);
+  });
+
+  it("snapshot is immutable (frozen)", () => {
+    recordError("GET", "/api/markets");
+    const snapshot = getErrorCounts()[0]!;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+});
+
+describe("resetErrorCounts", () => {
+  it("clears all error entries", () => {
+    recordError("GET", "/api/markets");
+    resetErrorCounts();
+    expect(getErrorCounts()).toEqual([]);
+    expect(getErrorCount("GET", "/api/markets")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: registerMetricsHook wired into a real Fastify server
+// ---------------------------------------------------------------------------
+describe("registerMetricsHook (Fastify integration)", () => {
+  let server: FastifyInstance;
+
+  beforeEach(() => {
+    resetHistogram();
+    resetErrorCounts();
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
+  });
+
+  afterEach(async () => {
+    await server.close();
+    resetHistogram();
+    resetErrorCounts();
+  });
+
+  it("records an observation after a real request to GET /healthz", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const snap = getSnapshot("GET", "/healthz");
+    expect(snap).not.toBeUndefined();
+    expect(snap!.count).toBe(1);
+    expect(snap!.sum).toBeGreaterThanOrEqual(0);
+  });
+
+  it("accumulates observations across multiple requests to the same route", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const snap = getSnapshot("GET", "/healthz")!;
+    expect(snap.count).toBe(3);
+  });
+
+  it("uses the route template, not the filled-in URL, for parameterised routes", async () => {
+    // /api/markets/:id — the id 999 must not appear in the label.
+    await server.inject({ method: "GET", url: "/api/markets/999" });
+
+    const byTemplate = getSnapshot("GET", "/api/markets/:id");
+    const byRaw = getSnapshot("GET", "/api/markets/999");
+
+    expect(byTemplate).not.toBeUndefined();
+    expect(byRaw).toBeUndefined();
+  });
+
+  it("records all routes independently without cross-contamination", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+    await server.inject({ method: "GET", url: "/api/markets" });
+
+    expect(getSnapshot("GET", "/healthz")!.count).toBe(1);
+    expect(getSnapshot("GET", "/api/markets")!.count).toBe(1);
+  });
+
+  it("does not throw and still records a metric for a 404 request", async () => {
+    const res = await server.inject({
+      method: "GET",
+      url: "/api/this-route-does-not-exist",
+    });
+    expect(res.statusCode).toBe(404);
+
+    // At least one entry must exist (the 404 handler path or raw url fallback).
+    expect(getHistogram().length).toBeGreaterThan(0);
+  });
+
+  it("does not break existing endpoints — /healthz still returns 200 ok", async () => {
+    const res = await server.inject({ method: "GET", url: "/healthz" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ status: "ok" });
+  });
+
+  it("does not record non-5xx responses as errors", async () => {
+    await server.inject({ method: "GET", url: "/healthz" });
+
+    const errorCount = getErrorCount("GET", "/healthz");
+    expect(errorCount).toBeUndefined();
+  });
+
+  it("records 5xx errors when recordError is called directly", async () => {
+    recordError("GET", "/api/test");
+    recordError("GET", "/api/test");
+    recordError("POST", "/api/test");
+
+    expect(getErrorCount("GET", "/api/test")).toBe(2);
+    expect(getErrorCount("POST", "/api/test")).toBe(1);
+  });
+
+  it("records 5xx errors via the Fastify hook when statusCode is 500-599", async () => {
+    // Add a temporary route that returns a 500 error
+    server.get("/test-500", async () => {
+      throw new Error("Test 500 error");
+    });
+
+    const res = await server.inject({ method: "GET", url: "/test-500" });
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+    expect(res.statusCode).toBeLessThan(600);
+
+    const errorCount = getErrorCount("GET", "/test-500");
+    expect(errorCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// registerMetricsHook can also be used with a bare Fastify instance
+// ---------------------------------------------------------------------------
+describe("registerMetricsHook (standalone)", () => {
+  it("does not throw when called on a bare app that has no routes", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    expect(() => registerMetricsHook(app)).not.toThrow();
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status code counter API — issue #492
+// ---------------------------------------------------------------------------
+describe("recordStatus + getStatusCounts", () => {
+  beforeEach(() => resetStatusCounts());
+  afterEach(() => resetStatusCounts());
+
+  it("returns an empty array when nothing has been recorded", () => {
+    expect(getStatusCounts()).toEqual([]);
+  });
+
+  it("counts responses per route and status code", () => {
+    recordStatus("GET", "/api/markets", 200);
+    recordStatus("GET", "/api/markets", 200);
+    recordStatus("GET", "/api/markets", 404);
+
+    const counts = getStatusCounts();
+    expect(counts).toContainEqual({ route: "GET /api/markets", statusCode: 200, count: 2 });
+    expect(counts).toContainEqual({ route: "GET /api/markets", statusCode: 404, count: 1 });
+  });
+
+  it("keeps cardinality bounded to route templates, not raw paths", async () => {
+    const server = buildServer({ corsOrigins: [], pool: createFakePool() });
+    await server.inject({ method: "GET", url: "/api/markets/1" });
+    await server.inject({ method: "GET", url: "/api/markets/2" });
+
+    const counts = getStatusCounts().filter((c) => c.route.includes("/api/markets/:id"));
+    expect(counts.length).toBe(1);
+    await server.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Metrics endpoint access control — issue #492
+// ---------------------------------------------------------------------------
+describe("isMetricsRequestAuthorized", () => {
+  it("denies when no token is configured", () => {
+    expect(isMetricsRequestAuthorized("anything", undefined)).toBe(false);
+  });
+
+  it("denies a missing header", () => {
+    expect(isMetricsRequestAuthorized(undefined, "secret")).toBe(false);
+  });
+
+  it("denies a mismatched token", () => {
+    expect(isMetricsRequestAuthorized("wrong", "secret")).toBe(false);
+  });
+
+  it("allows a matching token", () => {
+    expect(isMetricsRequestAuthorized("secret", "secret")).toBe(true);
+  });
+});
+
+describe("registerMetricsEndpoint access control (Fastify integration)", () => {
+  it("returns 404 for an unauthenticated scrape", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: "secret" });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics" });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("returns 404 when no token is configured at all", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: undefined });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics", headers: { [METRICS_TOKEN_HEADER]: "anything" } });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("serves metrics when the token matches", async () => {
+    const Fastify = (await import("fastify")).default;
+    const app = Fastify({ logger: false });
+    registerMetricsEndpoint(app, { token: "secret" });
+    await app.ready();
+
+    const res = await app.inject({ method: "GET", url: "/metrics", headers: { [METRICS_TOKEN_HEADER]: "secret" } });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Database query histogram — the database-load series the cache dashboard
+// plots against hit rate, and the one DatabaseSlow already reads
+// ---------------------------------------------------------------------------
+describe("observeDbQuery", () => {
+  it("starts empty with the default bucket ladder", () => {
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(0);
+    expect(snapshot.sum).toBe(0);
+    expect(snapshot.buckets[snapshot.buckets.length - 1]).toBe(Infinity);
+  });
+
+  it("accumulates observations into the right bucket", () => {
+    observeDbQuery(7); // ≤10
+    observeDbQuery(7); // ≤10
+    observeDbQuery(600); // ≤1000
+
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(3);
+    expect(snapshot.sum).toBe(614);
+    expect(snapshot.counts[snapshot.buckets.indexOf(10)]).toBe(2);
+    expect(snapshot.counts[snapshot.buckets.indexOf(1000)]).toBe(1);
+    // The buckets hold disjoint counts, so they sum to the total.
+    expect(snapshot.counts.reduce((total, count) => total + count, 0)).toBe(3);
+  });
+
+  it("handles a very fast query and an extremely slow one", () => {
+    observeDbQuery(0.2); // below the first bucket → bucket[0]
+    observeDbQuery(60_000); // above the last finite bucket → Infinity
+
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(2);
+    expect(snapshot.counts[0]).toBe(1);
+    expect(snapshot.counts[snapshot.counts.length - 1]).toBe(1);
+  });
+
+  it("resetDbQueryHistogram clears it", () => {
+    observeDbQuery(10);
+    resetDbQueryHistogram();
+
+    expect(getDbQueryHistogram().count).toBe(0);
+    expect(getDbQueryHistogram().sum).toBe(0);
+  });
+});
+
+describe("serializeDbQueryMetrics", () => {
+  it("is emitted before the first query, so the alert and panels have a series", () => {
+    const body = serializeDbQueryMetrics();
+
+    expect(body).toContain("# TYPE db_query_duration_ms histogram");
+    expect(body).toContain("db_query_duration_ms_bucket{le=\"+Inf\"} 0");
+    expect(body).toContain("db_query_duration_ms_sum 0");
+    expect(body).toContain("db_query_duration_ms_count 0");
+    expect(body.endsWith("\n")).toBe(true);
+  });
+
+  it("emits cumulative buckets", () => {
+    observeDbQuery(7);
+    observeDbQuery(7);
+    observeDbQuery(600);
+
+    const samples: Record<string, string> = {};
+    for (const line of serializeDbQueryMetrics().split("\n")) {
+      if (line === "" || line.startsWith("#")) continue;
+      const separator = line.lastIndexOf(" ");
+      samples[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+
+    expect(samples['db_query_duration_ms_bucket{le="10"}']).toBe("2");
+    expect(samples['db_query_duration_ms_bucket{le="1000"}']).toBe("3");
+    expect(samples['db_query_duration_ms_bucket{le="+Inf"}']).toBe("3");
+    expect(samples.db_query_duration_ms_count).toBe("3");
+    expect(samples.db_query_duration_ms_sum).toBe("614");
+  });
+});
+
+describe("serializeMetrics exposition", () => {
+  it("always carries the cache, negative-cache and database-query families", () => {
+    // A series that only appears once traffic arrives is one nobody can build
+    // a panel or an alert against before the incident.
+    const body = serializeMetrics();
+
+    expect(body).toContain("cache_hit_rate NaN");
+    expect(body).toContain("negative_cache_hit_rate NaN");
+    expect(body).toContain("db_query_duration_ms_count 0");
+    expect(body.endsWith("\n")).toBe(true);
+  });
+});

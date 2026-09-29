@@ -118,6 +118,8 @@
 
 ## Architecture
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current backend/oracle topology and the target production data flow.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Next.js 14 Frontend                        │
@@ -227,6 +229,7 @@ ipredict-stellar/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── DEPLOYMENT-GUIDE.md
+│   ├── LOCAL_DEV.md
 │   ├── USER-FEEDBACK.md
 │   └── ITERATION-LOG.md
 └── README.md
@@ -239,7 +242,7 @@ ipredict-stellar/
 ### Prerequisites
 
 - **Rust** ≥ 1.85.0 with `wasm32-unknown-unknown` target
-- **Node.js** ≥ 18
+- **Node.js** ≥ 22
 - **Stellar CLI** (`stellar-cli` or `soroban-cli`)
 - **Freighter Wallet** browser extension (for mainnet interaction)
 
@@ -265,6 +268,8 @@ npm test     # 137 tests
 npm run build
 npm run dev  # http://localhost:3000
 ```
+
+For the current host-based local workflow across infra, indexer, backend, frontend, and oracle, see [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
 ### Deploy Contracts (Testnet for dev, Mainnet for production)
 
@@ -313,9 +318,9 @@ cd frontend && npx vitest run --coverage
 GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main`/`develop` and every PR to `main`.
 
 ### Job 1: `lint-test-build`
-- **Matrix:** Node.js 18, 20
+- **Matrix:** Node.js 22, 24
 - **Steps:** `npm ci` → `npm test` → `npm run build`
-- **Artifacts:** Production build uploaded on Node 20
+- **Artifacts:** Production build uploaded on Node 22
 
 ### Job 2: `contract-check`
 - **Toolchain:** Rust stable + `wasm32-unknown-unknown` target
@@ -329,6 +334,19 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main
 See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 
 **Iteration Summary:** After initial testnet deployment, user feedback on loading states led to replacing spinner-only loading indicators with content-aware skeleton placeholders across leaderboard, profile, and market detail pages — improving perceived performance and reducing layout shift.
+
+---
+
+## Documentation
+
+- [Contributor Onboarding](docs/ONBOARDING.md) — guided onboarding path for new contributors through starting issues and setup.
+- [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
+- [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
+- [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
+- [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
+- [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram, for the backend and indexer.
+- [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model covering key custody, bond mechanics, and RPC trust.
+- [Glossary](docs/GLOSSARY.md) — definitions of market, bet, outcome, bond, council, and other domain terms.
 
 ---
 
@@ -416,3 +434,7 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 Built by **Akan** for the Stellar Build-a-10M-Startup challenge.
 
 - Stellar Admin Wallet: `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD`
+
+## Backend Database Foundation
+
+Added Oracle submissions table (migration 0006). Implemented typed market upsert helper in backend/src/db/markets.ts.

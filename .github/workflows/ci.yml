@@ -2,25 +2,53 @@ name: iPredict CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, implementation-drips]
   pull_request:
-    branches: [main]
+    branches: ['*']
+  schedule:
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
 
 jobs:
-  # ── Job 1: Frontend lint, test, and build ──────────────────────────────────
-  lint-test-build:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # A complete checkout lets scheduled runs inspect the entire repository
+      # history; the action limits push and pull-request scans to their diff.
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  # ─── Job 1: Frontend lint, test, and build ──────────────────────────────────
+  frontend-check:
     name: Frontend (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20]
+        node-version: [22, 24]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -29,6 +57,10 @@ jobs:
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Run lint
+        working-directory: frontend
+        run: npm run lint
 
       - name: Run tests
         working-directory: frontend
@@ -39,29 +71,30 @@ jobs:
         run: npm run build
 
       - name: Upload build artifact
-        if: matrix.node-version == 20
-        uses: actions/upload-artifact@v4
+        if: matrix.node-version == 22
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frontend-build
           path: frontend/.next
           retention-days: 7
 
-  # ── Job 2: Rust contract check & test ──────────────────────────────────────
+  # ─── Job 2: Rust contract check & test ──────────────────────────────────────
   contract-check:
     name: Contracts (Rust)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: "1.91.0"
           targets: wasm32-unknown-unknown, wasm32v1-none
 
       - name: Cache Cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -77,3 +110,348 @@ jobs:
       - name: Run contract tests
         working-directory: contracts
         run: cargo test --workspace
+
+  # ─── Job 3: Backend Node package check ─────────────────────────────────────
+  backend-check:
+    name: Backend API (Node 22)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root and shared dependencies
+        run: npm ci
+
+      - name: Typecheck backend
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Run backend tests with coverage
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+          REDIS_URL: redis://localhost:6379
+        run: npm test -- --coverage
+
+      - name: Upload backend coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          retention-days: 5
+
+  # ─── Job 4: Oracle Node package check ───────────────────────────────────────
+  oracle-check:
+    name: Oracle (Node 22)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck oracle
+        working-directory: oracle
+        run: npm run typecheck
+
+      - name: Run oracle tests with coverage
+        working-directory: oracle
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm test -- --coverage
+
+      - name: Upload oracle coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: oracle-coverage
+          path: oracle/coverage/
+          retention-days: 5
+
+  # ─── Job 5: Indexer Node package check ──────────────────────────────────────
+  indexer-check:
+    name: Indexer (Node 22)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck indexer
+        working-directory: indexer
+        run: npm run typecheck
+
+      - name: Run indexer tests with coverage
+        working-directory: indexer
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+          REDIS_URL: redis://localhost:6379
+        run: npm test -- --coverage
+
+      - name: Upload indexer coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: indexer-coverage
+          path: indexer/coverage/
+          retention-days: 5
+
+  # ─── Job: Cross-package suite (backend + indexer + smoke suite) ─────────────
+  # `test/` at the repository root is the only place that can import from both
+  # backend and indexer, so it is the only place the full
+  # contract → indexer → database → API precision path and the deployment smoke
+  # suite can be tested. It has its own job rather than riding along with one
+  # workspace so a failure here is not mistaken for a backend-only regression.
+  cross-package-check:
+    name: Cross-package (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build @ipredict/shared
+        run: npm run build --workspace=@ipredict/shared
+
+      - name: Run cross-package tests
+        # Runs the i128 precision boundaries and the smoke suite's own tests.
+        # No Postgres or Redis: every database is a fake, by design.
+        run: npm run test:cross
+
+      - name: Smoke suite lists cleanly
+        # The CLI must stay runnable as a deployment gate.
+        run: npm run smoke:list
+
+  # ─── Job 6: Database package & Migration Idempotency check ───────────────────
+  db-migrations-check:
+    name: DB & Migration Runner (Postgres 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck db
+        working-directory: db
+        run: npm run typecheck
+
+      # Includes db/test/migration-regression.test.ts, which executes every
+      # migration against this Postgres. REQUIRE_DB makes an unreachable
+      # database a failure instead of a silent skip.
+      - name: Run db tests
+        working-directory: db
+        env:
+          REQUIRE_DB: "1"
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm test
+
+      - name: Apply database migrations (Run 1)
+        working-directory: db
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm run migrate
+
+      - name: Verify migration idempotency (Run 2)
+        working-directory: db
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm run migrate
+
+  # ─── Job 7: Node packages lint check ───────────────────────────────────────
+  node-lint:
+    name: Node Packages Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint across all Node packages
+        run: npm run lint
+
+  # ─── Job 8: Dependency Vulnerability Scan ───────────────────────────────────
+  vulnerability-scan:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Run dependency vulnerability scan (Backend, Oracle, Indexer, DB, Frontend, Shared)
+        run: |
+          # The root lockfile covers all backend workspaces; frontend is separate.
+          npm audit --audit-level=high
+          cd frontend
+          npm audit --audit-level=high
+
+  # ─── Job 9: TypeScript Typecheck across all workspaces ───────────────────────
+  typecheck:
+    name: Typecheck (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck all workspaces
+        run: npm run typecheck
+
+
+  backend-openapi-contract-test:
+    name: Backend OpenAPI response contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Build shared types
+        run: npm run build --workspace=@ipredict/shared
+      - name: Validate API response contracts
+        run: npm run test:contract --workspace=ipredict-backend

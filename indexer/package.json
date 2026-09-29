@@ -1,0 +1,39 @@
+{
+  "name": "ipredict-indexer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iPredict Soroban event indexer \u2014 writes on-chain events to PostgreSQL",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "tsc --noEmit",
+    "rebuild:leaderboard": "tsx src/leaderboard-rebuild.job.ts",
+    "backfill:bet-count": "tsx src/backfill-bet-count.ts",
+    "reprocess:dead-letter": "tsx src/reprocess-dead-letter.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ipredict/shared": "*",
+    "@stellar/stellar-sdk": "^16.2.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "@types/pg": "^8.11.11",
+    "testcontainers": "^10.24.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.6",
+    "@vitest/coverage-v8": "^3.2.6"
+  }
+}

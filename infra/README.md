@@ -1,5 +1,142 @@
 # Infrastructure
 
+## Disk-space and database-growth monitoring (`disk-monitor/`)
+
+A full disk takes the database down hard — and recovery is considerably harder
+than prevention. This directory monitors disk usage on every stateful service,
+tracks per-table growth rates in PostgreSQL, and alerts on **projected
+time-to-full** so there is enough lead time to act.
+
+```
+infra/
+├── README.md                     ← you are here
+└── disk-monitor/
+    ├── check-disk.py             monitor (Python 3 stdlib only)
+    ├── services.txt              inventory of every stateful service
+    ├── disk-monitor.env.example  alert-channel / database configuration
+    └── systemd/
+        ├── ipredict-disk-monitor.service
+        └── ipredict-disk-monitor.timer
+```
+
+### What is monitored
+
+Every stateful service listed in `disk-monitor/services.txt`:
+
+| Type | What it covers | Example |
+|---|---|---|
+| `postgres` | PostgreSQL data directory | `/var/lib/postgresql/data` |
+| `redis` | Redis data directory | `/var/lib/redis` |
+| `mount` | Any filesystem mount point | `/mnt/backups` |
+
+Per-table growth is tracked in PostgreSQL when `DISK_MONITOR_DATABASE_URL` is
+configured — the top 20 tables by size are queried on every run and their
+growth rate is computed from the previous run's measurement.
+
+> **Rule: no stateful service may exist without a line in `services.txt`.** A
+> service with no inventory line is a service nobody is watching.
+
+### Alert escalation
+
+Alerts fire on **projected days-to-full**, not on current percentage used:
+
+| Days to full | Level | Channels | Exit code |
+|---|---|---|---|
+| > 14 | `ok` | none (logged in the report) | 0 |
+| ≤ 14 | **MEDIUM** | chat webhook | 0 (1 with `--fail-on any`) |
+| ≤ 7 | **HIGH** | chat webhook + email | 0 (1 with `--fail-on any`) |
+| ≤ 3 | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| full / check failed | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| monitor gap > 48 h | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+
+Why time-to-full: a disk at 90% that fills in a day is an emergency; a disk
+at 90% that fills in a year is not. Growth rate is measured from the previous
+run's data, so the projection is based on observed trend.
+
+Extras that keep the monitor honest:
+
+* **Per-table growth** — the largest tables and their growth rates are
+  identified on every run, so the events table (or any other unbounded table)
+  is visible before it becomes a crisis.
+* **Watchdog gap** — if the previous run is older than `--stale-after-hours`
+  (default 48 h), the run reports the gap as CRITICAL.
+* **External dead-man's-switch** — point `DISK_MONITOR_HEARTBEAT_URL` at
+  healthchecks.io (or similar): if *every* scheduler dies, that service is the
+  one left to notice.
+* **Scheduled CI** — `.github/workflows/disk-monitor.yml` runs the same check
+  daily on a clean runner and publishes a report to the job summary.
+
+### Install
+
+Everything is stdlib Python 3.9+ — no packages, no virtualenv.
+
+```bash
+# 1. look at what it would say today
+python3 infra/disk-monitor/check-disk.py --self-test     # offline assertions
+python3 infra/disk-monitor/check-disk.py --dry-run       # real checks, no delivery
+
+# 2. pick an alert channel (any subset)
+cp infra/disk-monitor/disk-monitor.env.example /etc/ipredict/disk-monitor.env
+$EDITOR /etc/ipredict/disk-monitor.env
+
+# 3a. systemd (recommended)
+sudo cp infra/disk-monitor/systemd/ipredict-disk-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ipredict-disk-monitor.timer
+systemctl list-timers ipredict-disk-monitor.timer
+
+# 3b. or cron
+echo '23 6 * * * python3 /opt/ipredict/infra/disk-monitor/check-disk.py --fail-on critical' | crontab -
+
+# 3c. or the scheduled GitHub Actions workflow (already in the repo — just
+#     add the DISK_MONITOR_WEBHOOK_URL secret)
+```
+
+The first run stores its state (default
+`$XDG_STATE_HOME/ipredict-disk-monitor/state.json`, override with
+`DISK_MONITOR_STATE_FILE`); later runs only alert on escalation.
+
+### Configuration
+
+Read from the environment (see `disk-monitor/disk-monitor.env.example`):
+
+| Variable | Purpose |
+|---|---|
+| `DISK_MONITOR_WEBHOOK_URL` | Slack/Teams-compatible webhook (`{"text": …}`) |
+| `DISK_MONITOR_WEBHOOK_FORMAT` | `slack` (default), `discord`, `generic` |
+| `DISK_MONITOR_EMAIL_TO` | email for HIGH/CRITICAL (needs `sendmail`/`mail`) |
+| `DISK_MONITOR_DATABASE_URL` | PostgreSQL connection string for per-table growth |
+| `DISK_MONITOR_HEARTBEAT_URL` | dead-man's-switch ping after each run |
+| `DISK_MONITOR_STATE_FILE` | alert de-duplication state |
+
+CLI flags: `--dry-run`, `--force` (re-send everything currently in alert),
+`--only NAME`, `--json`, `--fail-on none|critical|any`,
+`--re-alert-hours`, `--stale-after-hours`, `--inventory`, `--state-file`.
+
+### Day-2 operations
+
+| Task | Command |
+|---|---|
+| See the full report | `python3 infra/disk-monitor/check-disk.py` |
+| Machine-readable report | `python3 infra/disk-monitor/check-disk.py --json` |
+| Re-verify after expansion | `python3 infra/disk-monitor/check-disk.py --force` |
+| Check one service | `python3 infra/disk-monitor/check-disk.py --only postgres-data` |
+| Validate the monitor itself | `python3 infra/disk-monitor/check-disk.py --self-test` |
+| Journal (systemd) | `journalctl -u ipredict-disk-monitor.service -n 100` |
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `inventory error: … expected 5 fields` | a line in `services.txt` is missing a `\|` separator — see the header comment in that file |
+| `statvfs(…): No such file or directory` | the target path does not exist on this host — fix the path or mark the service `pending` |
+| `psql not found` | install `postgresql-client` or unset `DISK_MONITOR_DATABASE_URL` |
+| Alerts repeat every run | state file was deleted or the job runs on ephemeral runners without cache — restore `DISK_MONITOR_STATE_FILE`, or accept re-alerts on a clean runner |
+| `WATCHDOG: monitor did not run …` | timer/cron disabled, host was down, or CI schedule paused — fix the schedule, then `--force` |
+| No alerts at all but nothing ran | check `systemctl list-timers ipredict-disk-monitor.timer` / crontab, and point `DISK_MONITOR_HEARTBEAT_URL` at a dead-man's-switch |
+
+---
+
 ## Certificate expiry monitoring (`cert-monitor/`)
 
 An expired TLS certificate takes iPredict offline instantly — every browser and

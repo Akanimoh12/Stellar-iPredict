@@ -46,11 +46,15 @@ describe("handleTokenMint", () => {
 
     await handleTokenMint(event, context);
 
-    expect(context.db.query).toHaveBeenCalledTimes(4);
-    expect(context.db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"),
+    expect(context.db.query).toHaveBeenCalledTimes(2);
+    expect(context.db.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("INSERT INTO events"),
       [event.ledger, event.txHash, 0, TOKEN_MINT_TOPIC, null, ADDRESS, { to: ADDRESS, amount: "99.5" }],
     );
-    expect(context.db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO token_balances"),
+    expect(context.db.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("INSERT INTO token_balances"),
       [ADDRESS, "99.5"],
     );
     expect(context.redis?.del).toHaveBeenCalledWith(`token_balance:${ADDRESS}`, "stats:global");

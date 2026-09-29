@@ -1,7 +1,7 @@
 import { marketCancelledPayloadSchema, type MarketCancelledPayload } from "../schemas.js";
 import { invalidateOnMarketCancelled } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const MARKET_CANCELLED_TOPIC = ["mkt", "cancelled"] as const;
 
@@ -21,23 +21,23 @@ export async function handleMarketCancelledEvent(
 ): Promise<MarketCancelledPayload> {
   const payload = decodeMarketCancelledEvent(event);
 
-  const inserted = await processEventAtomically(db, {
+  const inserted = await insertProcessedEvent(db, {
     event,
     eventType: "market_cancelled",
     marketId: payload.market_id,
     payload: JSON.stringify(payload),
-  }, async (tx) => {
-    await tx.query(
-      `UPDATE markets
-       SET cancelled = TRUE,
-           resolved = FALSE,
-           outcome = NULL,
-           updated_at = NOW()
-       WHERE id = $1`,
-      [payload.market_id],
-    );
   });
   if (!inserted) return payload;
+
+  await db.query(
+    `UPDATE markets
+     SET cancelled = TRUE,
+         resolved = FALSE,
+         outcome = NULL,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [payload.market_id],
+  );
 
   await invalidateOnMarketCancelled(redis, payload.market_id);
 

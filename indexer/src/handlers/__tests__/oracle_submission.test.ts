@@ -62,8 +62,10 @@ describe("handleOracleSubmission", () => {
 
     await handleOracleSubmission(event, context);
 
-    expect(context.db.query).toHaveBeenCalledTimes(4);
-    expect(context.db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"),
+    expect(context.db.query).toHaveBeenCalledTimes(2);
+    expect(context.db.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("INSERT INTO events"),
       [event.ledger, event.txHash, 0, ORACLE_SUBMISSION_TOPIC, MARKET_ID, SUBMITTER, {
         market_id: MARKET_ID,
         submitter: SUBMITTER,
@@ -71,8 +73,10 @@ describe("handleOracleSubmission", () => {
         bond_amount: BOND,
       }],
     );
-    expect(context.db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO oracle_submissions"),
-      [MARKET_ID, SUBMITTER, "YES", BOND],
+    expect(context.db.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("INSERT INTO oracle_submissions"),
+      [MARKET_ID, SUBMITTER, "yes", BOND],
     );
   });
 
@@ -82,7 +86,7 @@ describe("handleOracleSubmission", () => {
 
     await handleOracleSubmission(event, context);
 
-    const insertSql = (context.db.query as ReturnType<typeof vi.fn>).mock.calls[2][0] as string;
+    const insertSql = (context.db.query as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
     expect(insertSql).toContain("ON CONFLICT (market_id) DO NOTHING");
   });
 
@@ -93,6 +97,6 @@ describe("handleOracleSubmission", () => {
     await handleOracleSubmission(event, context);
 
     // Only the events insert ran; the submission upsert was skipped.
-    expect(context.db.query).toHaveBeenCalledTimes(3);
+    expect(context.db.query).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const TOKEN_MINT_TOPIC = "token_mint";
 
@@ -44,22 +44,22 @@ export function decodeTokenMint(event: DecodedEvent): TokenMintPayload {
 export async function handleTokenMint(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeTokenMint(event);
 
-  const inserted = await processEventAtomically(context.db, {
+  const inserted = await insertProcessedEvent(context.db, {
     event,
     eventType: TOKEN_MINT_TOPIC,
     actor: payload.to,
     payload,
-  }, async (tx) => {
-    await tx.query(
-      `INSERT INTO token_balances (address, balance, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (address) DO UPDATE
-       SET balance = token_balances.balance + EXCLUDED.balance,
-           updated_at = NOW()`,
-      [payload.to, payload.amount],
-    );
   });
   if (!inserted) return;
+
+  await context.db.query(
+    `INSERT INTO token_balances (address, balance, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (address) DO UPDATE
+     SET balance = token_balances.balance + EXCLUDED.balance,
+         updated_at = NOW()`,
+    [payload.to, payload.amount],
+  );
 
   await context.redis?.del(`token_balance:${payload.to}`, "stats:global");
 }

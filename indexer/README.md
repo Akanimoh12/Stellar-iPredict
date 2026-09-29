@@ -110,58 +110,10 @@ The indexer enforces deliberate transactional guarantees to ensure data integrit
 
 ### Crash Recovery & Handler Idempotency
 - **Never Skip Events**: A mid-batch crash leaves the database checkpoint at the last successfully completed batch. On recovery, the indexer resumes from `checkpoint + 1`, re-fetching the batch.
-- **Idempotent Reprocessing**: Because all event handlers enforce idempotency via the `events (tx_hash, event_index)` unique constraint (`migration 0007`) and `ON CONFLICT DO NOTHING`, reprocessing events after a crash never causes duplicated effects or balance inflation.
-
-### Idempotency Guidelines for Contributors & Handlers (#500)
-
-Every handler must commit its `(tx_hash, event_index)` marker and derived database
-writes together. A duplicate event skips the writes; a failed write rolls back
-both the marker and the effects so delivery can be retried.
-
-Use `processEventAtomically` for multi-statement handlers:
-
-```typescript
-await processEventAtomically(db, {
-  event,
-  eventType: EVENT_TOPIC,
-  actor: payload.actor,
-  payload,
-}, async (tx) => {
-  // Every database write must use tx, never the original pool.
-  await tx.query("UPDATE ...", [...]);
-});
-```
-
-- Pass a pool exposing `connect()` or a dedicated connection. Do not hide a pool
-  behind a query-only adapter: transaction statements must use one connection.
-- Use `withTransaction` from `src/db.ts` for enclosing batch transactions.
-  Handler transactions then use savepoints, preserving the outer commit/rollback.
-  Do not manually open an untracked outer transaction before calling handlers.
-- `bet_placed` uses a single atomic CTE instead: `new_event` gates every effect.
-- Upserts alone do not make additive counters safe. They still need the event gate.
-- Market creation inserts its marker without a market foreign key, creates the
-  market, then links the event before committing.
-- Cache invalidation runs after the handler's database transaction. PostgreSQL and
-  Redis do not share an atomic transaction; the database guarantee does not imply
-  guaranteed cache invalidation after a process crash.
-
-Tests must assert the **correct first result**, unchanged state after replay,
-rollback on partial failure, and successful retry. Keep the mint tests aligned
-with the implementation exported by the production dispatcher.
-
-```bash
-# Fast mock-based handler replay tests
-npm test -- src/handlers/__tests__/idempotency.test.ts
-
-# Real SQL: all 15 event paths, failure recovery, concurrent duplicates,
-# and enclosing-batch rollback. Applies migrations in an isolated schema.
-DATABASE_URL=postgres://... npm test -- test/idempotency-postgres.test.ts
-```
-
-The PostgreSQL suite skips only when no database URL is configured; connection or
-migration failures with a configured URL fail the suite. CI supplies PostgreSQL.
+- **Idempotent Reprocessing**: Because all event handlers enforce idempotency via the `events (tx_hash, event_index)` unique constraint and `ON CONFLICT DO NOTHING`, reprocessing events after a crash never causes duplicated effects or balance inflation.
 
 ## Contributing
 
 Pick an open issue labelled `area:indexer`, claim it, branch off
 `implementation-drips`, and PR back to `implementation-drips`.
+

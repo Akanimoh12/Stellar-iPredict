@@ -1,5 +1,5 @@
 import type { DecodedEvent, HandlerContext } from "./types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 import { invalidateLeaderboardCache } from "../cache.js";
 
 export const REWARD_POINTS_TOPIC = "reward_points";
@@ -69,28 +69,28 @@ export function decodeRewardPoints(event: DecodedEvent): RewardPointsPayload {
 export async function handleRewardPoints(event: DecodedEvent, context: HandlerContext): Promise<void> {
   const payload = decodeRewardPoints(event);
 
-  const inserted = await processEventAtomically(context.db, {
+  const inserted = await insertProcessedEvent(context.db, {
     event,
     eventType: REWARD_POINTS_TOPIC,
     actor: payload.user,
     payload,
-  }, async (tx) => {
-    // Update leaderboard points and win/loss counts
-    const wonBetsIncrement = payload.is_winner === true ? 1 : 0;
-    const lostBetsIncrement = payload.is_winner === false ? 1 : 0;
-
-    await tx.query(
-      `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
-       VALUES ($1, NULL, $2, $3, $4, NOW())
-       ON CONFLICT (address) DO UPDATE
-       SET points = leaderboard.points + EXCLUDED.points,
-           won_bets = leaderboard.won_bets + EXCLUDED.won_bets,
-           lost_bets = leaderboard.lost_bets + EXCLUDED.lost_bets,
-           updated_at = NOW()`,
-      [payload.user, payload.points, wonBetsIncrement, lostBetsIncrement],
-    );
   });
   if (!inserted) return;
+
+  // Update leaderboard points and win/loss counts
+  const wonBetsIncrement = payload.is_winner === true ? 1 : 0;
+  const lostBetsIncrement = payload.is_winner === false ? 1 : 0;
+
+  await context.db.query(
+    `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
+     VALUES ($1, NULL, $2, $3, $4, NOW())
+     ON CONFLICT (address) DO UPDATE
+     SET points = leaderboard.points + EXCLUDED.points,
+         won_bets = leaderboard.won_bets + EXCLUDED.won_bets,
+         lost_bets = leaderboard.lost_bets + EXCLUDED.lost_bets,
+         updated_at = NOW()`,
+    [payload.user, payload.points, wonBetsIncrement, lostBetsIncrement],
+  );
 
   // Invalidate leaderboard cache
   if (context.redis) {

@@ -1,6 +1,6 @@
 import { invalidateOnMarketResolved } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 import {
   asRecord,
   normalizeAmount,
@@ -70,39 +70,37 @@ export async function handleOracleFinalizedEvent(
 ): Promise<OracleFinalizedPayload> {
   const payload = decodeOracleFinalizedEvent(event);
 
-  let marketChanged = false;
-  const inserted = await processEventAtomically(db, {
+  const inserted = await insertProcessedEvent(db, {
     event,
     eventType: "oracle_finalized",
     marketId: payload.market_id,
     actor: payload.submitter,
     payload: JSON.stringify(payload),
-  }, async (tx) => {
-    const marketUpdate = await tx.query(
-      `UPDATE markets
-       SET resolved = TRUE,
-           outcome = $2,
-           cancelled = FALSE,
-           updated_at = NOW()
-       WHERE id = $1 AND resolved = FALSE AND cancelled = FALSE`,
-      [payload.market_id, payload.outcome],
-    );
-
-    // Guarded so a submission already finalized/rejected can't be re-finalized.
-    await tx.query(
-      `UPDATE oracle_submissions
-       SET status = 'finalized',
-           decision = $2,
-           tx_hash = $3,
-           finalized_at = $4
-       WHERE market_id = $1 AND status IN ('submitted', 'challenged')`,
-      [payload.market_id, payload.outcome, event.txHash, payload.finalized_at],
-    );
-    marketChanged = marketUpdate.rowCount > 0;
   });
   if (!inserted) return payload;
 
-  if (marketChanged) {
+  const marketUpdate = await db.query(
+    `UPDATE markets
+     SET resolved = TRUE,
+         outcome = $2,
+         cancelled = FALSE,
+         updated_at = NOW()
+     WHERE id = $1 AND resolved = FALSE AND cancelled = FALSE`,
+    [payload.market_id, payload.outcome],
+  );
+
+  // Guarded so a submission already finalized/rejected can't be re-finalized.
+  await db.query(
+    `UPDATE oracle_submissions
+     SET status = 'finalized',
+         decision = $2,
+         tx_hash = $3,
+         finalized_at = $4
+     WHERE market_id = $1 AND status IN ('submitted', 'challenged')`,
+    [payload.market_id, payload.outcome, event.txHash, payload.finalized_at],
+  );
+
+  if (marketUpdate.rowCount > 0) {
     await invalidateOnMarketResolved(redis, payload.market_id);
   }
 

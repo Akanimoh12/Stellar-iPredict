@@ -1,7 +1,7 @@
 import { referralRegisteredPayloadSchema, type ReferralRegisteredPayload } from "../schemas.js";
 import { invalidateLeaderboardCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 
 export const REFERRAL_REGISTERED_TOPIC = ["referral", "registered"] as const;
 
@@ -23,41 +23,41 @@ export async function handleReferralRegisteredEvent(
 ): Promise<ReferralRegisteredPayload> {
   const payload = decodeReferralRegisteredEvent(event);
 
-  const inserted = await processEventAtomically(db, {
+  const inserted = await insertProcessedEvent(db, {
     event,
     eventType: "referral_registered",
     actor: payload.user,
     payload: JSON.stringify(payload),
-  }, async (tx) => {
-    // Registrant: record the canonical display name and credit the welcome bonus.
-    // COALESCE keeps any existing name when the event omits one; ON CONFLICT keeps
-    // the write a safe upsert (no duplicate rows on replay) — the same shape as
-    // handleReferralRewardEvent and the leaderboard-rebuild reducer.
-    await tx.query(
-      `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
-       VALUES ($1, $2, $3, 0, 0, NOW())
-       ON CONFLICT (address) DO UPDATE
-       SET display_name = COALESCE(EXCLUDED.display_name, leaderboard.display_name),
-           points = leaderboard.points + EXCLUDED.points,
-           updated_at = NOW()`,
-      [payload.user, payload.display_name, payload.welcome_points],
-    );
-
-    // Referrer (optional): credit the registration bonus. Mirrors
-    // handleReferralRegistration in leaderboard-rebuild so incremental writes and
-    // full replays converge on the same leaderboard snapshot.
-    if (payload.referrer) {
-      await tx.query(
-        `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
-         VALUES ($1, NULL, $2, 0, 0, NOW())
-         ON CONFLICT (address) DO UPDATE
-         SET points = leaderboard.points + EXCLUDED.points,
-             updated_at = NOW()`,
-        [payload.referrer, payload.referrer_points],
-      );
-    }
   });
   if (!inserted) return payload;
+
+  // Registrant: record the canonical display name and credit the welcome bonus.
+  // COALESCE keeps any existing name when the event omits one; ON CONFLICT keeps
+  // the write a safe upsert (no duplicate rows on replay) — the same shape as
+  // handleReferralRewardEvent and the leaderboard-rebuild reducer.
+  await db.query(
+    `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
+     VALUES ($1, $2, $3, 0, 0, NOW())
+     ON CONFLICT (address) DO UPDATE
+     SET display_name = COALESCE(EXCLUDED.display_name, leaderboard.display_name),
+         points = leaderboard.points + EXCLUDED.points,
+         updated_at = NOW()`,
+    [payload.user, payload.display_name, payload.welcome_points],
+  );
+
+  // Referrer (optional): credit the registration bonus. Mirrors
+  // handleReferralRegistration in leaderboard-rebuild so incremental writes and
+  // full replays converge on the same leaderboard snapshot.
+  if (payload.referrer) {
+    await db.query(
+      `INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)
+       VALUES ($1, NULL, $2, 0, 0, NOW())
+       ON CONFLICT (address) DO UPDATE
+       SET points = leaderboard.points + EXCLUDED.points,
+           updated_at = NOW()`,
+      [payload.referrer, payload.referrer_points],
+    );
+  }
 
   await invalidateLeaderboardCache(redis);
 

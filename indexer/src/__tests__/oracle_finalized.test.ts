@@ -91,15 +91,19 @@ describe("handleOracleFinalizedEvent", () => {
 
     await handleOracleFinalizedEvent(finalizedEvent(unchallengedData), db, redis);
 
-    expect(db.query).toHaveBeenCalledTimes(5);
-    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO events"), expect.any(Array));
-    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE markets"),
+    expect(db.query).toHaveBeenCalledTimes(3);
+    expect(db.query).toHaveBeenNthCalledWith(1, expect.stringContaining("INSERT INTO events"), expect.any(Array));
+    expect(db.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("UPDATE markets"),
       [42, "yes"],
     );
-    expect((db.query as ReturnType<typeof vi.fn>).mock.calls[2][0]).toContain(
+    expect((db.query as ReturnType<typeof vi.fn>).mock.calls[1][0]).toContain(
       "WHERE id = $1 AND resolved = FALSE AND cancelled = FALSE",
     );
-    expect(db.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE oracle_submissions"),
+    expect(db.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("UPDATE oracle_submissions"),
       [42, "yes", "e".repeat(64), new Date(1_700_300_000_000)],
     );
     expect(redis.del).toHaveBeenCalled();
@@ -118,13 +122,13 @@ describe("handleOracleFinalizedEvent", () => {
     // rowCount: 0 on the events insert simulates the ON CONFLICT DO NOTHING
     // dedupe branch (a replayed event), which must short-circuit before any
     // market/submission write is attempted.
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    const query = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const db: DbClient = { query };
     const redis: RedisClient = { del: vi.fn() };
 
     await handleOracleFinalizedEvent(finalizedEvent(unchallengedData), db, redis);
 
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(1);
     expect(redis.del).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,3 @@
-import { inTransaction } from "../transaction.js";
 import type { DbClient, DecodedContractEvent } from "../types.js";
 import type { DecodedEvent, Queryable } from "./types.js";
 
@@ -49,17 +48,4 @@ export async function insertProcessedEvent(
   }
 
   return true;
-}
-
-/** Commit the dedupe marker and every derived write together. */
-export async function processEventAtomically<T extends Queryable>(
-  db: T,
-  input: ProcessedEventInput,
-  mutate: (client: T) => Promise<void>,
-): Promise<boolean> {
-  return inTransaction(db, async (client) => {
-    const inserted = await insertProcessedEvent(client, input);
-    if (inserted) await mutate(client);
-    return inserted;
-  });
 }

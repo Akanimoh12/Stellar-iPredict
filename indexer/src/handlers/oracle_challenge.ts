@@ -1,5 +1,5 @@
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
-import { processEventAtomically } from "./idempotency.js";
+import { insertProcessedEvent } from "./idempotency.js";
 import {
   asRecord,
   normalizeAddress,
@@ -90,36 +90,37 @@ export async function handleOracleChallengedEvent(
 ): Promise<OracleChallengedPayload> {
   const payload = decodeOracleChallengedEvent(event);
 
-  await processEventAtomically(db, {
+  const inserted = await insertProcessedEvent(db, {
     event,
     eventType: "oracle_challenged",
     marketId: payload.market_id,
     actor: payload.challenger,
     payload: JSON.stringify(payload),
-  }, async (tx) => {
-    await tx.query(
-      `INSERT INTO oracle_disputes
-         (market_id, submitter, challenger, outcome, submitter_bond, challenger_bond, status, challenged_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'challenged', $7)
-       ON CONFLICT (market_id) DO NOTHING`,
-      [
-        payload.market_id,
-        payload.submitter,
-        payload.challenger,
-        payload.outcome.toUpperCase(),
-        payload.submitter_bond,
-        payload.bond,
-        payload.challenged_at,
-      ],
-    );
-
-    // Guarded by status = 'submitted' so a market already finalized (or
-    // somehow re-challenged) can't be regressed back to 'challenged'.
-    await tx.query(
-      `UPDATE oracle_submissions SET status = 'challenged' WHERE market_id = $1 AND status = 'submitted'`,
-      [payload.market_id],
-    );
   });
+  if (!inserted) return payload;
+
+  await db.query(
+    `INSERT INTO oracle_disputes
+       (market_id, submitter, challenger, outcome, submitter_bond, challenger_bond, status, challenged_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'challenged', $7)
+     ON CONFLICT (market_id) DO NOTHING`,
+    [
+      payload.market_id,
+      payload.submitter,
+      payload.challenger,
+      payload.outcome,
+      payload.submitter_bond,
+      payload.bond,
+      payload.challenged_at,
+    ],
+  );
+
+  // Guarded by status = 'submitted' so a market already finalized (or
+  // somehow re-challenged) can't be regressed back to 'challenged'.
+  await db.query(
+    `UPDATE oracle_submissions SET status = 'challenged' WHERE market_id = $1 AND status = 'submitted'`,
+    [payload.market_id],
+  );
 
   return payload;
 }
@@ -136,25 +137,26 @@ export async function handleOracleEscalatedEvent(
 ): Promise<OracleEscalatedPayload> {
   const payload = decodeOracleEscalatedEvent(event);
 
-  await processEventAtomically(db, {
+  const inserted = await insertProcessedEvent(db, {
     event,
     eventType: "oracle_escalated",
     marketId: payload.market_id,
     actor: payload.challenger,
     payload: JSON.stringify(payload),
-  }, async (tx) => {
-    // `total_bond` is a GENERATED column (submitter_bond + challenger_bond,
-    // migration 0015) so it is not written here — the contract's emitted
-    // `total_bond` always equals the sum of the two stored bonds.
-    await tx.query(
-      `UPDATE oracle_disputes
-       SET status = 'escalated',
-           escalated_at = $2,
-           council_deadline = $3
-       WHERE market_id = $1 AND status = 'challenged'`,
-      [payload.market_id, payload.escalated_at, payload.council_deadline],
-    );
   });
+  if (!inserted) return payload;
+
+  // `total_bond` is a GENERATED column (submitter_bond + challenger_bond,
+  // migration 0015) so it is not written here — the contract's emitted
+  // `total_bond` always equals the sum of the two stored bonds.
+  await db.query(
+    `UPDATE oracle_disputes
+     SET status = 'escalated',
+         escalated_at = $2,
+         council_deadline = $3
+     WHERE market_id = $1 AND status = 'challenged'`,
+    [payload.market_id, payload.escalated_at, payload.council_deadline],
+  );
 
   return payload;
 }

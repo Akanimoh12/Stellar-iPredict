@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 import type { FastifyInstance, InjectOptions } from "fastify";
-import { createFakePool } from "../src/test/fakePool.js";
+import { createFakePool } from "../test/fakePool.js";
 import { detectDroppedFields, getOpenApiSpec, validateResponseAgainstSpec } from "./contract-helpers.js";
+import { classifyFastifyRoutes, assertAllRoutesClassified, PUBLIC_ROUTES, PROTECTED_ROUTES } from "./index.js";
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
 // Exercise the real query modules, including routes that use the default pool.
@@ -15,11 +16,11 @@ vi.mock("pg", async importOriginal => {
     async connect() { return { query: mocks.query, release() {} }; }
   } };
 });
-vi.mock("../src/db/redis.js", async importOriginal => ({
-  ...await importOriginal<typeof import("../src/db/redis.js")>(),
+vi.mock("../db/redis.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../db/redis.js")>(),
   pingRedis: vi.fn(async () => ({ ok: true })),
 }));
-import { buildServer } from "../src/server.js";
+import { buildServer } from "../server.js";
 
 const address = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1)).publicKey();
 const market = { id: 1, question: "Will XLM reach $1?", image_url: null, category: "Crypto", end_time: "1770000000", total_yes: "10.0000000", total_no: "5.0000000", resolved: false, outcome: null, cancelled: false, creator: address, bet_count: 1, created_at: new Date("2026-01-01T00:00:00Z"), updated_at: new Date("2026-01-02T00:00:00Z") };
@@ -108,3 +109,101 @@ describe("OpenAPI contracts on the production server", () => {
     expect(() => assertPreservedFields(rawPayload, response.json())).toThrow();
   });
 });
+
+describe("Route authentication registry and enforcement (#548)", () => {
+  it("covers and classifies every registered Fastify route as protected or public", async () => {
+    await app.ready();
+    const result = classifyFastifyRoutes(app.registeredRoutes);
+    expect(result.unclassified).toEqual([]);
+    expect(result.unregistered).toEqual([]);
+    expect(result.classified.length).toBe(app.registeredRoutes.length);
+    assertAllRoutesClassified(app.registeredRoutes);
+  });
+
+  it("fails when an unclassified route is present in the route list", async () => {
+    await app.ready();
+    const unclassifiedRoutes = [
+      ...app.registeredRoutes,
+      { method: "POST", url: "/api/v1/unprotected/action" },
+    ];
+    const result = classifyFastifyRoutes(unclassifiedRoutes);
+    expect(result.unclassified).toEqual([
+      {
+        method: "POST",
+        url: "/api/v1/unprotected/action",
+        canonicalKey: "POST /api/v1/unprotected/action",
+      },
+    ]);
+    expect(() => assertAllRoutesClassified(unclassifiedRoutes)).toThrowError(
+      /Unclassified route\(s\) detected on Fastify instance/
+    );
+  });
+
+  it("fails when a new unclassified route is dynamically registered on a Fastify instance", async () => {
+    const testApp = buildServer({ pool: createFakePool(mocks.query), corsOrigins: [], logger: false });
+    testApp.post("/api/new-unclassified-endpoint", async () => ({ ok: true }));
+    await testApp.ready();
+
+    expect(() => assertAllRoutesClassified(testApp.registeredRoutes)).toThrowError(
+      /POST \/api\/new-unclassified-endpoint/
+    );
+    await testApp.close();
+  });
+
+  it("public routes are explicitly listed as intentional with documented reasons", () => {
+    expect(PUBLIC_ROUTES.length).toBeGreaterThan(0);
+    for (const route of PUBLIC_ROUTES) {
+      expect(route.auth).toBe("public");
+      expect(typeof route.reason).toBe("string");
+      expect(route.reason.trim().length).toBeGreaterThan(15);
+    }
+  });
+
+  it("every protected route is verified to reject unauthenticated requests with 401 Unauthorized", async () => {
+    expect(PROTECTED_ROUTES.length).toBeGreaterThan(0);
+    for (const route of PROTECTED_ROUTES) {
+      const response = await app.inject({
+        method: route.method,
+        url: route.url,
+        payload: { marketId: 1, outcome: "YES", signature: "invalid", provider: address },
+      });
+      expect(response.statusCode).toBe(401);
+      const body = response.json();
+      expect(body).toHaveProperty("error");
+      expect(body.error).toHaveProperty("code");
+      expect(body.error.code).toBe("UNAUTHORIZED");
+    }
+  });
+
+  it("every protected route also rejects requests carrying an invalid API key", async () => {
+    for (const route of PROTECTED_ROUTES) {
+      const response = await app.inject({
+        method: route.method,
+        url: route.url,
+        headers: {
+          authorization: "Bearer invalid-dummy-key",
+        },
+        payload: { marketId: 1, outcome: "YES", signature: "invalid", provider: address },
+      });
+      expect(response.statusCode).toBe(401);
+      const body = response.json();
+      expect(body.error.code).toBe("UNAUTHORIZED");
+    }
+  });
+
+  it("verifies all public routes allow unauthenticated access without 401/403 rejections", async () => {
+    for (const route of PUBLIC_ROUTES) {
+      let testUrl = route.url;
+      if (testUrl.includes(":id")) testUrl = testUrl.replace(":id", "1");
+      if (testUrl.includes(":address")) testUrl = testUrl.replace(":address", address);
+
+      const response = await app.inject({
+        method: route.method,
+        url: testUrl,
+      });
+      expect([401, 403]).not.toContain(response.statusCode);
+      expect(response.statusCode).toBe(200);
+    }
+  });
+});
+

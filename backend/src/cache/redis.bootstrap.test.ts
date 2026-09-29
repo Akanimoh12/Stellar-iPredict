@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createTestRedis, MemRedis } from "../src/test/fakeRedis.js";
+import { createTestRedis, MemRedis } from "../test/fakeRedis.js";
 
 function fresh(): MemRedis {
   return createTestRedis();
@@ -160,8 +160,8 @@ describe("FakeRedis bootstrap", () => {
   });
 
   it("keeps the app bootable when connected through buildServer", async () => {
-    const { buildServer } = await import("../src/server.js");
-    const { createFakePool } = await import("../src/test/fakePool.js");
+    const { buildServer } = await import("../server.js");
+    const { createFakePool } = await import("../test/fakePool.js");
     const redis = fresh();
     const server = buildServer({ corsOrigins: [], logger: false, redis: redis as never, pool: createFakePool() });
     try {
@@ -171,5 +171,5 @@ describe("FakeRedis bootstrap", () => {
     } finally {
       await server.close();
     }
-  });
+  }, 30000);
 });

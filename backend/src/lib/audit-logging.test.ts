@@ -3,7 +3,7 @@ import {
   logOracleAuthFailure,
   logOracleAuthFailureSpike,
   logOracleSubmissionAttempt,
-} from "../lib/log.js";
+} from "./log.js";
 
 describe("Oracle audit logging", () => {
   it("should log accepted submissions at info level", () => {

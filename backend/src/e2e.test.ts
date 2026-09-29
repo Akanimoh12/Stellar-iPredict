@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
-import { signOracleMessage } from "../src/api/oracle.js";
+import { signOracleMessage } from "./api/oracle.js";
 
 const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => {
   const marketRow = {
@@ -145,17 +145,17 @@ const { sharedPool, sharedRedis, pingDbMock, pingRedisMock } = vi.hoisted(() => 
   };
 });
 
-vi.mock("../src/db/pool.js", () => ({
+vi.mock("./db/pool.js", () => ({
   pool: sharedPool,
   getPoolMetrics: vi.fn(() => ({ total: 10, idle: 5, waiting: 0 })),
 }));
-vi.mock("../src/db/health.js", () => ({
+vi.mock("./db/health.js", () => ({
   pingDb: pingDbMock,
   withHealthTimeout: async <T>(p: Promise<T>) => p,
 }));
-vi.mock("../src/db/redis.js", () => ({ pingRedis: pingRedisMock }));
+vi.mock("./db/redis.js", () => ({ pingRedis: pingRedisMock }));
 
-import { buildServer } from "../src/server.js";
+import { buildServer } from "./server.js";
 
 describe("backend smoke test", () => {
   it("boots the API and serves every live endpoint once", async () => {

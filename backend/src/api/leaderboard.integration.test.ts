@@ -15,9 +15,9 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-import { registerLeaderboardRoutes } from "../src/api/leaderboard.js";
-import { registerErrorHandler, registerNotFoundHandler } from "../src/lib/errors.js";
-import type { LeaderboardRow } from "../src/db/types.js";
+import { registerLeaderboardRoutes } from "./leaderboard.js";
+import { registerErrorHandler, registerNotFoundHandler } from "../lib/errors.js";
+import type { LeaderboardRow } from "../db/types.js";
 import type { Pool } from "pg";
 
 // ── helpers ──────────────────────────────────────────────────────────────────

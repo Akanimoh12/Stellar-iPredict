@@ -6,7 +6,7 @@ import {
   isTestDatabaseAvailable,
   truncateAll,
   type TestApp,
-} from "./setup.js";
+} from "../../test/setup.js";
 
 // Resolved once at collection time so `describe.skipIf` can gate every
 // integration test below on it — see setup.ts for why this must not throw

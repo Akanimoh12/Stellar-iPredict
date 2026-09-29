@@ -351,9 +351,13 @@ jobs:
         working-directory: db
         run: npm run typecheck
 
+      # Includes db/test/migration-regression.test.ts, which executes every
+      # migration against this Postgres. REQUIRE_DB makes an unreachable
+      # database a failure instead of a silent skip.
       - name: Run db tests
         working-directory: db
         env:
+          REQUIRE_DB: "1"
           DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
         run: npm test
 

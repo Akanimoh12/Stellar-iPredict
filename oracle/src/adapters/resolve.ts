@@ -25,6 +25,7 @@ export interface ResolutionReason {
     | "all-sources-failed"
     | "insufficient-agreement"
     | "conflicting-outcomes"
+    | "inconclusive"
     | "low-confidence"
     | "cancelled"
     | "unmappable";
@@ -87,6 +88,12 @@ export interface ResolveOptions {
   conflictThreshold?: number;
   /** Resolutions below this confidence are held for review. Defaults to 0.7 (0.85 for politics). */
   minConfidence?: number;
+  /**
+   * Minimum confidence-weighted margin between the winning and losing side,
+   * as a fraction of total weight (0-1). Below this the vote is too close to
+   * call and is held for review. Defaults to 0.1.
+   */
+  minWeightedMargin?: number;
   reviewQueue?: ManualReviewQueue;
   /** Optional durable audit store. Every resolution decision is recorded when supplied. */
   provenanceStore?: ProvenanceStore;
@@ -130,6 +137,7 @@ export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "pro
   maxSources: Infinity,
   conflictThreshold: 0.3,
   minConfidence: 0.7,
+  minWeightedMargin: 0.1,
 };
 
 /**
@@ -236,6 +244,7 @@ export async function resolveMarket(
       customCatConfig?.minConfidence ??
       defaultCatConfig?.minConfidence ??
       DEFAULT_OPTIONS.minConfidence,
+    minWeightedMargin: options?.minWeightedMargin ?? DEFAULT_OPTIONS.minWeightedMargin,
     reviewQueue: options?.reviewQueue,
     provenanceStore: options?.provenanceStore,
     rawPayloadSink: options?.rawPayloadSink,
@@ -322,11 +331,25 @@ export async function resolveMarket(
     });
   }
 
+  // Confidence-weighted vote. Each source's vote counts in proportion to its
+  // confidence (staleness, data quality, provider reliability all feed that
+  // number in the adapter), so a 0.5-confidence stale quote cannot outvote a
+  // fresh 1.0 one. Rule: weight(source) = clamp(confidence, 0, 1); the outcome
+  // is the side with more total weight. If every source reports zero
+  // confidence the vote falls back to head-count and the low-confidence floor
+  // below routes it to review.
   const yesCount = successful.filter((s) => s.outcome).length;
   const noCount = successful.length - yesCount;
   const total = successful.length;
+  const weightOf = (s: SourceResult) => Math.max(0, Math.min(1, s.confidence));
+  const rawYesWeight = successful.filter((s) => s.outcome).reduce((sum, s) => sum + weightOf(s), 0);
+  const rawNoWeight = successful.filter((s) => !s.outcome).reduce((sum, s) => sum + weightOf(s), 0);
+  const useWeights = rawYesWeight + rawNoWeight > 0;
+  const yesWeight = useWeights ? rawYesWeight : yesCount;
+  const noWeight = useWeights ? rawNoWeight : noCount;
+  const totalWeight = yesWeight + noWeight;
   const minority = Math.min(yesCount, noCount);
-  const disagreementRatio = total > 0 ? minority / total : 0;
+  const disagreementRatio = totalWeight > 0 ? Math.min(yesWeight, noWeight) / totalWeight : 0;
 
   if (disagreementRatio > opts.conflictThreshold) {
     const result: ResolutionResult = {
@@ -335,14 +358,31 @@ export async function resolveMarket(
       sources,
       reason: {
         code: "conflicting-outcomes",
-        detail: `${minority} of ${total} sources dissent (threshold ${opts.conflictThreshold})`,
+        detail: `${minority} of ${total} sources dissent; weighted dissent ${disagreementRatio.toFixed(3)} exceeds threshold ${opts.conflictThreshold}`,
       },
     };
     await opts.reviewQueue?.enqueue(reviewItem(market, "conflicting_outcomes", result));
     return finish(result);
   }
 
-  const outcome = yesCount > noCount;
+  // Too close to call: the weighted sides are nearly level, so picking the
+  // marginally heavier one would be noise dressed up as a decision.
+  const margin = totalWeight > 0 ? Math.abs(yesWeight - noWeight) / totalWeight : 0;
+  if (yesCount > 0 && noCount > 0 && margin < opts.minWeightedMargin) {
+    const result: ResolutionResult = {
+      status: opts.reviewQueue ? "review" : "conflict",
+      confidence: 0,
+      sources,
+      reason: {
+        code: "inconclusive",
+        detail: `weighted margin ${margin.toFixed(3)} is below the ${opts.minWeightedMargin} minimum`,
+      },
+    };
+    await opts.reviewQueue?.enqueue(reviewItem(market, "conflicting_outcomes", result));
+    return finish(result);
+  }
+
+  const outcome = yesWeight > noWeight;
   const avgConfidence =
     successful.reduce((sum, s) => sum + s.confidence, 0) / successful.length;
 
@@ -363,7 +403,7 @@ export async function resolveMarket(
   } else {
     result.reason = {
       code: "resolved",
-      detail: `${yesCount} of ${total} sources agree`,
+      detail: `${outcome ? yesCount : noCount} of ${total} sources agree (weighted margin ${margin.toFixed(3)})`,
     };
   }
   return finish(result);

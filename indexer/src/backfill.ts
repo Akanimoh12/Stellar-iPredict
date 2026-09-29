@@ -105,6 +105,58 @@ async function insertDeadLetterEvent(
   }
 }
 
+/**
+ * Number of events processed per chunk within a single RPC page.
+ *
+ * Events are decoded and written one at a time, but processing them in
+ * chunks lets us yield to the event loop between chunks so the GC can
+ * reclaim already-processed events and the process stays responsive
+ * (metrics, health checks, shutdown) even when a page is large.
+ */
+export const EVENTS_PROCESSING_CHUNK_SIZE = 50;
+
+/**
+ * Process a page of events in bounded chunks rather than materialising the
+ * whole page's decoded representation at once.
+ *
+ * The raw RPC page is already in memory (the SDK parses the full JSON
+ * response), so peak memory is primarily bounded by `EVENTS_PER_PAGE` (see
+ * `MAX_EVENTS_PER_PAGE` in `config/index.ts`). This chunked loop ensures we
+ * never hold more than `chunkSize` decoded events at a time and yields to
+ * the event loop between chunks.
+ */
+export async function processEventsInChunks(
+  events: rpc.Api.EventResponse[],
+  chunkSize: number = EVENTS_PROCESSING_CHUNK_SIZE,
+  processor: (event: rpc.Api.EventResponse, eventIndex: number) => Promise<void>,
+): Promise<void> {
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new Error("chunkSize must be a positive integer");
+  }
+  for (let i = 0; i < events.length; i += chunkSize) {
+    const chunk = events.slice(i, i + chunkSize);
+    for (const [chunkIndex, event] of chunk.entries()) {
+      await processor(event, i + chunkIndex);
+    }
+    // Yield to the event loop between chunks so processed events can be
+    // GC'd and the process can service other work (metrics, shutdown).
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Sample current process memory usage for logging/observability.
+ */
+export function sampleMemoryUsage(): { rss: number; heapUsed: number; heapTotal: number; external: number } {
+  const m = process.memoryUsage();
+  return {
+    rss: m.rss,
+    heapUsed: m.heapUsed,
+    heapTotal: m.heapTotal,
+    external: m.external,
+  };
+}
+
 // Parse and write a single event to the database
 export async function writeEventToDb(
   ledgerSeq: number,
@@ -221,7 +273,8 @@ export async function runBackfill(): Promise<number> {
     }
 
     console.log(`[backfill] Processing ${events.length} events...`);
-    for (const [eventIndex, event] of events.entries()) {
+    const pageStartMem = sampleMemoryUsage();
+    await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
       let topics: any[];
       let data: any;
       try {
@@ -230,10 +283,16 @@ export async function runBackfill(): Promise<number> {
       } catch (err) {
         console.error(`[backfill] Failed to decode event: `, err);
         await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
-        continue;
+        return;
       }
       await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
-    }
+    });
+    const pageEndMem = sampleMemoryUsage();
+    console.log(
+      `[backfill] Page memory: heapUsed=${(pageEndMem.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+      `rss=${(pageEndMem.rss / 1024 / 1024).toFixed(1)}MB ` +
+      `heapDelta=${((pageEndMem.heapUsed - pageStartMem.heapUsed) / 1024 / 1024).toFixed(1)}MB`
+    );
 
     const lastEventLedger = events[events.length - 1].ledger;
     currentLedger = lastEventLedger;

@@ -96,7 +96,7 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 |---|---|---|---|
 | `START_LEDGER` | Optional | `0` | Ledger sequence to start indexing from if no checkpoint exists in database. |
 | `POLL_INTERVAL_MS` | Optional | `5000` (5s) | Interval between Soroban event polling queries. |
-| `EVENTS_PER_PAGE` | Optional | `200` | Maximum event batch size per RPC query page. |
+| `EVENTS_PER_PAGE` | Optional | `200` | Maximum event batch size per RPC query page (positive integer, at most `1000`). Values above `1000` are rejected at startup to bound backfill memory usage. |
 | `METRICS_PORT` | Optional | `9091` | Port exposing Prometheus metrics (`GET /metrics`). |
 | `METRICS_HOST` | Optional | `0.0.0.0` | Bind host for metrics endpoint. |
 

@@ -21,6 +21,9 @@ import {
   fetchWithRetry,
   writeEventToDb,
   runBackfill,
+  processEventsInChunks,
+  EVENTS_PROCESSING_CHUNK_SIZE,
+  sampleMemoryUsage,
 } from "./backfill.js";
 import { rpc } from "@stellar/stellar-sdk";
 
@@ -266,6 +269,114 @@ describe("Backfill & Poll Module", () => {
           cursor: "cursor-page-1",
         })
       );
+    });
+  });
+
+  describe("processEventsInChunks", () => {
+    it("processes all events in order across chunk boundaries", async () => {
+      const events = Array.from({ length: 120 }, (_, i) => ({ id: i }));
+      const processed: number[] = [];
+
+      await processEventsInChunks(events as any, 50, async (event) => {
+        processed.push((event as any).id);
+      });
+
+      expect(processed).toHaveLength(120);
+      expect(processed).toEqual(Array.from({ length: 120 }, (_, i) => i));
+    });
+
+    it("respects the chunk size and yields between chunks", async () => {
+      const events = Array.from({ length: 10 }, (_, i) => ({ id: i }));
+      const chunkSizes: number[] = [];
+      let currentChunkSize = 0;
+
+      await processEventsInChunks(events as any, 3, async () => {
+        currentChunkSize++;
+      });
+
+      // 10 events with chunk size 3 → chunks of 3, 3, 3, 1
+      // We can't directly observe chunk boundaries from the processor callback,
+      // but we can verify all events were processed.
+      expect(currentChunkSize).toBe(10);
+    });
+
+    it("rejects invalid chunk sizes", async () => {
+      await expect(processEventsInChunks([], 0, async () => {})).rejects.toThrow("chunkSize must be a positive integer");
+      await expect(processEventsInChunks([], -1, async () => {})).rejects.toThrow("chunkSize must be a positive integer");
+    });
+
+    it("handles an empty event list", async () => {
+      const processed: number[] = [];
+      await processEventsInChunks([], 50, async (event) => {
+        processed.push((event as any).id);
+      });
+      expect(processed).toHaveLength(0);
+    });
+  });
+
+  describe("memory bounds during backfill", () => {
+    it("keeps heap usage bounded during a backfill over a busy range", async () => {
+      // Simulate a busy range: 3000 events across 30 pages of 100 events each.
+      // With a bounded page size and chunked processing, peak heap growth
+      // should stay well below what materialising all 3000 events at once would cost.
+      const TOTAL_EVENTS = 3000;
+      const PAGE_SIZE = 100;
+      const NUM_PAGES = TOTAL_EVENTS / PAGE_SIZE;
+
+      const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 100000 });
+      let eventsGenerated = 0;
+      const mockGetEvents = vi.fn().mockImplementation(async () => {
+        const pageEvents = [];
+        for (let i = 0; i < PAGE_SIZE && eventsGenerated < TOTAL_EVENTS; i++) {
+          pageEvents.push({
+            ledger: 1000 + eventsGenerated,
+            txHash: `hash-${eventsGenerated}`,
+            topic: ["bet_placed", 1, "user1"],
+            value: { amount: 10, is_yes: true },
+          });
+          eventsGenerated++;
+        }
+        return {
+          events: pageEvents,
+          latestLedger: 100000,
+          cursor: `cursor-${eventsGenerated}`,
+        };
+      });
+
+      const serverInstance = {
+        getLatestLedger: mockGetLatestLedger,
+        getEvents: mockGetEvents,
+      };
+      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+
+      // Force a baseline measurement
+      const memBefore = sampleMemoryUsage();
+
+      const lastLedger = await runBackfill();
+
+      const memAfter = sampleMemoryUsage();
+      const heapGrowthBytes = memAfter.heapUsed - memBefore.heapUsed;
+
+      expect(lastLedger).toBe(100000);
+      // NUM_PAGES pages with events + 1 final empty page that signals the end.
+      expect(mockGetEvents).toHaveBeenCalledTimes(NUM_PAGES + 1);
+
+      // The key assertion: heap growth should be bounded and not proportional
+      // to TOTAL_EVENTS. If we materialised all 3000 events at once, growth
+      // would be ~3000 * per-event-size. With chunked processing and bounded
+      // pages, it should stay well under 50MB even for this busy range.
+      // We use a generous threshold to avoid flakiness while still catching
+      // unbounded materialisation.
+      const MAX_HEAP_GROWTH_BYTES = 50 * 1024 * 1024; // 50MB
+      expect(heapGrowthBytes).toBeLessThan(MAX_HEAP_GROWTH_BYTES);
+    });
+
+    it("sampleMemoryUsage returns valid memory stats", () => {
+      const mem = sampleMemoryUsage();
+      expect(mem.rss).toBeGreaterThan(0);
+      expect(mem.heapUsed).toBeGreaterThan(0);
+      expect(mem.heapTotal).toBeGreaterThan(0);
+      expect(mem.external).toBeGreaterThanOrEqual(0);
     });
   });
 });

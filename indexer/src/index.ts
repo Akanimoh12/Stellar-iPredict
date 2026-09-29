@@ -132,7 +132,7 @@ export function installGracefulShutdown(indexer: Indexer): void {
  * returns, so unit tests can exercise it without an infinite timer.
  */
 export async function startLivePolling(fromLedger: number): Promise<void> {
-  const [{ config }, { writeEventToDb: writeBackfillEvent }, stellar] = await Promise.all([
+  const [{ config }, { writeEventToDb: writeBackfillEvent, processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE }, stellar] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
     import("@stellar/stellar-sdk"),
@@ -154,11 +154,11 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
           limit: config.EVENTS_PER_PAGE,
         });
 
-        for (const event of response.events || []) {
+        await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event) => {
           const topics = event.topic.map((t: any) => scValToNative(t));
           const data = scValToNative(event.value);
           await writeBackfillEvent(event.ledger, event.txHash, topics, data);
-        }
+        });
         currentLedger = response.latestLedger;
       }
     } catch (err) {

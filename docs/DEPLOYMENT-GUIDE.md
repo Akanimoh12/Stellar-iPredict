@@ -327,6 +327,55 @@ inventory is a service nobody is watching.
 
 ---
 
+## Step 8: Enable Synthetic Read-Path Monitoring
+
+Passive monitoring only records the traffic that happened. In the small hours
+there may be almost none — which is exactly when a broken read path goes
+unnoticed for hours. The synthetic monitor instead **exercises** the critical
+read paths every two minutes, from outside the deployment, so DNS, TLS, the
+load balancer, the edge and the application itself are verified continuously,
+with or without users. It also alerts when a path gets *slow*, not only when
+it fails.
+
+```bash
+# offline sanity check, then a real (non-delivering) run
+python3 infra/synthetic-monitor/check-synthetic.py --self-test
+python3 infra/synthetic-monitor/check-synthetic.py --dry-run
+
+# choose an alert channel
+cp infra/synthetic-monitor/synthetic-monitor.env.example /etc/ipredict/synthetic-monitor.env
+$EDITOR /etc/ipredict/synthetic-monitor.env
+
+# schedule it every 2 minutes (systemd)
+sudo cp infra/synthetic-monitor/systemd/ipredict-synthetic-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ipredict-synthetic-monitor.timer
+systemctl list-timers ipredict-synthetic-monitor.timer
+```
+
+The checks are read-only by construction — `GET`, or a `POST` carrying a
+read-only JSON-RPC method (anything else is refused while the inventory is
+parsed) — so they are safe to run continuously against production.
+
+Two schedules, two network paths to production:
+
+* **systemd timer (primary)** — every 2 minutes from the monitor host. First
+  sign of trouble alerts within ~2 minutes, a confirmed failure within ~4.
+* **`.github/workflows/synthetic-monitor.yml`** — every 5 minutes from a
+  GitHub-hosted runner, i.e. from outside the deployment entirely. Add the
+  `SYNTHETIC_MONITOR_WEBHOOK_URL` repository secret to arm its alerts; a
+  failed scheduled run also notifies everyone watching the repository.
+
+Full setup, alert escalation, the latency baseline and troubleshooting:
+[`infra/README.md`](../infra/README.md).
+
+**Inventory discipline:** every read path you deploy gets a line in
+`infra/synthetic-monitor/paths.txt` in the PR that deploys it (a `pending`
+slot before it exists, `active` the moment it does — e.g. the API's `/readyz`
+is already listed, waiting for `api.ipredict.xyz`). A critical path missing
+from the inventory is a critical path nobody is watching.
+
+---
+
 ## Certificate Renewal Procedure
 
 > A certificate that expires takes the platform offline instantly — browsers
@@ -503,6 +552,9 @@ After deployment, verify each feature end-to-end:
 - [ ] Social sharing generates correct URLs
 - [ ] Certificate expiry monitor scheduled and reporting `ok` for every endpoint
       (`python3 infra/cert-monitor/check-certs.py` — every active line green, no pending surprises)
+- [ ] Synthetic read-path monitor scheduled and reporting `ok` for every active path
+      (`python3 infra/synthetic-monitor/check-synthetic.py` — all paths green, pending slots listed,
+      and the scheduled GitHub workflow has run at least once from outside the deployment)
 
 ---
 
@@ -516,3 +568,5 @@ After deployment, verify each feature end-to-end:
 | `WASM too large` | Ensure `[profile.release]` has `opt-level = "z"` and `lto = true` |
 | `Wallet not connecting` | Ensure Freighter is on Testnet network |
 | `Build fails` | Run `rustup target add wasm32v1-none` (Stellar CLI v25+ requires this target) |
+| Synthetic check fails but the site loads for you | The probe runs from outside the deployment — check DNS, TLS and the ingress from another network; that gap is exactly what the monitor is for |
+| `json=result.status missing` (HTTP 200) on `rpc-health` | The `/api/rpc` upstream is broken: the proxy forwards the JSON-RPC error body with status 200 — check `PUBLIC_RPC_URL` |

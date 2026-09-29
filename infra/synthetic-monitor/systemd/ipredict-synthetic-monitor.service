@@ -1,0 +1,35 @@
+[Unit]
+Description=iPredict synthetic read-path monitor
+Documentation=file:///opt/ipredict/infra/README.md
+# Optional: fan out a failed run (exit 2) to your on-call unit, e.g.
+#   OnFailure=notify-oncall@%n.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Repository checkout location — adjust if you deploy it elsewhere.
+ExecStart=/usr/bin/python3 /opt/ipredict/infra/synthetic-monitor/check-synthetic.py --fail-on critical
+# Optional per-host configuration (webhook, email, heartbeat):
+#   /etc/ipredict/synthetic-monitor.env
+EnvironmentFile=-/etc/ipredict/synthetic-monitor.env
+StateDirectory=ipredict-synthetic-monitor
+Environment=SYNTHETIC_MONITOR_STATE_FILE=/var/lib/ipredict-synthetic-monitor/state.json
+# Exit 2 (second consecutive failed run, or watchdog gap) fails the unit so
+# systemd's OnFailure= / mail-on-failure picks it up. A first failed run and
+# single slow runs exit 0 and are delivered through the alert channels.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — the monitor only needs to read the repo, write its state dir
+# and make outbound connections.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ipredict-synthetic-monitor
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

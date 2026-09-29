@@ -398,8 +398,210 @@ npm run build
 TLS expiry is the one outage that is entirely predictable, so it is monitored
 for every public endpoint and every internal TLS service. Do this **in the same
 session as the deploy** — the monitor is useless if it is added later.
+
+```bash
+# offline sanity check, then a real (non-delivering) run
+python3 infra/cert-monitor/check-certs.py --self-test
+python3 infra/cert-monitor/check-certs.py --dry-run
+
+# choose an alert channel
+cp infra/cert-monitor/cert-monitor.env.example /etc/ipredict/cert-monitor.env
+$EDITOR /etc/ipredict/cert-monitor.env
+
+# schedule it daily (systemd)
+sudo cp infra/cert-monitor/systemd/ipredict-cert-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ipredict-cert-monitor.timer
+```
+
+Full setup, alert routing, internal-certificate coverage and troubleshooting:
+[`infra/README.md`](../infra/README.md).
+
+**Inventory discipline:** every endpoint you deploy gets a line in
+`infra/cert-monitor/endpoints.txt` in the PR that deploys it (a `pending` slot
+before it exists, `active` the moment it does). A service missing from the
+inventory is a service nobody is watching.
+
+---
+
+## Certificate Renewal Procedure
+
+> A certificate that expires takes the platform offline instantly — browsers
+> and API clients refuse the connection outright, no graceful degradation.
+> Renewal is therefore a scheduled, monitored operation, never an emergency
+> invented at 03:00.
+
+### What renews what
+
+| Endpoint / certificate | Scope | Issued by | Renewal | Who owns it |
+|---|---|---|---|---|
+| `ipredict-stellar.vercel.app` | public | Vercel (managed) | automatic — do not touch | platform |
+| `ipredict.xyz` / `www.ipredict.xyz` | public | Vercel (managed, attached domain) | automatic | platform |
+| `api.ipredict.xyz` | public | Let's Encrypt | `certbot` timer | platform |
+| Any future custom domain | public | Vercel / Let's Encrypt | automatic | platform |
+| `oracle-api.internal:8443`, mesh/mTLS, admin ports | internal | internal CA (`step-ca`/Vault PKI/self-signed) | manual or internal ACME | service owner |
+| Files under `/etc/ipredict/certs/*.crt` (CA chain, client certs) | internal | internal CA | manual | platform |
+| Internal **CA root/intermediate** itself | internal | internal CA | manual — 1–2 year cycle | platform |
+
+Every row above is a row in `infra/cert-monitor/endpoints.txt`. Third-party
+endpoints (Stellar Horizon, Soroban RPC, QuickNode) are the provider's
+certificates: we do not renew them, we monitor that our calls still succeed.
+
+### The alert schedule — what to do at each step
+
+| Alert | When | Required action |
+|---|---|---|
+| **MEDIUM** (≤ 30 days) | early warning | Confirm renewal automation is armed: `systemctl list-timers certbot-*`, check the domain is still attached in Vercel, check the ACME DNS token has not expired. No manual renewal needed. |
+| **HIGH** (≤ 14 days) | automation should already have fired | Prove it did: `sudo certbot certificates` (look at the new `Expiry` date) or `openssl s_client … \| openssl x509 -noout -dates`. If it did not, start the manual procedure below today, not next week. |
+| **CRITICAL** (≤ 7 days) | holiday/no-fail window | Renew **now**, by hand if needed, reload the service, then `check-certs.py --force` to confirm. Page the platform on-call. Repeat CRITICALs are re-sent every 24 h until cleared. |
+| **CRITICAL — EXPIRED** | outage | Follow *When it has already expired* below. |
+| **CRITICAL — check failed** | endpoint unreachable / file missing | Investigate immediately: an unreachable endpoint hides its real expiry date. |
+| **CRITICAL — watchdog gap** | monitor did not run > 48 h | Fix the schedule first (timer/cron/CI), then `--force` to re-verify everything. |
+
+### Manual renewal — public endpoint on Vercel (custom domain)
+
+Vercel issues and renews these automatically; manual work is only ever about
+unblocking that automation.
+
+```bash
+# 1. what is actually being served right now?
+openssl s_client -connect ipredict.xyz:443 -servername ipredict.xyz 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+
+# 2. domain still attached and DNS still pointing at Vercel?
+vercel domains ls          # or: Vercel dashboard → Project → Domains
+dig +short ipredict.xyz A  # must be Vercel's addresses
+
+# 3. force a re-issue from the Vercel dashboard (Project → Domains → the
+#    domain → regenerate/refresh its certificate), or remove + re-add the
+#    domain if DNS changed.
+```
+
+Common silent failures: registrar domain expiry, a DNS record repointed during
+a migration, or a domain removed from the project while the inventory still
+expects it.
+
+### Manual renewal — public endpoint on Let's Encrypt (certbot)
+
+```bash
+# current state
+sudo certbot certificates
+
+# dry-run first: proves the ACME challenge works without burning rate limits
+sudo certbot renew --dry-run
+
+# real renewal
+sudo certbot renew --cert-name api.ipredict.xyz --force-renewal
+
+# reload the web server so the new certificate is actually served
+sudo systemctl reload nginx        # or: sudo nginx -s reload / systemctl reload caddy
+
+# confirm what clients now receive
+openssl s_client -connect api.ipredict.xyz:443 -servername api.ipredict.xyz 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+Automation: `systemctl status certbot.timer` must be `active`; the timer renews
+when a certificate reaches 30 days remaining. The monitor still watches the
+*served* certificate, because an enabled timer with a revoked DNS API token
+fails silently.
+
+### Manual renewal — internal / private-CA certificate
+
+Works for `oracle-api.internal:8443`, mesh/mTLS certs and any file under
+`/etc/ipredict/certs/`.
+
+```bash
+# 1. new key + CSR (keep the SAN list identical to the old certificate)
+openssl req -new -newkey rsa:2048 -nodes \
+  -keyout oracle-api.key -out oracle-api.csr \
+  -subj "/CN=oracle-api.internal" \
+  -addext "subjectAltName=DNS:oracle-api.internal,DNS:ipredict-mesh.internal"
+
+# 2. sign with the internal CA  (omit if your CA is step-ca / Vault PKI —
+#    use its issue command instead)
+openssl x509 -req -in oracle-api.csr \
+  -CA internal-ca.crt -CAkey internal-ca.key -CAcreateserial \
+  -out oracle-api.crt -days 90 \
+  -extfile <(printf "subjectAltName=DNS:oracle-api.internal,DNS:ipredict-mesh.internal")
+
+# 3. install (keep key/cert permissions and ownership unchanged)
+sudo install -m 640 -o root -g ipredict oracle-api.crt /etc/ipredict/certs/oracle-api.crt
+
+# 4. reload the service that terminates TLS
+sudo systemctl restart ipredict-oracle     # mesh: rolling restart of the sidecars
+```
+
+Certificate **files** are monitored directly, so replacing
+`/etc/ipredict/certs/*.crt` is visible to the monitor on the next run even if
+the service is not reachable from the monitor host. The internal **CA root**
+has an expiry date too — it is in the inventory as a `file:` target, and its
+30/14/7 alerts fire exactly like any other certificate. Renewing a CA root
+means re-issuing every leaf it signs, so act on its 30-day alert.
+
+### After any renewal — verification checklist
+
+- [ ] New certificate is what a client receives (`openssl s_client … -dates`)
+- [ ] Chain and hostname verify: `check-certs.py --only <name>` shows `verify: ok`
+- [ ] Service reloaded/restarted so it is serving the new file
+- [ ] Monitor reports a `RENEWED` notice and status `ok`
+- [ ] Restarted clients / mTLS peers still connect (internal certs)
+- [ ] Inventory line still matches reality (target, `tls_source`, `renewal`)
+
+Run it:
+
+```bash
+python3 infra/cert-monitor/check-certs.py             # expect: RENEWED notice, then ok
+python3 infra/cert-monitor/check-certs.py --force     # optionally re-send the current state
+```
+
+### When it has already expired
+
+1. **Renew first, diagnose second.** TLS failures are total, so restore service
+   before writing the post-mortem.
+2. Run the manual procedure for that certificate type above with
+   `--force-renewal` / a fresh issue — do not rely on the automation that just
+   missed its window.
+3. Reload every process that caches the certificate (web server, mesh sidecars,
+   any long-lived gRPC/mTLS connection pool).
+4. Re-run `check-certs.py --force` — it must print `RENEWED` and exit 0.
+5. Flush any CDN/edge cache in front of the endpoint and check OCSP stapling.
+6. Post a status-page update, then write the post-mortem: why the 30-day and
+   14-day alerts did not produce a renewal (unowned alert channel, automation
+   that failed silently, inventory line missing entirely).
+
+### Why automation is not enough
+
+Renewal automation fails silently far more often than certificates expire
+unexpectedly: an ACME DNS token that expired, a certbot timer disabled during
+an image bake, a domain detached from Vercel, a rate-limit from a previous
+broken renewal, a mesh cert bundle mounted but never rotated. The monitor
+therefore watches the certificate **as served** (and as installed on disk),
+never the exit code of the renew job — plus the watchdog gap alert covers "the
+monitor itself stopped running".
+
+---
+
+## Verification Checklist
+
+TLS expiry is the one outage that is entirely predictable, so it is monitored
+for every public endpoint and every internal TLS service. Do this **in the same
+session as the deploy** — the monitor is useless if it is added later.
 ## Post-deployment smoke suite
 
+- [ ] Landing page loads with live stats
+- [ ] Markets page shows seed markets
+- [ ] Market detail page shows odds and betting panel
+- [ ] Wallet connects via Freighter / xBull / Albedo
+- [ ] Placing a bet succeeds (check transaction on Stellar Expert)
+- [ ] Leaderboard shows rankings
+- [ ] Profile page shows bet history after placing bets
+- [ ] Admin page accessible only by admin wallet
+- [ ] Resolving a market works
+- [ ] Claiming rewards works (winner gets XLM + points + tokens)
+- [ ] Referral registration works
+- [ ] Social sharing generates correct URLs
+- [ ] Certificate expiry monitor scheduled and reporting `ok` for every endpoint
+      (`python3 infra/cert-monitor/check-certs.py` — every active line green, no pending surprises)
 Deploying is not the same as working. Before this suite existed the only
 verification after a release was manually poking a few endpoints, which is
 exactly the process that misses a release whose API answers 200 with amounts

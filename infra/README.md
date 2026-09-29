@@ -113,6 +113,101 @@ CLI flags: `--dry-run`, `--force` (re-send everything currently in alert),
 `--only NAME`, `--json`, `--fail-on none|critical|any`,
 `--re-alert-hours`, `--stale-after-hours`, `--inventory`, `--state-file`.
 
+
+### What is monitored
+
+Every stateful service listed in `disk-monitor/services.txt`:
+
+| Type | What it covers | Example |
+|---|---|---|
+| `postgres` | PostgreSQL data directory | `/var/lib/postgresql/data` |
+| `redis` | Redis data directory | `/var/lib/redis` |
+| `mount` | Any filesystem mount point | `/mnt/backups` |
+
+Per-table growth is tracked in PostgreSQL when `DISK_MONITOR_DATABASE_URL` is
+configured — the top 20 tables by size are queried on every run and their
+growth rate is computed from the previous run's measurement.
+
+> **Rule: no stateful service may exist without a line in `services.txt`.** A
+> service with no inventory line is a service nobody is watching.
+
+### Alert escalation
+
+Alerts fire on **projected days-to-full**, not on current percentage used:
+
+| Days to full | Level | Channels | Exit code |
+|---|---|---|---|
+| > 14 | `ok` | none (logged in the report) | 0 |
+| ≤ 14 | **MEDIUM** | chat webhook | 0 (1 with `--fail-on any`) |
+| ≤ 7 | **HIGH** | chat webhook + email | 0 (1 with `--fail-on any`) |
+| ≤ 3 | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| full / check failed | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| monitor gap > 48 h | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+
+Why time-to-full: a disk at 90% that fills in a day is an emergency; a disk
+at 90% that fills in a year is not. Growth rate is measured from the previous
+run's data, so the projection is based on observed trend.
+
+Extras that keep the monitor honest:
+
+* **Per-table growth** — the largest tables and their growth rates are
+  identified on every run, so the events table (or any other unbounded table)
+  is visible before it becomes a crisis.
+* **Watchdog gap** — if the previous run is older than `--stale-after-hours`
+  (default 48 h), the run reports the gap as CRITICAL.
+* **External dead-man's-switch** — point `DISK_MONITOR_HEARTBEAT_URL` at
+  healthchecks.io (or similar): if *every* scheduler dies, that service is the
+  one left to notice.
+* **Scheduled CI** — `.github/workflows/disk-monitor.yml` runs the same check
+  daily on a clean runner and publishes a report to the job summary.
+
+### Install
+
+Everything is stdlib Python 3.9+ — no packages, no virtualenv.
+
+```bash
+# 1. look at what it would say today
+python3 infra/disk-monitor/check-disk.py --self-test     # offline assertions
+python3 infra/disk-monitor/check-disk.py --dry-run       # real checks, no delivery
+
+# 2. pick an alert channel (any subset)
+cp infra/disk-monitor/disk-monitor.env.example /etc/ipredict/disk-monitor.env
+$EDITOR /etc/ipredict/disk-monitor.env
+
+# 3a. systemd (recommended)
+sudo cp infra/disk-monitor/systemd/ipredict-disk-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ipredict-disk-monitor.timer
+systemctl list-timers ipredict-disk-monitor.timer
+
+# 3b. or cron
+echo '23 6 * * * python3 /opt/ipredict/infra/disk-monitor/check-disk.py --fail-on critical' | crontab -
+
+# 3c. or the scheduled GitHub Actions workflow (already in the repo — just
+#     add the DISK_MONITOR_WEBHOOK_URL secret)
+```
+
+The first run stores its state (default
+`$XDG_STATE_HOME/ipredict-disk-monitor/state.json`, override with
+`DISK_MONITOR_STATE_FILE`); later runs only alert on escalation.
+
+### Configuration
+
+Read from the environment (see `disk-monitor/disk-monitor.env.example`):
+
+| Variable | Purpose |
+|---|---|
+| `DISK_MONITOR_WEBHOOK_URL` | Slack/Teams-compatible webhook (`{"text": …}`) |
+| `DISK_MONITOR_WEBHOOK_FORMAT` | `slack` (default), `discord`, `generic` |
+| `DISK_MONITOR_EMAIL_TO` | email for HIGH/CRITICAL (needs `sendmail`/`mail`) |
+| `DISK_MONITOR_DATABASE_URL` | PostgreSQL connection string for per-table growth |
+| `DISK_MONITOR_HEARTBEAT_URL` | dead-man's-switch ping after each run |
+| `DISK_MONITOR_STATE_FILE` | alert de-duplication state |
+
+CLI flags: `--dry-run`, `--force` (re-send everything currently in alert),
+`--only NAME`, `--json`, `--fail-on none|critical|any`,
+`--re-alert-hours`, `--stale-after-hours`, `--inventory`, `--state-file`.
+
 ### Day-2 operations
 
 | Task | Command |

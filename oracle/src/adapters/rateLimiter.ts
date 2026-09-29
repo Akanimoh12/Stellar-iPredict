@@ -140,6 +140,8 @@ export class ProviderRateLimiter {
  */
 export const PROVIDER_RATE_LIMITS: Readonly<Record<string, ProviderRateLimit>> = {
   binance: { limit: 600, windowMs: 60_000 },
+  coingecko: { limit: 30, windowMs: 60_000 },
+  sportdataapi: { limit: 60, windowMs: 60_000 },
 };
 
 /** Shared process-wide limiter used by all adapters for the same provider. */

@@ -54,7 +54,7 @@ export interface CoinMarketCapAdapterOptions extends FetchWithRetryOptions {
  */
 export class CoinMarketCapAdapter implements DataAdapter {
   readonly id = "coinmarketcap";
-  private readonly responseCache: AdapterResponseCache<AdapterOutcome>;
+  private readonly responseCache: AdapterResponseCache<{ price: number; body: CoinMarketCapResponse; observedAtMs: number | null }>;
   private readonly freshness: FreshnessPolicy;
 
   constructor(private readonly options: CoinMarketCapAdapterOptions) {
@@ -79,10 +79,9 @@ export class CoinMarketCapAdapter implements DataAdapter {
     if (!isCryptoMarketParams(market.params)) {
       throw new Error(`CoinMarketCapAdapter cannot resolve market ${market.id}: missing/invalid crypto params`);
     }
-    const params = market.params;
+    const { symbol, comparator, threshold } = market.params;
 
-    return this.responseCache.getOrSet(marketCacheKey(market), async () => {
-      const { symbol, comparator, threshold } = params;
+    const cached = await this.responseCache.getOrSet(marketCacheKey(market), async () => {
       const convert = this.options.convert ?? "USD";
       const url = `${CMC_QUOTES_URL}?symbol=${encodeURIComponent(symbol)}&convert=${encodeURIComponent(convert)}`;
       const response = await fetchWithRetry(
@@ -100,37 +99,40 @@ export class CoinMarketCapAdapter implements DataAdapter {
 
       const now = Date.now();
       const observedAtMs = extractTimestampMs(quote, TIMESTAMP_KEYS, now);
-      const freshness = assessQuote(observedAtMs, this.freshness, now);
-      recordQuoteStatus(this.id, freshness.status, now);
-
-      if (freshness.status === "expired") {
-        throw new StaleQuoteError(this.id, {
-          ageMs: freshness.ageMs ?? 0,
-          maxAgeMs: this.freshness.maxAgeMs,
-          observedAtMs: freshness.observedAtMs,
-        });
-      }
-
-      const { outcome, confidence } = normalizeCryptoQuote({
-        price,
-        threshold,
-        comparator,
-        observedAtMs,
-        freshness: this.freshness,
-        now,
-      });
-
-      return {
-        outcome,
-        confidence,
-        raw: body,
-        freshness: {
-          status: freshness.status,
-          ageMs: freshness.ageMs,
-          observedAtMs: freshness.observedAtMs,
-          maxAgeMs: this.freshness.maxAgeMs,
-        },
-      };
+      return { price, body, observedAtMs };
     });
+
+    const now = Date.now();
+    const freshness = assessQuote(cached.observedAtMs, this.freshness, now);
+    recordQuoteStatus(this.id, freshness.status, now);
+
+    if (freshness.status === "expired") {
+      throw new StaleQuoteError(this.id, {
+        ageMs: freshness.ageMs ?? 0,
+        maxAgeMs: this.freshness.maxAgeMs,
+        observedAtMs: freshness.observedAtMs,
+      });
+    }
+
+    const { outcome, confidence } = normalizeCryptoQuote({
+      price: cached.price,
+      threshold,
+      comparator,
+      observedAtMs: cached.observedAtMs,
+      freshness: this.freshness,
+      now,
+    });
+
+    return {
+      outcome,
+      confidence,
+      raw: cached.body,
+      freshness: {
+        status: freshness.status,
+        ageMs: freshness.ageMs,
+        observedAtMs: freshness.observedAtMs,
+        maxAgeMs: this.freshness.maxAgeMs,
+      },
+    };
   }
 }

@@ -1,5 +1,5 @@
 import { type FetchWithRetryOptions, fetchWithRetry } from "./httpRetry.js";
-import { type AdapterOutcome, type DataAdapter, type Market } from "./index.js";
+import { type AdapterOutcome, type DataAdapter, isSportsMarketParams, type Market } from "./index.js";
 import { probeHttp } from "./health.js";
 
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
@@ -39,19 +39,6 @@ interface OddsApiEvent {
 export interface TheOddsApiAdapterOptions extends FetchWithRetryOptions {
   apiKey: string;
   region?: string;
-}
-
-function isSportsMarketParams(params: Record<string, unknown>): boolean {
-  return (
-    typeof params.sportKey === "string" &&
-    params.sportKey.length > 0 &&
-    typeof params.homeTeam === "string" &&
-    params.homeTeam.length > 0 &&
-    typeof params.awayTeam === "string" &&
-    params.awayTeam.length > 0 &&
-    typeof params.selectedTeam === "string" &&
-    params.selectedTeam.length > 0
-  );
 }
 
 export class TheOddsApiAdapter implements DataAdapter {

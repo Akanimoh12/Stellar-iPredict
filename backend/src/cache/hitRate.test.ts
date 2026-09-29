@@ -18,10 +18,24 @@ import {
   resetCacheStats,
   serializeCacheMetrics,
 } from "./hitRate.js";
-import { betsKey, leaderboardKey, marketKey, statsKey } from "./keys.js";
+import {
+  getNegativeCacheStats,
+  resetNegativeCacheStats,
+  serializeNegativeCacheMetrics,
+} from "./negativeCache.js";
+import {
+  betsKey,
+  cacheKey,
+  leaderboardKey,
+  marketKey,
+  oddsKey,
+  statsKey,
+  statusKey,
+} from "./keys.js";
 
 beforeEach(() => {
   resetCacheStats();
+  resetNegativeCacheStats();
 });
 
 /** Parse an exposition body into `name{labels} -> value`. */
@@ -93,6 +107,18 @@ describe("cacheNamespaceOf", () => {
     expect(cacheNamespaceOf(leaderboardKey())).toBe("leaderboard");
     expect(cacheNamespaceOf(statsKey())).toBe("stats");
     expect(cacheNamespaceOf(betsKey(7))).toBe("bets");
+    expect(cacheNamespaceOf(statusKey())).toBe("status");
+    expect(cacheNamespaceOf(oddsKey(7))).toBe("odds");
+  });
+
+  it("namespaces every entity in CACHE_ENTITIES, so none collapse into `other`", () => {
+    // The whole point of the per-namespace breakdown is to say *which* key
+    // structure broke. An entity whose keys land in `other` cannot be named
+    // by the alert or the dashboard, which is how the list and the key
+    // builders drift apart unnoticed.
+    for (const entity of CACHE_NAMESPACES) {
+      expect(cacheNamespaceOf(cacheKey(entity, "1"))).toBe(entity);
+    }
   });
 
   it("buckets anything unrecognised as `other` instead of a new series", () => {
@@ -239,5 +265,114 @@ describe("getOrSet records hits and misses", () => {
     expect(result).toEqual({ id: 1 });
 
     expect(getCacheStats().lookups).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Negative lookups — counted separately from the ordinary hit rate
+// ---------------------------------------------------------------------------
+
+describe("getOrSet classifies not-found values as negative-cache lookups", () => {
+  it("counts a stored `null` as a negative-cache hit and leaves the cache counters alone", async () => {
+    const redis = createFakeRedis();
+    const key = marketKey(999);
+    redis._store.set(key, "null");
+    const loader = vi.fn(async () => ({ id: 999 }));
+
+    const value = await getOrSet(redis as never, key, 30, loader);
+
+    expect(value).toBeNull();
+    expect(loader).not.toHaveBeenCalled();
+
+    // Not a hit: Redis did not serve a resource, it served "not found".
+    expect(getCacheStats().lookups).toBe(0);
+    expect(getNegativeCacheStats()).toMatchObject({
+      hits: 1,
+      misses: 0,
+      lookups: 1,
+      hitRate: 1,
+    });
+  });
+
+  it("counts a loader that resolves to `null` as a negative-cache miss", async () => {
+    const redis = createFakeRedis();
+
+    const value = await getOrSet(redis as never, marketKey(404), 30, async () => null);
+
+    expect(value).toBeNull();
+    // The cache did not have to serve a resource, so the ordinary hit rate
+    // must not move — otherwise a burst of 404s drags it down (or a burst of
+    // cached 404s props it up) and hides the real signal.
+    expect(getCacheStats().lookups).toBe(0);
+    expect(getNegativeCacheStats()).toMatchObject({ hits: 0, misses: 1, lookups: 1 });
+  });
+
+  it("then serves the stored `null` as a negative-cache hit", async () => {
+    const redis = createFakeRedis();
+    const key = marketKey(404);
+
+    await getOrSet(redis as never, key, 30, async () => null);
+    await getOrSet(redis as never, key, 30, async () => null);
+
+    expect(getNegativeCacheStats()).toMatchObject({ hits: 1, misses: 1, hitRate: 0.5 });
+    expect(getCacheStats().lookups).toBe(0);
+  });
+
+  it("counts each concurrent caller of a cold null-returning key as its own negative miss", async () => {
+    const redis = createFakeRedis();
+    const key = betsKey(9999);
+
+    await Promise.all(
+      Array.from({ length: 3 }, () => getOrSet(redis as never, key, 30, async () => null)),
+    );
+
+    expect(getNegativeCacheStats().misses).toBe(3);
+    expect(getCacheStats().lookups).toBe(0);
+  });
+
+  it("counts a rejecting loader as an ordinary miss — the failure is not a not-found", async () => {
+    const redis = createFakeRedis();
+
+    await expect(
+      getOrSet(redis as never, marketKey(1), 30, async () => {
+        throw new Error("database down");
+      }),
+    ).rejects.toThrow("database down");
+
+    expect(getCacheStats()).toMatchObject({ misses: 1, lookups: 1 });
+    expect(getNegativeCacheStats().lookups).toBe(0);
+  });
+
+  it("does not touch either family when Redis cannot be consulted", async () => {
+    const redis = {
+      get: vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+      setex: vi.fn(),
+    };
+
+    await getOrSet(redis as never, marketKey(1), 30, async () => null);
+
+    expect(getCacheStats().lookups).toBe(0);
+    expect(getNegativeCacheStats().lookups).toBe(0);
+  });
+
+  it("exposes the negative cache as its own metric family", async () => {
+    const redis = createFakeRedis();
+    await getOrSet(redis as never, marketKey(1), 30, async () => null);
+    await getOrSet(redis as never, marketKey(1), 30, async () => null);
+
+    const samples = parseExposition(serializeNegativeCacheMetrics());
+
+    expect(samples.negative_cache_hit_rate).toBe("0.5");
+    expect(samples.negative_cache_hits_total).toBe("1");
+    expect(samples.negative_cache_misses_total).toBe("1");
+    expect(samples['negative_cache_namespace_hits_total{namespace="market"}']).toBe("1");
+    expect(samples['negative_cache_namespace_misses_total{namespace="market"}']).toBe("1");
+
+    // Never mixed with the ordinary cache metrics under one metric name.
+    for (const line of serializeCacheMetrics().split("\n")) {
+      expect(line.startsWith("negative_cache")).toBe(false);
+    }
   });
 });

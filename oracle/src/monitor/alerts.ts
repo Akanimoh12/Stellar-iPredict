@@ -13,6 +13,7 @@ export type AlertType =
   | "oracle.monitor.council_inactive"
   | "oracle.monitor.council_window_exceeded"
   | "oracle.monitor.council_deadline_approaching";
+  | "oracle.adapter.stale_data";
 
 export interface Alert {
   type: AlertType;

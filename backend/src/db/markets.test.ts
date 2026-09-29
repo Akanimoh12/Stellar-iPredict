@@ -185,4 +185,3 @@ describe("getMarketById", () => {
     expect(typeof result?.total_no).toBe("string");
   });
 });
-

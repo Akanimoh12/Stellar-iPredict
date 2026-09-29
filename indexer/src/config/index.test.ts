@@ -129,4 +129,38 @@ describe("Configuration Validation", () => {
     expect(config.EVENTS_PER_PAGE).toBe(200);
     expect(config.REDIS_URL).toBe("redis://localhost:6379");
   });
+
+  it("9. Config: Accepts EVENTS_PER_PAGE at the upper bound", async () => {
+    setValidEnv();
+    process.env.EVENTS_PER_PAGE = "1000";
+    const { config } = await import("./index.js");
+    expect(config.EVENTS_PER_PAGE).toBe(1000);
+  });
+
+  it("10. Config: Rejects EVENTS_PER_PAGE above the upper bound at startup", async () => {
+    setValidEnv();
+    process.env.EVENTS_PER_PAGE = "1001";
+
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit(1)");
+    }) as any);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(import("./index.js")).rejects.toThrow("process.exit(1)");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it("11. Config: Rejects unreasonably large EVENTS_PER_PAGE at startup", async () => {
+    setValidEnv();
+    process.env.EVENTS_PER_PAGE = "10000";
+
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit(1)");
+    }) as any);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(import("./index.js")).rejects.toThrow("process.exit(1)");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
 });

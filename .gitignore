@@ -62,5 +62,11 @@ yarn-error.log*
 # ── Stellar CLI local identity keystore ────────────────────────────────────────
 .stellar/
 
+# ── Monitors (Python cache + per-run state) ───────────────────────────────────
+__pycache__/
+*.py[cod]
+infra/cert-monitor/.state.json
+infra/disk-monitor/.state.json
+infra/synthetic-monitor/.state.json
 # Coverage output
 coverage/

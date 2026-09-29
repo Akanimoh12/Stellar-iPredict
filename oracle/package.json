@@ -18,6 +18,7 @@
     "sweep:unmappable": "tsx src/adapters/unmappableSweep.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:mutation": "tsx scripts/mutation-runner.ts",
     "typecheck": "tsc --noEmit",
     "check:sdk-version": "node ../scripts/check-sdk-version.js",
     "lint": "tsc --noEmit"

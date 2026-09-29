@@ -1,0 +1,57 @@
+# Staging infrastructure runs against Stellar Testnet. Copy .env.staging.example
+# to .env before supplying contract IDs or provider credentials.
+name: ipredict-staging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ipredict}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-ipredict}
+    volumes:
+      - staging_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - staging_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  oracle:
+    build:
+      context: ../oracle
+    environment:
+      SOROBAN_RPC_URL: ${SOROBAN_RPC_URL:-https://soroban-testnet.stellar.org}
+      NETWORK_PASSPHRASE: Test SDF Network ; September 2015
+      MARKET_CONTRACT_ID: ${MARKET_CONTRACT_ID:-}
+      ORACLE_SECRET_KEY: ${ORACLE_SECRET_KEY:-}
+      COUNCIL_THRESHOLD: ${COUNCIL_THRESHOLD:-4}
+      COUNCIL_SIZE: ${COUNCIL_SIZE:-7}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      SPORTS_API_KEY: ${SPORTS_API_KEY:-}
+      ODDS_API_KEY: ${ODDS_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  staging_pgdata:
+  staging_redisdata:

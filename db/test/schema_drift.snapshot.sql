@@ -1,0 +1,15 @@
+-- iPredict schema drift snapshot
+--
+-- Expected `pg_dump --schema-only` output of the schema produced by applying
+-- every `db/migrations/*.sql` file in order against a fresh database.
+--
+-- Regenerate with:
+--
+--   cd db && npm run schema:dump
+--
+-- Add/update migrations first, then regenerate so this file always reflects
+-- the schema the application actually expects. The schema-drift test fails
+-- (with a table/column-level diff) until this snapshot is regenerated.
+--
+-- This placeholder is intentionally empty: run `npm run schema:dump` once a
+-- Postgres is reachable to populate it with the real schema.

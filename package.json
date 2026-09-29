@@ -19,5 +19,18 @@
     "smoke:list": "tsx test/smoke/run.ts --list",
     "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",
     "audit": "npx audit-ci --config ./audit-ci.jsonc"
+  },
+  "overrides": {
+    "undici": "^6.28.1",
+    "vite": "^6.4.3"
+  },
+  "devDependencies": {
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6",
+    "@stellar/stellar-sdk": "^16.2.0",
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

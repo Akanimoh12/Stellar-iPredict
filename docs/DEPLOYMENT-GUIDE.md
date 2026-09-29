@@ -4,7 +4,7 @@
 
 - [Stellar CLI](https://github.com/stellar/stellar-cli) (v25+)
 - [Rust](https://rustup.rs/) 1.85+ with `wasm32v1-none` target
-- [Node.js](https://nodejs.org/) 18+ with npm
+- [Node.js](https://nodejs.org/) 22+ with npm
 - A funded Stellar testnet account
 
 ---

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { LEGACY_MIGRATION_GROUPS } from "./migration-names.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
@@ -8,20 +9,6 @@ import { DEFAULT_TEST_DATABASE_URL } from "./schema-drift.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "..", "migrations");
 const SCRATCH_SCHEMA = "migration_regression_check";
-
-/**
- * Number prefixes that were already shared by more than one migration before
- * this guard existed. Renumbering applied migrations would change their
- * `schema_migrations` filenames and break deployed databases, so these are
- * frozen. The list must never grow: a new collision fails the test.
- */
-const LEGACY_SHARED_PREFIXES: ReadonlySet<string> = new Set([
-  "0011",
-  "0013",
-  "0014",
-  "0015",
-  "0022",
-]);
 
 function dbUrl(): string {
   return (
@@ -67,7 +54,7 @@ describe("migration numbering (static)", () => {
       byPrefix.set(p, [...(byPrefix.get(p) ?? []), f]);
     }
     const newDuplicates = [...byPrefix.entries()]
-      .filter(([p, list]) => list.length > 1 && !LEGACY_SHARED_PREFIXES.has(p))
+      .filter(([p, list]) => list.length > 1 && JSON.stringify([...list].sort()) !== JSON.stringify(LEGACY_MIGRATION_GROUPS[p] ?? []))
       .map(([p, list]) => `${p}: ${list.join(", ")}`);
     expect(newDuplicates, `Duplicate migration number(s):\n${newDuplicates.join("\n")}`).toEqual([]);
   });

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+vi.mock("./metrics-server.js", () => ({
+  MetricsServer: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 // Mock config
 vi.mock("./config/index.js", () => {
   return {

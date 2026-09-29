@@ -17,7 +17,7 @@ for the full design.
 
 ## Stack
 
-- **Runtime:** Node.js 20+, TypeScript
+- **Runtime:** Node.js 22+, TypeScript
 - **HTTP:** Fastify
 - **DB:** PostgreSQL 16 (shared with the indexer)
 - **Cache:** Redis 7

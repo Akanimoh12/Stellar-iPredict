@@ -10,7 +10,7 @@ indexed reads. Also invalidates the Redis cache on relevant updates.
 
 ## Stack
 
-- **Runtime:** Node.js 20+, TypeScript
+- **Runtime:** Node.js 22+, TypeScript
 - **DB:** PostgreSQL 16 (shared with the backend)
 - **Cache:** Redis 7 (invalidation only)
 - **Stellar:** `@stellar/stellar-sdk`

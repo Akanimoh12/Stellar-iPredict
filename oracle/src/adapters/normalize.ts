@@ -54,7 +54,7 @@
  */
 
 import { AdapterError } from "./errors.js";
-import { applyConfidenceCeiling, assessQuote } from "./freshness.js";
+import { applyConfidenceCeiling, assessQuote, type FreshnessPolicy } from "./freshness.js";
 
 /**
  * A provider response that could not be normalized.
@@ -164,6 +164,9 @@ export interface NormalizedOutcome {
  * forwarded as-is to the audit trail.
  */
 export interface CryptoRawPayload {
+  observedAtMs?: number | null;
+  freshness?: FreshnessPolicy;
+  now?: number;
   price: number;
   threshold: number;
   /** Direction of the threshold comparison. */

@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20]
+        node-version: [22, 24]
 
     steps:
       - name: Checkout repository
@@ -71,7 +71,7 @@ jobs:
         run: npm run build
 
       - name: Upload build artifact
-        if: matrix.node-version == 20
+        if: matrix.node-version == 22
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frontend-build
@@ -113,7 +113,7 @@ jobs:
 
   # ─── Job 3: Backend Node package check ─────────────────────────────────────
   backend-check:
-    name: Backend API (Node 20)
+    name: Backend API (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -143,10 +143,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install root and shared dependencies
@@ -173,7 +173,7 @@ jobs:
 
   # ─── Job 4: Oracle Node package check ───────────────────────────────────────
   oracle-check:
-    name: Oracle (Node 20)
+    name: Oracle (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -194,10 +194,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -223,7 +223,7 @@ jobs:
 
   # ─── Job 5: Indexer Node package check ──────────────────────────────────────
   indexer-check:
-    name: Indexer (Node 20)
+    name: Indexer (Node 22)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -253,10 +253,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -288,17 +288,17 @@ jobs:
   # suite can be tested. It has its own job rather than riding along with one
   # workspace so a failure here is not mistaken for a backend-only regression.
   cross-package-check:
-    name: Cross-package (Node 20)
+    name: Cross-package (Node 22)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -339,10 +339,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -383,10 +383,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -404,34 +404,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Run dependency vulnerability scan (Backend, Oracle, Indexer, DB, Frontend, Shared)
         run: |
-          npm audit --audit-level=high || true
-          for dir in backend oracle indexer db shared frontend; do
-            if [ -d "$dir" ] && [ -f "$dir/package.json" ]; then
-              echo "Auditing $dir..."
-              (cd "$dir" && npm audit --audit-level=high) || exit 1
-            fi
-          done
+          # The root lockfile covers all backend workspaces; frontend is separate.
+          npm audit --audit-level=high
+          cd frontend
+          npm audit --audit-level=high
 
   # ─── Job 9: TypeScript Typecheck across all workspaces ───────────────────────
   typecheck:
-    name: Typecheck (Node 20)
+    name: Typecheck (Node 22)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -447,10 +444,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Setup Node.js 20
+      - name: Setup Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Install workspace dependencies
         run: npm ci

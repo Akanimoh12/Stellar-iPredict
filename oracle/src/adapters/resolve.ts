@@ -119,6 +119,7 @@ export interface ResolveOptions {
 /** Options carried through as-is, rather than defaulted per category. */
 type PassedThroughOptions =
   | "reviewQueue"
+  | "rawPayloadSink"
   | "provenanceStore"
   | "categoryConfigs"
   | "checkMappability"
@@ -132,7 +133,7 @@ export interface CategoryResolutionConfig {
   minConfidence?: number;
 }
 
-export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink" | "categoryConfigs">> = {
+export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, PassedThroughOptions>> = {
   minAgreement: 1,
   maxSources: Infinity,
   conflictThreshold: 0.3,
@@ -222,8 +223,8 @@ export async function resolveMarket(
   const defaultCatConfig = market.category ? DEFAULT_CATEGORY_CONFIG[market.category] : undefined;
   const customCatConfig = market.category ? options?.categoryConfigs?.[market.category] : undefined;
 
-  const opts: Required<Omit<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink" | "categoryConfigs">> &
-    Pick<ResolveOptions, "reviewQueue" | "provenanceStore" | "rawPayloadSink"> = {
+  const opts: Required<Omit<ResolveOptions, PassedThroughOptions>> &
+    Pick<ResolveOptions, PassedThroughOptions> = {
     minAgreement:
       options?.minAgreement ??
       customCatConfig?.minAgreement ??
@@ -248,6 +249,9 @@ export async function resolveMarket(
     reviewQueue: options?.reviewQueue,
     provenanceStore: options?.provenanceStore,
     rawPayloadSink: options?.rawPayloadSink,
+    checkMappability: options?.checkMappability,
+    mappabilityRegistry: options?.mappabilityRegistry,
+    mappabilityOverrides: options?.mappabilityOverrides,
   };
 
   // Every exit path runs through `finish`, so a payload is persisted whatever

@@ -5,7 +5,7 @@
   "description": "iPredict oracle \u2014 council aggregator, data adapters, submitter, monitor",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -33,6 +33,7 @@
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.0",
     "typescript": "^5.7.3",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.6",
+    "@vitest/coverage-v8": "^3.2.6"
   }
 }

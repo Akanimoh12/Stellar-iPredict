@@ -242,7 +242,7 @@ ipredict-stellar/
 ### Prerequisites
 
 - **Rust** ≥ 1.85.0 with `wasm32-unknown-unknown` target
-- **Node.js** ≥ 18
+- **Node.js** ≥ 22
 - **Stellar CLI** (`stellar-cli` or `soroban-cli`)
 - **Freighter Wallet** browser extension (for mainnet interaction)
 
@@ -318,9 +318,9 @@ cd frontend && npx vitest run --coverage
 GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main`/`develop` and every PR to `main`.
 
 ### Job 1: `lint-test-build`
-- **Matrix:** Node.js 18, 20
+- **Matrix:** Node.js 22, 24
 - **Steps:** `npm ci` → `npm test` → `npm run build`
-- **Artifacts:** Production build uploaded on Node 20
+- **Artifacts:** Production build uploaded on Node 22
 
 ### Job 2: `contract-check`
 - **Toolchain:** Rust stable + `wasm32-unknown-unknown` target

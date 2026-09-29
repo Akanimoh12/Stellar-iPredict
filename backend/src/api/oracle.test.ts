@@ -633,9 +633,9 @@ describe.skipIf(!dbAvailable)(
 
       // Seed market (id: 101) so foreign key constraints on oracle_submissions are satisfied
       await testApp.pool.query(
-        `INSERT INTO markets (id, question, end_time, total_yes, total_no, resolved, cancelled, creator, bet_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [101, "Will XLM reach $5 by 2027?", 1893456000, "0", "0", false, false, providerA.publicKey(), 0],
+        `INSERT INTO markets (id, question, end_time, total_yes, total_no, resolved, cancelled, creator, bet_count, category)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [101, "Will XLM reach $5 by 2027?", 1893456000, "0", "0", false, false, providerA.publicKey(), 0, "Crypto"],
       );
     });
 

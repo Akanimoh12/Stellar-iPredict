@@ -7,6 +7,102 @@
 - [Node.js](https://nodejs.org/) 18+ with npm
 - A funded Stellar testnet account
 
+---
+
+## Rollback procedure
+
+Use this procedure for an application release that is unhealthy after
+deployment. It intentionally rolls back **code, not schema**: migrations run
+forward only and the previous release must remain compatible with the current
+schema. The compatibility requirement and expand/contract policy are mandatory
+for every migration in [the contribution guide](../CONTRIBUTING.md#database-migration-compatibility).
+
+### Before changing anything
+
+1. Declare the rollback and freeze further deployments. Record the release tag,
+   current image tags, symptom, and UTC start time in the incident channel.
+2. Preserve evidence: capture `docker compose ps`, the last 15 minutes of logs,
+   and the current `schema_migrations` rows. Do not put secrets from `.env` in
+   the incident record.
+3. Confirm that the target release was tested against the current schema. If it
+   was not, **do not roll back application code**. Keep the current version
+   running or deploy a forward-compatible hotfix instead.
+4. Select the previously known-good, immutable image tags and place them in a
+   protected rollback env file (for example `infra/.env.rollback`). Never use
+   floating tags such as `latest` or rebuild an old Git revision during an
+   incident.
+
+### Roll back the application services
+
+From `infra/`, use the production compose file and the protected rollback env
+file. Do not invoke `scripts/deploy.sh`, because it runs migrations by default.
+
+```bash
+docker compose -f docker-compose.production.yml --env-file .env.rollback pull \
+  api indexer proxy oracle-aggregator oracle-monitor
+
+# Stop singleton writers first. This prevents concurrent event processing or
+# resolution submission while their replacement starts.
+docker compose -f docker-compose.production.yml --env-file .env.rollback stop \
+  indexer oracle-aggregator
+
+# Start the previous API, proxy, oracle services, then the single indexer.
+docker compose -f docker-compose.production.yml --env-file .env.rollback up -d --no-build \
+  api proxy oracle-aggregator oracle-monitor
+docker compose -f docker-compose.production.yml --env-file .env.rollback up -d --no-build indexer
+```
+
+Service-specific verification follows:
+
+| Service | Rollback action | Verify before proceeding |
+|---|---|---|
+| `api` | Start the prior `API_IMAGE_TAG`; keep the proxy pointed at it. | `GET /readyz` returns 200 and requests succeed through the proxy. |
+| `indexer` | Stop it before the replacement, then start exactly one prior instance. | Its advisory lock is held once and its checkpoint advances without duplicate events. |
+| `oracle-aggregator` | Stop before replacement to avoid duplicate finalization attempts; start the prior image with the same mounted resolver key. | `/health/ready` is healthy and one poll cycle completes without signing errors. |
+| `oracle-monitor` | Start the prior image after the aggregator. | It can read Postgres and deliver a test alert only to the staging endpoint. |
+| `proxy` | Start the prior proxy image/config after the API. | HTTPS and `/healthz` work through the public hostname. |
+| `log-collector` | It may remain running; roll back only its prior image/config if logging itself caused the incident. | New JSON logs arrive at the configured sink. |
+| `postgres` / `redis` | Do not roll back their images, volumes, or data as part of an application rollback. | Their existing health checks remain healthy. Restore from a verified backup only under the disaster-recovery procedure. |
+
+After every service is healthy, run a smoke test for market reads, authenticated
+oracle submission, indexer progress, and an oracle monitor cycle. Keep the
+deployment freeze until metrics and error rates have remained normal for the
+release's agreed observation window.
+
+### Schema, migrations, and contracts
+
+- `db/migrate.ts` applies only files not yet recorded in `schema_migrations`.
+  It does not execute `*.down.sql`; an up migration must never be edited after
+  release. A rollback must not delete migration rows or manually alter the
+  schema to imitate an earlier release.
+- If an already-applied migration is not backwards compatible, application
+  rollback is unsafe. Deploy a forward-only repair migration and a compatible
+  hotfix, or restore the full system from a verified backup under an approved
+  disaster-recovery incident. Restoring data has explicit RPO/RTO consequences.
+- Stellar contract deployments are immutable. Keep the previous contract IDs in
+  the rollback environment only when the current data and contracts remain
+  compatible. Otherwise deploy a corrective contract/version and point a
+  forward-compatible application release at it; do not treat a contract-ID
+  change as a database rollback.
+
+### Staging rollback drill
+
+Exercise this for every release that contains a migration, and at least once per
+quarter for the whole stack. Use staging or a disposable environment only.
+
+1. Deploy the known-good release and capture its image tags and schema version.
+2. Deploy a candidate release that includes an additive migration and verify it.
+3. Create `.env.rollback` with the known-good immutable tags, then execute the
+   commands above without running migrations.
+4. Verify the service-specific checks, data integrity (including indexer
+   checkpoint and a sample market/bet), and that `schema_migrations` did not
+   move backwards.
+5. Re-deploy the candidate, record the elapsed rollback time, result, operator,
+   release tags, schema version, and any follow-up in the release record.
+
+The required release record makes the drill auditable; a failed drill blocks a
+schema-changing production release until the compatibility issue is fixed.
+
 ### Admin Wallet
 
 - **Public Key:** `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD`

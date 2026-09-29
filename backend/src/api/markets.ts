@@ -1,0 +1,679 @@
+import type { FastifyInstance } from "fastify";
+import type { Redis } from "ioredis";
+import { z } from "zod";
+
+import { badRequest, notFound } from "../lib/errors.js";
+import { stroopsToXlm, xlmToStroops } from "../lib/amount.js";
+import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
+import {
+  getMarketById,
+  getMarkets,
+  getResolutionDelayStatus,
+  type Queryable,
+  type MarketCategory,
+} from "../db/markets.js";
+import { getBetsByMarketFromDb } from "../db/bets.js";
+import { getOrSet } from "../cache/cacheAside.js";
+import { queryWithCancel, type CancellablePool } from "../db/pool.js";
+import {
+  marketKey,
+  marketsListKey,
+  betsKey,
+  oddsKey,
+  CACHE_TTLS,
+} from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
+import { MAX_PAGINATION_LIMIT, MAX_PAGINATION_OFFSET } from "../lib/pagination.js";
+
+type MarketParams = {
+  id: string;
+};
+
+// TTLs in seconds — sourced from CACHE_TTLS in cacheKeys.ts so the
+// server-side cache and the Cache-Control header never drift apart (#480).
+const MARKET_DETAIL_TTL = CACHE_TTLS.market;
+const MARKETS_ACTIVE_TTL = CACHE_TTLS.marketsActive;
+const MARKETS_DEFAULT_TTL = CACHE_TTLS.marketsAll;
+const BETS_TTL = CACHE_TTLS.bets;
+const ODDS_TTL = CACHE_TTLS.odds;
+
+export function parsePositiveInteger(value: string): number | null {
+  if (!/^\d+$/.test(value)) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
+const VALID_CATEGORIES = [
+  "Crypto",
+  "Sports",
+  "Politics",
+  "Entertainment",
+  "Science",
+] as const;
+
+const categorySchema = z
+  .string()
+  .optional()
+  .transform((val: string | undefined): MarketCategory | undefined => {
+    if (!val) return undefined;
+    // Trim whitespace
+    const trimmed = val.trim();
+    if (!trimmed) return undefined;
+    // Convert to TitleCase (first letter uppercase, rest lowercase)
+    const normalized =
+      trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+    return normalized as MarketCategory;
+  })
+  .refine((val: MarketCategory | undefined) => {
+    if (!val) return true;
+    return VALID_CATEGORIES.includes(val);
+  }, {
+    message: "Invalid category. Must be one of: Crypto, Sports, Politics, Entertainment, Science",
+  });
+
+const marketsQuerySchema = z
+  .object({
+    filter: z
+      .enum(["active", "resolved", "ended", "cancelled", "all"])
+      .default("all"),
+    category: categorySchema,
+    sort: z
+      .enum(["newest", "volume", "ending_soon", "bettors"])
+      .default("newest"),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(MAX_PAGINATION_LIMIT).default(20),
+  })
+  .superRefine(({ page, limit }, ctx) => {
+    const offset = (page - 1) * limit;
+    if (offset > MAX_PAGINATION_OFFSET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["page"],
+        message: `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+      });
+    }
+  });
+
+const marketResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: { type: "number" },
+    question: { type: "string" },
+    image_url: { type: ["string", "null"] },
+    category: { type: "string" },
+    end_time: { type: "string" },
+    total_yes: { type: "string" },
+    total_no: { type: "string" },
+    resolved: { type: "boolean" },
+    outcome: { type: ["boolean", "null"] },
+    cancelled: { type: "boolean" },
+    creator: { type: "string" },
+    bet_count: { type: "number" },
+    created_at: { type: "string", format: "date-time" },
+    updated_at: { type: "string", format: "date-time" },
+  },
+  required: [
+    "id",
+    "question",
+    "image_url",
+    "category",
+    "end_time",
+    "total_yes",
+    "total_no",
+    "resolved",
+    "outcome",
+    "cancelled",
+    "creator",
+    "bet_count",
+    "created_at",
+    "updated_at",
+  ],
+} as const;
+
+const oddsResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    market_id: { type: "number" },
+    total_yes: { type: "string" },
+    total_no: { type: "string" },
+    total_pool: { type: "string" },
+    yes_odds: { type: "number" },
+    no_odds: { type: "number" },
+    implied_probability: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        yes: { type: "number" },
+        no: { type: "number" },
+      },
+      required: ["yes", "no"],
+    },
+  },
+  required: [
+    "market_id",
+    "total_yes",
+    "total_no",
+    "total_pool",
+    "yes_odds",
+    "no_odds",
+    "implied_probability",
+  ],
+} as const;
+
+const errorResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    error: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        code: { type: "string" },
+        message: { type: "string" },
+        requestId: { type: "string" },
+      },
+      required: ["code", "message", "requestId"],
+    },
+  },
+  required: ["error"],
+} as const;
+
+/**
+ * Wraps `db` so its queries are cancelled (see db/pool.ts `queryWithCancel`)
+ * if `signal` aborts before they resolve — i.e. the client disconnected.
+ *
+ * Only ever used for these GET routes: each issues its own standalone,
+ * read-only query outside of any transaction, so abandoning one mid-flight
+ * can never leave a transaction half-committed. `db` is only a real
+ * cancellable Postgres pool in production (it needs `.connect()` for the
+ * pg_cancel_backend dance); unit tests inject a bare `{ query }` fake, which
+ * this passes through untouched.
+ */
+function withCancellation(
+  db: Queryable,
+  signal: AbortSignal | undefined,
+  route: string,
+): Queryable {
+  if (
+    !signal ||
+    typeof (db as unknown as Partial<CancellablePool>).connect !== "function"
+  ) {
+    return db;
+  }
+  const cancellablePool = db as unknown as CancellablePool;
+  return {
+    query: <T>(text: string, values?: unknown[]) =>
+      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }) as unknown as Promise<{ rows: T[] }>,
+  };
+}
+
+export function createMarketsRoutes(
+  app: FastifyInstance,
+  db: Queryable,
+  redis?: Redis
+): void {
+  // ── GET /api/markets ──────────────────────────────────────────────────────
+  app.get(
+    "/api/markets",
+    {
+      schema: {
+        summary: "List markets with filtering, sorting and pagination",
+        tags: ["markets"],
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filter: {
+              type: "string",
+              enum: ["active", "resolved", "ended", "cancelled", "all"],
+              description: "Filter markets by status",
+            },
+            category: {
+              type: "string",
+              description: "Filter by market category. Accepts: Crypto, Sports, Politics, Entertainment, Science. Case-insensitive and whitespace-trimming.",
+            },
+            sort: {
+              type: "string",
+              enum: ["newest", "volume", "ending_soon", "bettors"],
+              description: "Sort order",
+            },
+            page: {
+              type: "integer",
+              minimum: 1,
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
+            },
+          },
+        },
+                response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives. `max-age` mirrors the server-side Redis TTL. " +
+                  "Varies by filter: `active` filter → 15s, default → 30s.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+              ETag: {
+                type: "string",
+                description: "Strong ETag for conditional GET (RFC 7232).",
+              },
+            },
+            properties: {
+              markets: { type: "array", items: marketResponseSchema },
+              total: { type: "number" },
+              page: { type: "number" },
+              limit: { type: "number" },
+            },
+            required: ["markets", "total", "page", "limit"],
+          },
+          304: { type: "null", description: "Not Modified" },
+          400: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const parsed = marketsQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.status(400).send({
+          error: {
+            code: "BAD_REQUEST",
+            message:
+              parsed.error.issues[0]?.message ?? "Invalid query parameters",
+            issues: parsed.error.issues,
+            requestId: request.id,
+          },
+        });
+      }
+
+      const { filter, category, sort, page, limit } = parsed.data;
+
+      const key = marketsListKey(filter, category, sort, page, limit);
+      const ttl =
+        filter === "active" ? MARKETS_ACTIVE_TTL : MARKETS_DEFAULT_TTL;
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets",
+      );
+
+            const result = redis
+        ? await getOrSet(redis, key, ttl, () =>
+            getMarkets({ filter, category, sort, page, limit }, cancellableDb)
+          )
+        : await getMarkets({ filter, category, sort, page, limit }, cancellableDb);
+
+      const body = {
+        markets: result.rows,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+      };
+
+      const etag = computeEtag(body);
+      reply.header("ETag", etag);
+      reply.header("Cache-Control", cacheControlPublic(ttl));
+
+      if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
+        return reply.status(304).send();
+      }
+
+      return reply.status(200).send(body);
+    }
+  );
+
+  // ── GET /api/markets/resolution-status ────────────────────────────────────
+  // Issue #645: honest, user-facing signal that market resolution is running
+  // late (usually an oracle-aggregator outage). Static path — Fastify matches
+  // it ahead of `/api/markets/:id`.
+  app.get(
+    "/api/markets/resolution-status",
+    {
+      schema: {
+        summary: "Whether market resolution is currently delayed",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              status: {
+                type: "string",
+                enum: ["on_time", "delayed", "stalled"],
+                description:
+                  "on_time: resolutions current. delayed: some markets overdue. stalled: overdue for a long time — assume an outage.",
+              },
+              overdueMarkets: { type: "number" },
+              oldestOverdueSeconds: { type: ["number", "null"] },
+              delayedMarketIds: { type: "array", items: { type: "number" } },
+              graceSeconds: { type: "number" },
+              checkedAt: { type: "string" },
+            },
+            required: [
+              "status",
+              "overdueMarkets",
+              "oldestOverdueSeconds",
+              "delayedMarketIds",
+              "graceSeconds",
+              "checkedAt",
+            ],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const status = await getResolutionDelayStatus(db);
+      // Short cache — this is a coarse signal and the query hits `markets`.
+      reply.header("Cache-Control", "public, max-age=30");
+      return reply.status(200).send(status);
+    }
+  );
+
+  // ── GET /api/markets/:id/odds ─────────────────────────────────────────────
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id/odds",
+    {
+      schema: {
+        summary: "Get derived odds and implied probabilities for a market",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+                response: {
+          200: {
+            ...oddsResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis odds TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+        async (request, reply) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const calculateOddsPayload = async () => {
+        const market = redis
+          ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, () => getMarketById(id, db))
+          : await getMarketById(id, db);
+
+        if (!market) {
+          throw notFound("Market not found");
+        }
+
+        let yesStroops = 0n;
+        let noStroops = 0n;
+        try {
+          if (market.total_yes) yesStroops = xlmToStroops(market.total_yes);
+        } catch {
+          yesStroops = 0n;
+        }
+        try {
+          if (market.total_no) noStroops = xlmToStroops(market.total_no);
+        } catch {
+          noStroops = 0n;
+        }
+
+        const totalPoolStroops = yesStroops + noStroops;
+        const totalPool = stroopsToXlm(totalPoolStroops);
+
+        let yesOdds: number;
+        let noOdds: number;
+
+        if (totalPoolStroops <= 0n) {
+          yesOdds = 0.5;
+          noOdds = 0.5;
+        } else {
+          const SCALE = 1_000_000_000n;
+          const yesRatio = Number((yesStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          const noRatio = Number((noStroops * SCALE) / totalPoolStroops) / 1_000_000_000;
+          yesOdds = Number(yesRatio.toFixed(4));
+          noOdds = Number(noRatio.toFixed(4));
+        }
+
+        return {
+          market_id: market.id,
+          total_yes: market.total_yes,
+          total_no: market.total_no,
+          total_pool: totalPool,
+          yes_odds: yesOdds,
+          no_odds: noOdds,
+          implied_probability: {
+            yes: yesOdds,
+            no: noOdds,
+          },
+        };
+      };
+
+      reply.header("Cache-Control", cacheControlPublic(ODDS_TTL));
+      return redis
+        ? getOrSet(redis, oddsKey(id), ODDS_TTL, calculateOddsPayload)
+        : calculateOddsPayload();
+    }
+  );
+
+  // ── GET /api/markets/:id ──────────────────────────────────────────────────
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id",
+    {
+      schema: {
+        summary: "Get details of a market from its ID",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+                response: {
+          200: {
+            ...marketResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis market-detail TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+        async (request, reply) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id",
+      );
+      const loader = () => getMarketById(id, cancellableDb);
+      const market = redis
+        ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, loader)
+        : await loader();
+
+      if (!market) {
+        throw notFound("Market not found");
+      }
+
+      reply.header("Cache-Control", cacheControlPublic(MARKET_DETAIL_TTL));
+      return market;
+    }
+  );
+
+  // ── GET /api/markets/:id/bets ─────────────────────────────────────────────
+  // Cache: betsKey(id), TTL = 30s (#113).
+  // Invalidated by invalidateOnMarketResolved / invalidateOnBetPlaced.
+  app.get<{ Params: MarketParams }>(
+    "/api/markets/:id/bets",
+    {
+      schema: {
+        summary: "List bets for a market, paginated",
+        tags: ["markets"],
+        params: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", description: "Positive integer market id" },
+          },
+          required: ["id"],
+        },
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            page: {
+              type: "integer",
+              minimum: 1,
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
+            },
+            limit: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
+            },
+          },
+        },
+                response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis bets TTL (30s). " +
+                  "Public blockchain data; safe for shared caches.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+            properties: {
+              bets: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    market_id: { type: "string" },
+                    bettor: { type: "string" },
+                    net_amount: { type: "string" },
+                    gross_amount: { type: "string" },
+                    is_yes: { type: "boolean" },
+                    claimed: { type: "boolean" },
+                    created_at: { type: "string", format: "date-time" },
+                  },
+                  required: [
+                    "market_id",
+                    "bettor",
+                    "net_amount",
+                    "gross_amount",
+                    "is_yes",
+                    "claimed",
+                    "created_at",
+                  ],
+                },
+              },
+              total: { type: "number" },
+              page: { type: "number" },
+              limit: { type: "number" },
+              totalPages: { type: "number" },
+            },
+            required: ["bets", "total", "page", "limit", "totalPages"],
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+        },
+      },
+    },
+        async (request, reply) => {
+      const id = parsePositiveInteger(request.params.id);
+      if (id === null) {
+        throw badRequest("id must be a positive integer");
+      }
+
+      const query = request.query as { page?: number; limit?: number };
+      const page = Math.max(1, query.page ?? 1);
+      const limit = Math.min(MAX_PAGINATION_LIMIT, Math.max(1, query.limit ?? 50));
+      const offset = (page - 1) * limit;
+      if (offset > MAX_PAGINATION_OFFSET) {
+        throw badRequest(
+          `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+        );
+      }
+
+      const cancellableDb = withCancellation(
+        db,
+        request.abortSignal,
+        "GET /api/markets/:id/bets",
+      );
+
+      // Verify the market exists before returning bets.
+      const marketLoader = () => getMarketById(id, cancellableDb);
+      const market = redis
+        ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, marketLoader)
+        : await marketLoader();
+
+      if (!market) {
+        throw notFound("Market not found");
+      }
+
+      if (!cancellableDb) {
+        throw badRequest("Database not available");
+      }
+
+      // Cache the paginated bets list under betsKey(id).
+      // A single key covers page=1/limit=50 (the most common case).
+      // For other pages the key includes the page/limit so they get their own
+      // cache entries — still subject to the same 30s TTL.
+      const key = betsKey(id);
+      const loader = () => getBetsByMarketFromDb(id, page, limit, cancellableDb);
+
+      reply.header("Cache-Control", cacheControlPublic(BETS_TTL));
+      return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();
+    },
+  );
+}

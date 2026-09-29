@@ -18,8 +18,19 @@ frontend/.next/
 frontend/out/
 frontend/node_modules/
 
+# Backend stack build output (backend/, indexer/, oracle/)
+dist/
+backend/dist/
+indexer/dist/
+oracle/dist/
+
+# ── Database backups ───────────────────────────────────────────────────────────
+# Default output of infra/scripts/backup.sh — dumps are data, not source.
+infra/backups/
+
 # ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
+.env.production
 .env.local
 .env.*.local
 *.pem
@@ -57,3 +68,5 @@ __pycache__/
 infra/cert-monitor/.state.json
 infra/disk-monitor/.state.json
 infra/synthetic-monitor/.state.json
+# Coverage output
+coverage/

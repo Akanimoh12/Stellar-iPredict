@@ -67,6 +67,10 @@ const DISPUTE_WINDOW: u64 = 172800;  // 48 hours to dispute
 
 ### Option B — Optimistic Oracle (For Binary Markets)
 
+> **Implemented** in `contracts/prediction_market/src/lib.rs`. The contract
+> entrypoints are `submit_outcome`, `challenge`, `finalize_outcome` and
+> `resolve_challenge`; see "Optimistic Oracle Contract API" below.
+
 **Model:** Anyone can submit an outcome. There is a challenge period. If unchallenged, it finalizes. If challenged, escalates to a dispute council.
 
 #### States
@@ -96,6 +100,77 @@ const DISPUTER_BOND:  i128 = 200_0000000;  // 200 XLM (must exceed submitter)
 - Fast resolution for obvious outcomes (bond posted, no challenge → auto-finalize in 24h)
 - Challenge mechanism adds security for disputed outcomes
 - No oracle providers need to be registered in advance
+
+---
+
+### Optimistic Oracle Contract API
+
+Constants as deployed (`contracts/prediction_market/src/lib.rs`):
+
+```rust
+const SUBMITTER_BOND:  i128 = 100_0000000; // 100 XLM — minimum submitter bond
+const DISPUTER_BOND:   i128 = 200_0000000; // 200 XLM — minimum disputer bond
+const CHALLENGE_WINDOW: u64 = 86_400;      // 24h to challenge a submission
+const COUNCIL_WINDOW:   u64 = 259_200;     // 72h for the council to rule
+const COUNCIL_FEE_BPS: i128 = 1_000;       // 10% of the loser's bond
+```
+
+| Function | Caller | Effect |
+|---|---|---|
+| `submit_outcome(submitter, market_id, outcome, bond)` | anyone | Escrows `bond` (≥ `SUBMITTER_BOND`), records the submission in state `Submitted`, starts the challenge window. Market must be expired, unresolved and not cancelled; one submission per market. |
+| `challenge(challenger, market_id, bond)` | anyone | Escrows `bond` (≥ `DISPUTER_BOND` **and** strictly greater than the submitter's bond) inside the window, asserts the opposite outcome, moves the submission to `Escalated`. |
+| `finalize_outcome(market_id)` | anyone | After the challenge window with no challenge: returns the bond in full and resolves the market with the submitted outcome. |
+| `resolve_challenge(caller, market_id, outcome)` | admin or registered resolver (the council) | Rules on an escalated market, distributes the bonds and resolves the market. |
+| `get_oracle_submission(market_id)` | view | Returns the full `OracleSubmission` record. |
+
+Bond settlement on a council ruling (escrow always nets to zero):
+
+| Ruling | Winner receives | Credited to `AccumulatedFees` |
+|---|---|---|
+| Submitter correct | own bond + ½ of the disputer bond | remainder of the disputer bond (includes the 10% council fee) |
+| Disputer correct | both bonds, less the 10% council fee | 10% council fee on the submitter bond |
+
+An unchallenged finalization takes no fee — the bond is returned whole.
+
+If a market is cancelled or force-resolved (via `resolve_market`) while an
+oracle submission is open, the finalizers still run so bonds are never stranded
+in escrow — they simply skip the resolution step and leave the market as it is.
+
+Oracle-specific contract errors: `21` submission exists, `22` submission not
+found, `23` already challenged, `24` challenge window not elapsed, `25` challenge
+window closed, `26` invalid state transition, `27` bond too small. These errors
+are reachable and documented at their definition site in the contract source.
+
+---
+
+### Oracle Event Topics
+
+Every state transition publishes one typed event. Topics are
+`(Symbol "oracle", Symbol <action>)` — the same domain/action shape the indexer
+already routes on for `mkt` and `referral`. Event data is a map keyed by the
+field names below, so handlers read `payload.market_id`, `payload.outcome`, …
+exactly as `market_resolved` does.
+
+| Topics | Emitted by | Data fields |
+|---|---|---|
+| `["oracle", "submitted"]` | `submit_outcome` | `market_id: u64`, `submitter: Address`, `outcome: bool`, `bond: i128`, `submitted_at: u64`, `challenge_deadline: u64` |
+| `["oracle", "challenged"]` | `challenge` | `market_id: u64`, `challenger: Address`, `outcome: bool` (challenger's side), `bond: i128`, `submitter: Address`, `submitter_bond: i128`, `challenged_at: u64` |
+| `["oracle", "escalated"]` | `challenge` | `market_id: u64`, `submitter: Address`, `challenger: Address`, `outcome: bool` (disputed submission), `total_bond: i128`, `escalated_at: u64`, `council_deadline: u64` |
+| `["oracle", "finalized"]` | `finalize_outcome`, `resolve_challenge` | `market_id: u64`, `outcome: bool`, `challenged: bool`, `submitter: Address`, `challenger: Option<Address>`, `submitter_payout: i128`, `challenger_payout: i128`, `council_fee: i128`, `protocol_credit: i128`, `finalized_at: u64` |
+
+Notes for indexer handlers:
+
+- `challenge` emits `challenged` **and** `escalated` in that order, in one
+  transaction — the `Challenged` state is never observable on-chain.
+- `finalized.challenged` distinguishes the two paths: `false` for an
+  unchallenged auto-finalization (all payout/fee fields are the returned bond
+  and zeros), `true` for a council ruling.
+- `protocol_credit` is the total added to `AccumulatedFees`; `council_fee` is
+  the 10% share of the loser's bond within it.
+- A `finalized` event normally means the market is now resolved, so it should
+  invalidate the same caches as `market_resolved`. The exception is a market
+  cancelled or force-resolved out of band — there the event only settles bonds,
+  so handlers should read market state rather than assume the outcome.
 
 ---
 
@@ -359,6 +434,49 @@ while (true) {
 }
 ```
 
+### Leaderboard Rebuild Job
+
+When the `events` table needs a clean backfill, rebuild the leaderboard snapshot
+from the raw event log with the standalone job in `indexer/src/`.
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `events` and `leaderboard`.
+2. From `indexer/`, run `npm run rebuild:leaderboard`.
+3. Use `npm run rebuild:leaderboard -- --dry-run` first if you want to validate the replay without mutating the table.
+4. If you only want to replay from a specific ledger onward, pass `--since-ledger <number>`.
+
+The job replays claim and referral-style events, clears `leaderboard`, and
+re-inserts the derived rows in score order.
+
+Set `LOG_LEVEL=debug|info|warn|error` to control how much JSON output the job
+emits while it runs. Each pass logs a structured summary with the number of
+events processed and the current ledger lag.
+
+### bet_count Backfill Job
+
+`markets.bet_count` is maintained incrementally as bet events are indexed, so it
+can drift if events are reprocessed, dropped to the dead-letter queue, or the
+`bets` table is repaired out of band. This job recomputes `bet_count` for every
+market directly from the authoritative `bets` table (which is keyed on
+`(market_id, bettor)`, so the count is the number of bettors per market).
+
+Runbook:
+
+1. Export `DATABASE_URL` for the Postgres database that stores `markets` and `bets`.
+2. From `indexer/`, run `npm run backfill:bet-count`.
+3. Use `npm run backfill:bet-count -- --dry-run` first to report drift without writing (the recompute runs inside a transaction that is rolled back).
+
+The job recomputes counts for all markets — including resetting markets with no
+bets back to `0` — and only writes rows whose stored value actually differs. It
+logs a structured summary with the number of markets checked and corrected.
+
+The same recompute also runs automatically after each poll iteration when the
+indexer runtime is started with `recomputeBetCounts` enabled (mirroring
+`recomputeTotals`).
+
+Set `LOG_LEVEL=debug|info|warn|error` to control the JSON output volume.
+
 ---
 
 ### API Endpoints
@@ -390,6 +508,61 @@ POST /api/oracle/submit
      Auth: Bearer token (oracle provider API key)
      Response: { accepted: boolean, submissionsNeeded: number }
 ```
+
+### Oracle submission signature (canonical message)
+
+`/api/oracle/submit` (and its versioned `POST /api/v1/oracle/submit`) rejects
+submissions whose `signature` does not verify against the claimed `provider`
+keypair. The endpoint returns `401` and records nothing on failure, so the
+shared API key alone cannot forge an outcome attributed to a provider.
+
+The `signature` is the Stellar SDK ed25519 signature over the **exact** UTF-8
+bytes of this canonical message (LF-separated, no trailing newline, fields in
+this order):
+
+```
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
+```
+
+Rules:
+- `<marketId>` is the integer market id; `<outcome>` is the string form of the
+  outcome (`"YES"` / `"NO"` or any other string value).
+- `<provider>` is the uppercase Stellar public key (G…) claimed in the body.
+- `<timestamp>` is the Unix timestamp in **seconds** from the body — `0` when
+  the body omits it.
+- `<nonce>` is the nonce string from the body — the empty string when omitted.
+  Both timestamp and nonce make the signature non-replayable; providers should
+  send at least one.
+- No other field, whitespace or trailing newline is part of the message.
+
+The endpoint reconstructs this exact message from the request and calls
+`Keypair.fromPublicKey(provider).verify(message, signature)`. The signature is
+the base64 output of `Keypair.sign(message)`.
+
+Minimal signing implementation:
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+const message = [
+  "ipredict-oracle-submit",
+  `market_id:${marketId}`,
+  `outcome:${outcome}`,
+  `provider:${provider}`,
+  `timestamp:${timestamp}`,
+  `nonce:${nonce}`,
+].join("\n");
+
+const signature = kp.sign(Buffer.from(message, "utf8")).toString("base64");
+```
+
+Any change to field order or stringification invalidates existing signatures, so
+keep this exact serialisation when implementing a signer.
 
 ---
 
@@ -457,6 +630,24 @@ services:
     image: redis:7-alpine
     volumes:
       - redisdata:/data
+```
+
+#### Indexer Image Runbook
+
+Build the production indexer image from the `indexer/` directory. The Dockerfile
+lives under `indexer/src/` so the build context can still include
+`package-lock.json`, `tsconfig.json`, and the full source tree.
+
+```bash
+cd indexer
+docker build -f src/Dockerfile -t ipredict-indexer:local .
+```
+
+Run the image with the same environment variables documented in
+`indexer/.env.example`.
+
+```bash
+docker run --rm --env-file .env ipredict-indexer:local
 ```
 
 ---
@@ -552,3 +743,218 @@ jobs:
 | Prometheus + Grafana | P1 | 1 week | Production monitoring |
 | Full DNN integration | P2 | 3 months | Phase 3 |
 | Dispute mechanism | P2 | 6 weeks | Phase 2 |
+
+---
+
+## Part 5 — Oracle Provider Integration Contract
+
+This contract specifies how an external oracle provider integrates with the iPredict backend submission API (`POST /api/v1/oracle/submit`).
+
+### 1. Authentication & Credential Lifecycle
+
+All requests to `/api/v1/oracle/submit` must be authenticated with a configured provider API key.
+
+#### Header Formats
+The API key may be passed via any of the following headers:
+- `Authorization: Bearer <API_KEY>`
+- `Authorization: API-Key <API_KEY>`
+- `x-api-key: <API_KEY>`
+
+#### Provider Identity Binding
+Each API key is bound to a specific Stellar provider public key (`G...` address). When a submission is processed:
+1. The server authenticates the key (401 if missing or invalid).
+2. The server verifies that the key is authorized to submit for the `provider` address declared in the payload (403 `FORBIDDEN` if attempting to submit on behalf of an address the key does not own).
+
+#### Credential Rotation
+Multiple API keys can be bound to the same provider in backend configuration (`ORACLE_API_KEYS` in JSON or comma-separated format). To rotate credentials without downtime:
+1. Operator issues a new secondary API key bound to the provider.
+2. Provider switches client requests to the new key.
+3. Operator deprecates and removes the old key after verification.
+
+---
+
+### 2. Canonical Signing Payload Specification
+
+Providers sign a canonical UTF-8 formatted string with their Ed25519 Stellar keypair. The signature is transmitted base64-encoded in the `signature` field.
+
+#### Format Specification
+The canonical message consists of 6 lines separated strictly by LF (`\n`, 0x0A) with no trailing newline:
+
+```text
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
+```
+
+#### Field Rules
+- Line 1: Constant literal `ipredict-oracle-submit`
+- Line 2: `market_id:<marketId>` (integer ID, e.g. `42`)
+- Line 3: `outcome:<outcome>` (canonical outcome: `YES` or `NO`)
+- Line 4: `provider:<provider>` (56-character Stellar public key string `G...`)
+- Line 5: `timestamp:<timestamp>` (Unix timestamp in seconds as integer, or `0` if omitted)
+- Line 6: `nonce:<nonce>` (opaque string nonce, or empty string if omitted)
+
+#### Worked Example (Reproducible)
+Given:
+- `marketId`: `42`
+- `outcome`: `"YES"`
+- `provider`: `"GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"`
+- `timestamp`: `1700000000`
+- `nonce`: `"nonce-test-123"`
+
+Canonical string:
+```text
+ipredict-oracle-submit
+market_id:42
+outcome:YES
+provider:GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI
+timestamp:1700000000
+nonce:nonce-test-123
+```
+
+Hex representation of canonical UTF-8 bytes:
+```text
+69707265646963742d6f7261636c652d7375626d69740a6d61726b65745f69643a34320a6f7574636f6d653a5945530a70726f76696465723a47425a584e375049525a474e4d484741374d5555554634475750593541595056364c5934555632474c36564a474951525846444e4d4144490a74696d657374616d703a313730303030303030300a6e6f6e63653a6e6f6e63652d746573742d313233
+```
+
+Using Stellar Secret Key `SDN6XAY2H7G4QO3U7I5QW6T4D5J7E3W2Q1Z9X8C7V6B5N4M3L2K1J0I`:
+- Sign the canonical string bytes via `Keypair.sign(Buffer.from(canonical, "utf8"))`.
+- Base64-encode the resulting 64-byte signature and pass it in the `signature` field.
+
+---
+
+### 3. Outcome & Bond Specifications
+
+#### Binary Outcome Encoding
+- **Canonical values:** `"YES"` or `"NO"`.
+- **Accepted aliases:** `"yes"`, `"true"`, `true`, `"1"`, `1` are normalized to `"YES"`. `"no"`, `"false"`, `false`, `"0"`, `0` are normalized to `"NO"`.
+- Signature verification is always performed against the **canonical** outcome (`YES` or `NO`).
+
+#### Submitter Bond
+- Submissions require posting a bond specified in **stroops** (`1 XLM = 10,000,000 stroops`).
+- `bondAmount` may be passed as a number or string (e.g. `1000000000` for 100 XLM).
+- Must meet or exceed the backend's configured minimum `SUBMITTER_BOND_XLM * 10,000,000`.
+
+---
+
+### 4. API Endpoints and Schema
+
+#### Request: `POST /api/v1/oracle/submit`
+Headers:
+```http
+Content-Type: application/json
+Authorization: Bearer <API_KEY>
+Idempotency-Key: <UUID> (optional)
+```
+
+Body:
+```json
+{
+  "marketId": 42,
+  "outcome": "YES",
+  "provider": "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+  "bondAmount": 1000000000,
+  "signature": "<base64-signature>",
+  "nonce": "unique-random-nonce-123",
+  "timestamp": 1700000000
+}
+```
+
+#### Successful Response: `200 OK`
+```json
+{
+  "accepted": true,
+  "count": 1,
+  "threshold": 3,
+  "submissionsNeeded": 2
+}
+```
+- `accepted` (boolean): `true` if persisted.
+- `count` (number): Current total of valid submissions recorded for this market (including this one).
+- `threshold` (number): Configured threshold needed for aggregator consensus.
+- `submissionsNeeded` (number): Remaining submissions needed (`max(0, threshold - count)`).
+
+---
+
+### 5. Error Code Enumeration & Remediation
+
+| Status | Error Code | Cause | Remediation |
+|---|---|---|---|
+| `400` | `BAD_REQUEST` | Missing or invalid field in request body schema | Verify required fields: `marketId`, `outcome`, `provider`, `bondAmount`, `signature`. |
+| `400` | `BAD_REQUEST` | Bond amount below minimum (`bondNumeric < minBondStroops`) | Increase `bondAmount` to match minimum (e.g. 100 XLM = `1000000000` stroops). |
+| `400` | `BAD_REQUEST` | Timestamp outside acceptance window | Sync system clock using NTP; ensure `timestamp` is within `ORACLE_TIMESTAMP_WINDOW_SEC` (default 300s). |
+| `400` | `BAD_REQUEST` | Nonce has already been used | Generate a unique cryptographic nonce or UUIDv4 for each request. |
+| `401` | `UNAUTHORIZED` | Missing `Authorization` or `x-api-key` header | Provide the API key via `Authorization: Bearer <API_KEY>` or `x-api-key`. |
+| `401` | `UNAUTHORIZED` | Invalid API key presented | Verify API key matches credentials provided by the platform operator. |
+| `401` | `UNAUTHORIZED` | Invalid signature for provider | Rebuild canonical string byte-for-byte; ensure provider private key corresponds to `provider` public key. |
+| `403` | `FORBIDDEN` | API key bound to another provider address | Use the API key assigned to the `provider` address declared in payload. |
+| `409` | `CONFLICT` | Market already has an oracle submission | Market already recorded an outcome submission; duplicate submissions for the same market are rejected. |
+| `409` | `CONFLICT` | Idempotency key reused with different payload | If retrying with the same idempotency key, the body must match identically. Otherwise, use a new key. |
+| `500` | `INTERNAL_SERVER_ERROR` | Database or unhandled server exception | Retry with exponential backoff and provide `Idempotency-Key` to avoid double-processing. |
+
+---
+
+### 6. Minimal Working Client Example (TypeScript)
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+export interface SubmitOutcomeParams {
+  apiUrl: string;
+  apiKey: string;
+  marketId: number;
+  outcome: "YES" | "NO";
+  keypair: Keypair;
+  bondAmountStroops?: number;
+}
+
+export async function submitOracleOutcome(params: SubmitOutcomeParams) {
+  const { apiUrl, apiKey, marketId, outcome, keypair, bondAmountStroops = 1_000_000_000 } = params;
+  const provider = keypair.publicKey();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomUUID();
+
+  // 1. Build canonical signing message (LF-separated, no trailing newline)
+  const canonicalMessage = [
+    "ipredict-oracle-submit",
+    `market_id:${marketId}`,
+    `outcome:${outcome}`,
+    `provider:${provider}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join("\n");
+
+  // 2. Sign canonical message with Ed25519 keypair
+  const signature = keypair.sign(Buffer.from(canonicalMessage, "utf8")).toString("base64");
+
+  // 3. Post to the API
+  const response = await fetch(`${apiUrl}/api/v1/oracle/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      "Idempotency-Key": nonce,
+    },
+    body: JSON.stringify({
+      marketId,
+      outcome,
+      provider,
+      bondAmount: bondAmountStroops,
+      signature,
+      timestamp,
+      nonce,
+    }),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`Oracle submission failed (${response.status}): ${body.error?.message || JSON.stringify(body)}`);
+  }
+
+  return body; // { accepted: true, count: 1, threshold: 3, submissionsNeeded: 2 }
+}
+```
+

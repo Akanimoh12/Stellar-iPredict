@@ -14,9 +14,14 @@ vi.mock("@/services/soroban", () => ({
 
 vi.mock("@/services/cache", () => ({
   get: () => null,
+  getStale: () => null,
   set: vi.fn(),
   invalidate: vi.fn(),
   invalidateAll: vi.fn(),
+  // Always a miss (consistent with `get`), so the loader runs and the test
+  // exercises the real RPC path. getOrSet's own behaviour is covered in
+  // cache.test.ts.
+  getOrSet: <T>(_key: string, loader: () => Promise<T>) => loader(),
 }));
 
 vi.mock("@/services/referral", () => ({

@@ -33,11 +33,34 @@ SELECT category, class, retention, justification FROM data_retention_policies OR
 | `oracle_submissions_finalized` | `oracle_submissions` WHERE `status = 'finalized'` | **audit** | 7 years | The record of how a market resolved. |
 | `council_votes` | `council_votes` | **audit** | 7 years | Which council member voted which outcome — primary dispute evidence. |
 | `oracle_disputes` | `oracle_disputes` | **audit** | 7 years | The dispute record itself; bounded by the longest plausible dispute/appeal window. |
+| `adapter_raw_payloads` | `adapter_raw_payloads` | **audit** | 7 years | The provider responses a resolution was based on. Primary evidence when a resolution is disputed — without it there is no record of what the provider actually returned at decision time. Bounded per row at 1 MiB (see below). |
 | `markets`, `bets`, `leaderboard` | derived state | operational (reconstructible) | Indefinite while live | Product-critical and reconstructible from chain within the RPC window. See `docs/DEPLOYMENT-GUIDE.md` disaster recovery (#648). |
 
 > **7 years** is a placeholder for a legal/compliance decision, not a derived
 > number. Change it in `0018_data_retention.sql`, `data_retention_policies`, and
 > `COUNCIL_AUDIT_RETENTION` (`oracle/src/aggregator/council-audit.ts`) together.
+
+### Raw provider payloads — bounded storage
+
+`adapter_raw_payloads` (migration `0028_adapter_raw_payloads`) is the one
+audit-class table that grows with provider response size rather than with a
+fixed row count, so it carries an explicit per-row bound:
+
+| Concern | Position |
+|---|---|
+| Row size | Capped at **1 MiB** (`max_raw_payload_bytes()`), enforced by a CHECK constraint. A payload over the cap is stored shortened with a 2 KB preview and `truncated = true`, so an oversized provider response cannot fill the disk through the audit path. |
+| Compression | `raw_response` is JSONB, which Postgres TOASTs and pglz-compresses past ~2 KB — exactly the large-payload case. Compressing by hand would make the column opaque to SQL inspection and to the audit tooling that reads it. `response_bytes` stores the *uncompressed* size so growth stays observable. |
+| Credentials | Redacted before storage by `sanitizeProvenanceValue` (`oracle/src/adapters/provenance.ts`): api keys, tokens and `Authorization` headers. |
+| Write mode | Append-only, one row per provider per fetch. Never overwritten — re-fetching must not destroy the observation that was in hand at decision time. |
+
+Change the cap in the migration and in `MAX_RAW_PAYLOAD_BYTES`
+(`oracle/src/aggregator/council-audit.ts`) together; the writer shortens the
+payload *and* the schema rejects it, so the two must agree.
+
+Exported by the council audit tooling in three forms: `json` (payloads inline),
+`raw-csv` (one row per payload, payloads inline), and `csv` (per-market
+summary only — providers and a count — so the one-row-per-market export stays
+usable).
 
 ## Enforcement
 

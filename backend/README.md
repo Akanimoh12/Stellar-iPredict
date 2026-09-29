@@ -316,3 +316,23 @@ on a machine with no Postgres running (there's no CI wired up yet — see
 2. Comment to claim it.
 3. Branch off `implementation-drips`, implement, open a PR back to
    `implementation-drips`.
+
+## OpenAPI contract snapshot
+
+The generated spec is snapshotted in `src/api/__snapshots__/openapi.spec.json`
+and checked by `src/api/openapi.test.ts`. Keys are sorted and the file is
+pretty-printed, so a changed route schema shows up as an ordinary line diff in
+the pull request — read it: that diff *is* the change to the contract clients
+depend on.
+
+If the test fails and the change is unintended, fix the route schema. If the
+change is intentional:
+
+```bash
+cd backend
+npm run test:openapi:update   # regenerates the snapshot
+git diff src/api/__snapshots__/openapi.spec.json   # review the contract change
+```
+
+Commit the updated snapshot with the schema change, and call out breaking
+changes (removed paths/fields, tightened types) in the PR description.

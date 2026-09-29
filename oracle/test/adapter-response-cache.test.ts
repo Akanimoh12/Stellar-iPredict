@@ -12,9 +12,20 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
 
+/**
+ * A Binance 24h ticker body stamped now.
+ *
+ * These tests are about the cache, not about freshness, so the quote has to
+ * pass the freshness gate on its way through — otherwise the adapter rejects
+ * it and every assertion below would be measuring the wrong thing.
+ */
+function freshTicker(price = "52341") {
+  return { symbol: "BTCUSDT", lastPrice: price, closeTime: Date.now() };
+}
+
 describe("adapter response caching", () => {
   it("reuses a successful response within the TTL", async () => {
-    const fetchFn = vi.fn().mockResolvedValue(jsonResponse({ symbol: "BTCUSDT", price: "52341" }));
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(freshTicker()));
     const adapter = new BinanceAdapter({ fetchFn, cacheTtlMs: 60_000 });
 
     await adapter.fetchOutcome(market);
@@ -33,7 +44,7 @@ describe("adapter response caching", () => {
 
     const first = adapter.fetchOutcome(market);
     const second = adapter.fetchOutcome(market);
-    resolveResponse?.(jsonResponse({ symbol: "BTCUSDT", price: "52341" }));
+    resolveResponse?.(jsonResponse(freshTicker()));
 
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -43,7 +54,7 @@ describe("adapter response caching", () => {
     const fetchFn = vi
       .fn()
       .mockRejectedValueOnce(new Error("temporary failure"))
-      .mockResolvedValueOnce(jsonResponse({ symbol: "BTCUSDT", price: "52341" }));
+      .mockResolvedValueOnce(jsonResponse(freshTicker()));
     const adapter = new BinanceAdapter({ fetchFn, cacheTtlMs: 60_000, maxRetries: 1 });
 
     await expect(adapter.fetchOutcome(market)).rejects.toThrow("temporary failure");
@@ -53,7 +64,7 @@ describe("adapter response caching", () => {
   });
 
   it("can disable caching", async () => {
-    const fetchFn = vi.fn().mockResolvedValue(jsonResponse({ symbol: "BTCUSDT", price: "52341" }));
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse(freshTicker()));
     const adapter = new BinanceAdapter({ fetchFn, cacheTtlMs: 0 });
 
     await adapter.fetchOutcome(market);

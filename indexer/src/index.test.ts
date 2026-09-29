@@ -20,6 +20,12 @@ vi.mock("./backfill.js", () => {
   return {
     runBackfill: vi.fn().mockResolvedValue(125),
     writeEventToDb: vi.fn(),
+    processEventsInChunks: vi.fn(async (events: any[], _chunkSize: number, processor: any) => {
+      for (const event of events) {
+        await processor(event);
+      }
+    }),
+    EVENTS_PROCESSING_CHUNK_SIZE: 50,
   };
 });
 

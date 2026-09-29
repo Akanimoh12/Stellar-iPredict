@@ -147,8 +147,9 @@ describe("runBondReconciliation", () => {
     await runBondReconciliation(pool);
 
     expect(alertSpy).toHaveBeenCalledTimes(2);
-    expect(alertSpy).toHaveBeenCalledWith("1", "GXXX", 1000000000n, null, ["GXXX"]);
-    expect(alertSpy).toHaveBeenCalledWith("2", "GYYY", 2000000000n, null, ["GYYY"]);
+    // Updated to match new signature with optional webhookUrl and logger
+    expect(alertSpy).toHaveBeenCalledWith("1", "GXXX", 1000000000n, null, ["GXXX"], undefined, undefined);
+    expect(alertSpy).toHaveBeenCalledWith("2", "GYYY", 2000000000n, null, ["GYYY"], undefined, undefined);
     
     alertSpy.mockRestore();
   });
@@ -189,10 +190,13 @@ describe("runBondReconciliationSafe", () => {
     await expect(runBondReconciliationSafe(pool, {}, "2026-09-28T10:00:00Z")).rejects.toThrow("Database connection lost");
     
     expect(alertSpy).toHaveBeenCalledTimes(1);
+    // Updated to match new signature with webhookUrl and logger
     expect(alertSpy).toHaveBeenCalledWith(
       expect.objectContaining({ message: "Database connection lost" }),
       0,
       "2026-09-28T10:00:00Z",
+      undefined,
+      undefined,
     );
     
     alertSpy.mockRestore();
@@ -206,10 +210,13 @@ describe("runBondReconciliationSafe", () => {
     
     await expect(runBondReconciliationSafe(pool)).rejects.toThrow("Query timeout");
     
+    // Updated to match new signature
     expect(alertSpy).toHaveBeenCalledWith(
       expect.any(Error),
       0,
       null,
+      undefined,
+      undefined,
     );
     
     alertSpy.mockRestore();

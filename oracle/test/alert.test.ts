@@ -10,8 +10,7 @@ import {
 
 describe("alertBondDiscrepancy (Issue #573)", () => {
   it("creates a critical alert with bond details", () => {
-    // Mock console to capture the alert
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
     alertBondDiscrepancy(
       "market-123",
@@ -19,56 +18,49 @@ describe("alertBondDiscrepancy (Issue #573)", () => {
       1000000000n,
       null,
       ["GABC123"],
+      undefined,
+      logger as any,
     );
     
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[ALERT]",
-      expect.stringContaining("market-123"),
-    );
-    
-    // Parse the JSON alert from the second argument
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    
-    expect(alert).toMatchObject({
-      level: "critical",
-      type: "bond_discrepancy",
-      message: "Bond refund discrepancy detected for market market-123",
-      context: {
+    expect(logger.error).toHaveBeenCalledWith(
+      "bond refund discrepancy detected",
+      expect.objectContaining({
+        type: "oracle.aggregator.bond_discrepancy",
+        severity: "SEV1",
         marketId: "market-123",
         submitter: "GABC123",
         expectedAmountStroops: "1000000000",
-        actualAmountStroops: "null",
+        actualAmountStroops: null,
         affectedParties: ["GABC123"],
-        severity: "P0",
-      },
-    });
-    
-    consoleSpy.mockRestore();
+      }),
+    );
   });
 
   it("handles actual amount when settlement exists with wrong amount", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
     alertBondDiscrepancy(
       "market-456",
       "GXYZ789",
       2000000000n,
-      1500000000n, // Actual is less than expected
+      1500000000n,
       ["GXYZ789"],
+      undefined,
+      logger as any,
     );
     
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    expect(alert.context.actualAmountStroops).toBe("1500000000");
-    
-    consoleSpy.mockRestore();
+    expect(logger.error).toHaveBeenCalledWith(
+      "bond refund discrepancy detected",
+      expect.objectContaining({
+        actualAmountStroops: "1500000000",
+      }),
+    );
   });
 });
 
 describe("alertBondReconciliationFailure (Issue #573)", () => {
   it("creates a critical alert with failure details", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     const error = new Error("Database connection timeout");
     error.stack = "Error: Database connection timeout\n  at test.ts:123";
     
@@ -76,93 +68,89 @@ describe("alertBondReconciliationFailure (Issue #573)", () => {
       error,
       42,
       "2026-09-28T10:00:00Z",
+      undefined,
+      logger as any,
     );
     
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[ALERT]",
-      expect.stringContaining("Bond reconciliation job failed"),
-    );
-    
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    
-    expect(alert).toMatchObject({
-      level: "critical",
-      type: "bond_reconciliation_failure",
-      context: {
+    expect(logger.error).toHaveBeenCalledWith(
+      "bond reconciliation job failed",
+      expect.objectContaining({
+        type: "oracle.aggregator.bond_reconciliation_failure",
+        severity: "SEV1",
         error: "Database connection timeout",
         checkedCount: 42,
         lastSuccessfulRun: "2026-09-28T10:00:00Z",
-        severity: "P0",
-      },
-    });
-    expect(alert.context.stack).toContain("Database connection timeout");
-    
-    consoleSpy.mockRestore();
+      }),
+    );
   });
 
   it("handles null lastSuccessfulRun", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
     alertBondReconciliationFailure(
       new Error("First run failed"),
       0,
       null,
+      undefined,
+      logger as any,
     );
     
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    expect(alert.context.lastSuccessfulRun).toBe("never");
-    
-    consoleSpy.mockRestore();
+    expect(logger.error).toHaveBeenCalledWith(
+      "bond reconciliation job failed",
+      expect.objectContaining({
+        lastSuccessfulRun: "never",
+      }),
+    );
   });
 });
 
 describe("alertStuckMarket", () => {
   it("creates a warning alert for markets below critical threshold", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
-    alertStuckMarket("market-789", 3.5);
+    alertStuckMarket("market-789", 3.5, undefined, logger as any);
     
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    
-    expect(alert.level).toBe("warning");
-    expect(alert.type).toBe("stuck_market");
-    expect(alert.context.marketId).toBe("market-789");
-    expect(alert.context.lagHours).toBe(3.5);
-    
-    consoleSpy.mockRestore();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "market stuck - warning lag",
+      expect.objectContaining({
+        type: "oracle.aggregator.stuck_market",
+        severity: "SEV2",
+        marketId: "market-789",
+        lagHours: 3.5,
+      }),
+    );
   });
 
   it("creates a critical alert for markets exceeding critical threshold", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
-    alertStuckMarket("market-999", 7);
+    alertStuckMarket("market-999", 7, undefined, logger as any);
     
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    
-    expect(alert.level).toBe("critical");
-    
-    consoleSpy.mockRestore();
+    expect(logger.error).toHaveBeenCalledWith(
+      "market stuck - critical lag",
+      expect.objectContaining({
+        severity: "SEV1",
+        marketId: "market-999",
+        lagHours: 7,
+      }),
+    );
   });
 });
 
 describe("alertCircuitBreakerOpen", () => {
-  it("creates a critical alert when circuit breaker opens", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("creates a warning alert when circuit breaker opens", () => {
+    const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     
-    alertCircuitBreakerOpen("polymarket", 0.75);
+    alertCircuitBreakerOpen("polymarket", 0.75, undefined, logger as any);
     
-    const alertJson = consoleSpy.mock.calls[0]?.[1] as string;
-    const alert = JSON.parse(alertJson);
-    
-    expect(alert.level).toBe("critical");
-    expect(alert.type).toBe("circuit_breaker");
-    expect(alert.context.adapter).toBe("polymarket");
-    expect(alert.context.failureRate).toBe(0.75);
-    
-    consoleSpy.mockRestore();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "circuit breaker opened",
+      expect.objectContaining({
+        type: "oracle.aggregator.circuit_breaker_open",
+        severity: "SEV2",
+        adapter: "polymarket",
+        failureRate: 0.75,
+      }),
+    );
   });
 });

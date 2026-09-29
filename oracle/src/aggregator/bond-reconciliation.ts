@@ -74,6 +74,11 @@ export interface BondReconciliationOptions {
    */
   onDiscrepancy?: (d: BondRefundDiscrepancy) => Promise<void> | void;
   logger?: Logger;
+  /**
+   * Optional webhook URL for bond alert delivery (Issue #573).
+   * When set, bond discrepancies and reconciliation failures are POSTed to this endpoint.
+   */
+  webhookUrl?: string;
 }
 
 export interface BondReconciliationResult {
@@ -220,6 +225,8 @@ export async function runBondReconciliation(
       d.expectedAmount,
       null, // actualAmount is null since there's no settlement record
       [d.submitter], // affected party
+      options.webhookUrl,
+      options.logger,
     );
     
     if (onDiscrepancy) {
@@ -257,7 +264,7 @@ export async function runBondReconciliationSafe(
     });
     
     // Alert on reconciliation failure (Issue #573)
-    alertBondReconciliationFailure(err, 0, lastSuccessfulRun);
+    alertBondReconciliationFailure(err, 0, lastSuccessfulRun, options.webhookUrl, options.logger);
     
     // Re-throw to maintain backward compatibility
     throw err;

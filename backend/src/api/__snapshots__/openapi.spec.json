@@ -1,0 +1,2084 @@
+{
+  "components": {
+    "schemas": {
+      "Error": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Machine-readable error code",
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable error message",
+                "type": "string"
+              },
+              "requestId": {
+                "description": "Correlation id for this request. Matches the `x-request-id` response header and the id tagging the corresponding server log line.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "oracleApiKey": {
+        "description": "Oracle provider API key, for `POST /api/v1/oracle/submit` and `POST /api/oracle/*`.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "REST API serving market, bet, leaderboard and stats data to the iPredict frontend, read from an indexed PostgreSQL copy of on-chain Soroban state. Global request body limit is 16 KiB; requests exceeding this limit are rejected with 413 Payload Too Large. Server connection timeout is 10s and request timeout is 30s, paired with database statement timeouts to prevent connection exhaustion.",
+    "title": "iPredict API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/docs": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "openapi": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "openapi"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "OpenAPI specification for this API",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/leaderboard": {
+      "get": {
+        "description": "Returns a paginated leaderboard of top players by points or bet count. This is aggregate, non-user-specific data safe for shared caches.",
+        "parameters": [
+          {
+            "description": "Pagination offset (maximum 10000; use cursor-based pagination for deeper results)",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page size (maximum 100)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Sort field",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "enum": [
+                "points",
+                "bets"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "players": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "total": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "players",
+                    "total"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Cache directives. max-age mirrors the server-side Redis TTL (60s).",
+                "schema": {
+                  "example": "public, max-age=60, stale-while-revalidate=60",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified — ETag matched"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "issues": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Leaderboard rankings",
+        "tags": [
+          "leaderboard"
+        ]
+      }
+    },
+    "/api/markets": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Filter markets by status",
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "resolved",
+                "ended",
+                "cancelled",
+                "all"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by market category. Accepts: Crypto, Sports, Politics, Entertainment, Science. Case-insensitive and whitespace-trimming.",
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort order",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "enum": [
+                "newest",
+                "volume",
+                "ending_soon",
+                "bettors"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number (1-indexed). (page - 1) × limit must not exceed 10000; use cursor-based pagination for deeper results.",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Results per page (maximum 100)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "limit": {
+                      "type": "number"
+                    },
+                    "markets": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bet_count": {
+                            "type": "number"
+                          },
+                          "cancelled": {
+                            "type": "boolean"
+                          },
+                          "category": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          "creator": {
+                            "type": "string"
+                          },
+                          "end_time": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "number"
+                          },
+                          "image_url": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "outcome": {
+                            "type": [
+                              "null",
+                              "boolean"
+                            ]
+                          },
+                          "question": {
+                            "type": "string"
+                          },
+                          "resolved": {
+                            "type": "boolean"
+                          },
+                          "total_no": {
+                            "type": "string"
+                          },
+                          "total_yes": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "format": "date-time",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "question",
+                          "image_url",
+                          "category",
+                          "end_time",
+                          "total_yes",
+                          "total_no",
+                          "resolved",
+                          "outcome",
+                          "cancelled",
+                          "creator",
+                          "bet_count",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "page": {
+                      "type": "number"
+                    },
+                    "total": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "markets",
+                    "total",
+                    "page",
+                    "limit"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Cache directives. `max-age` mirrors the server-side Redis TTL. Varies by filter: `active` filter → 15s, default → 30s.",
+                "schema": {
+                  "example": "public, max-age=30, stale-while-revalidate=30",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Strong ETag for conditional GET (RFC 7232).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not Modified"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "List markets with filtering, sorting and pagination",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/markets/resolution-status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "checkedAt": {
+                      "type": "string"
+                    },
+                    "delayedMarketIds": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "type": "array"
+                    },
+                    "graceSeconds": {
+                      "type": "number"
+                    },
+                    "oldestOverdueSeconds": {
+                      "type": [
+                        "null",
+                        "number"
+                      ]
+                    },
+                    "overdueMarkets": {
+                      "type": "number"
+                    },
+                    "status": {
+                      "description": "on_time: resolutions current. delayed: some markets overdue. stalled: overdue for a long time — assume an outage.",
+                      "enum": [
+                        "on_time",
+                        "delayed",
+                        "stalled"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "overdueMarkets",
+                    "oldestOverdueSeconds",
+                    "delayedMarketIds",
+                    "graceSeconds",
+                    "checkedAt"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Whether market resolution is currently delayed",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/markets/unmappable": {
+      "get": {
+        "description": "Candidate set for the oracle's mappability sweep (#745). The backend does not know which markets an adapter can query, so it returns open, un-cancelled markets ordered by end_time ascending. Markets already past end_time lead the list: they are the ones holding stakes with no resolution path.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "candidates": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "category": {
+                            "type": "string"
+                          },
+                          "end_time": {
+                            "description": "Epoch seconds",
+                            "type": "string"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "question": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "question",
+                          "category",
+                          "end_time"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "checked": {
+                      "description": "Candidates returned",
+                      "type": "number"
+                    },
+                    "checkedAt": {
+                      "type": "string"
+                    },
+                    "includePastExpiry": {
+                      "type": "boolean"
+                    },
+                    "windowSeconds": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "candidates",
+                    "checked",
+                    "windowSeconds",
+                    "includePastExpiry",
+                    "checkedAt"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Open markets that may be unresolvable, soonest to expire first",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/markets/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Positive integer market id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bet_count": {
+                      "type": "number"
+                    },
+                    "cancelled": {
+                      "type": "boolean"
+                    },
+                    "category": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "format": "date-time",
+                      "type": "string"
+                    },
+                    "creator": {
+                      "type": "string"
+                    },
+                    "end_time": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "number"
+                    },
+                    "image_url": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "outcome": {
+                      "type": [
+                        "null",
+                        "boolean"
+                      ]
+                    },
+                    "question": {
+                      "type": "string"
+                    },
+                    "resolved": {
+                      "type": "boolean"
+                    },
+                    "total_no": {
+                      "type": "string"
+                    },
+                    "total_yes": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "format": "date-time",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "question",
+                    "image_url",
+                    "category",
+                    "end_time",
+                    "total_yes",
+                    "total_no",
+                    "resolved",
+                    "outcome",
+                    "cancelled",
+                    "creator",
+                    "bet_count",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Cache directives for this response. `max-age` mirrors the server-side Redis market-detail TTL (30s).",
+                "schema": {
+                  "example": "public, max-age=30, stale-while-revalidate=30",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get details of a market from its ID",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/markets/{id}/bets": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Page number (1-indexed). (page - 1) × limit must not exceed 10000; use cursor-based pagination for deeper results.",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Results per page (maximum 100)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Positive integer market id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bets": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bettor": {
+                            "type": "string"
+                          },
+                          "claimed": {
+                            "type": "boolean"
+                          },
+                          "created_at": {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          "gross_amount": {
+                            "type": "string"
+                          },
+                          "is_yes": {
+                            "type": "boolean"
+                          },
+                          "market_id": {
+                            "type": "string"
+                          },
+                          "net_amount": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "market_id",
+                          "bettor",
+                          "net_amount",
+                          "gross_amount",
+                          "is_yes",
+                          "claimed",
+                          "created_at"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "limit": {
+                      "type": "number"
+                    },
+                    "page": {
+                      "type": "number"
+                    },
+                    "total": {
+                      "type": "number"
+                    },
+                    "totalPages": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "bets",
+                    "total",
+                    "page",
+                    "limit",
+                    "totalPages"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Cache directives for this response. `max-age` mirrors the server-side Redis bets TTL (30s). Public blockchain data; safe for shared caches.",
+                "schema": {
+                  "example": "public, max-age=30, stale-while-revalidate=30",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "List bets for a market, paginated",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/markets/{id}/odds": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Positive integer market id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "implied_probability": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "no": {
+                          "type": "number"
+                        },
+                        "yes": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "yes",
+                        "no"
+                      ],
+                      "type": "object"
+                    },
+                    "market_id": {
+                      "type": "number"
+                    },
+                    "no_odds": {
+                      "type": "number"
+                    },
+                    "total_no": {
+                      "type": "string"
+                    },
+                    "total_pool": {
+                      "type": "string"
+                    },
+                    "total_yes": {
+                      "type": "string"
+                    },
+                    "yes_odds": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "market_id",
+                    "total_yes",
+                    "total_no",
+                    "total_pool",
+                    "yes_odds",
+                    "no_odds",
+                    "implied_probability"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Cache directives for this response. `max-age` mirrors the server-side Redis odds TTL (30s).",
+                "schema": {
+                  "example": "public, max-age=30, stale-while-revalidate=30",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "error": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get derived odds and implied probabilities for a market",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/oracle/submit": {
+      "post": {
+        "deprecated": true,
+        "description": "Legacy endpoint. Migrating to versioned API.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "bondAmount": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "marketId": {
+                    "type": "number"
+                  },
+                  "nonce": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "boolean"
+                      }
+                    ],
+                    "description": "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised."
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string"
+                  },
+                  "timestamp": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "marketId",
+                  "outcome",
+                  "signature",
+                  "provider"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "count": {
+                      "description": "Current number of accepted submissions for this market including this one",
+                      "type": "number"
+                    },
+                    "submissionsNeeded": {
+                      "description": "Remaining submissions needed to meet or exceed threshold",
+                      "type": "number"
+                    },
+                    "threshold": {
+                      "description": "Configured submission threshold needed for consensus",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "count",
+                    "threshold",
+                    "submissionsNeeded"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "marketId": {
+                          "type": "number"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "security": [
+          {
+            "oracleApiKey": []
+          }
+        ],
+        "summary": "[DEPRECATED] Use /api/v1/oracle/submit instead",
+        "tags": [
+          "oracle"
+        ]
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "totalBets": {
+                      "type": "number"
+                    },
+                    "totalMarkets": {
+                      "type": "number"
+                    },
+                    "totalUsers": {
+                      "type": "number"
+                    },
+                    "totalVolume": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "totalMarkets",
+                    "totalVolume",
+                    "totalUsers",
+                    "totalBets"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "304": {
+            "description": "Not modified — ETag matched"
+          }
+        },
+        "summary": "Platform-wide aggregate stats",
+        "tags": [
+          "stats"
+        ]
+      }
+    },
+    "/api/v1/oracle/submit": {
+      "post": {
+        "description": "Submit an oracle outcome for a market guarded by API-key auth with replay protection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "bondAmount": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "marketId": {
+                    "type": "number"
+                  },
+                  "nonce": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "boolean"
+                      }
+                    ],
+                    "description": "Binary market outcome. Canonical form YES/NO; yes/no, true/false, y/n, 1/0 accepted (case-insensitive) and normalised."
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string"
+                  },
+                  "timestamp": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "marketId",
+                  "outcome",
+                  "signature",
+                  "provider"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "count": {
+                      "description": "Current number of accepted submissions for this market including this one",
+                      "type": "number"
+                    },
+                    "submissionsNeeded": {
+                      "description": "Remaining submissions needed to meet or exceed threshold",
+                      "type": "number"
+                    },
+                    "threshold": {
+                      "description": "Configured submission threshold needed for consensus",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "count",
+                    "threshold",
+                    "submissionsNeeded"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "marketId": {
+                          "type": "number"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "security": [
+          {
+            "oracleApiKey": []
+          }
+        ],
+        "summary": "Provider submission intake",
+        "tags": [
+          "oracle"
+        ]
+      }
+    },
+    "/api/v1/profile/{address}": {
+      "get": {
+        "description": "Returns public leaderboard aggregates (points, wins, losses) and the bet history for the given Stellar address. **This is user-specific data — the response is marked no-store and must never be cached by a shared proxy or CDN.**",
+        "parameters": [
+          {
+            "description": "A Stellar public key (G…, 56 Base32 characters).",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bets": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "lost_bets": {
+                      "type": "number"
+                    },
+                    "points": {
+                      "type": "string"
+                    },
+                    "won_bets": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "bets",
+                    "points",
+                    "won_bets",
+                    "lost_bets"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always `no-store, no-cache, must-revalidate, private` — this endpoint returns user-specific betting history and must never be cached by a shared intermediary.",
+                "schema": {
+                  "example": "no-store, no-cache, must-revalidate, private",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get a user's profile: their bets and leaderboard stats",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "checks": {
+                      "properties": {
+                        "db": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        },
+                        "redis": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "db",
+                        "redis"
+                      ],
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "ready"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "checks"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "checks": {
+                      "properties": {
+                        "db": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        },
+                        "redis": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "db",
+                        "redis"
+                      ],
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "not ready"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "checks"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Readiness probe — verifies DB and Redis connectivity",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/resolution-status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "checkedAt": {
+                      "type": "string"
+                    },
+                    "delayedMarketIds": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "type": "array"
+                    },
+                    "graceSeconds": {
+                      "type": "number"
+                    },
+                    "oldestOverdueSeconds": {
+                      "type": [
+                        "null",
+                        "number"
+                      ]
+                    },
+                    "overdueMarkets": {
+                      "type": "number"
+                    },
+                    "status": {
+                      "enum": [
+                        "on_time",
+                        "delayed",
+                        "stalled"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "overdueMarkets",
+                    "oldestOverdueSeconds",
+                    "checkedAt"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "unknown"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Oracle resolution health — detects aggregator unavailability from overdue markets",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/status": {
+      "get": {
+        "description": "Health of the API, indexer progress, and the last resolved market. Always returns 200 — read the `status` field, not the HTTP code.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api": {
+                      "properties": {
+                        "db": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "redis": {
+                          "properties": {
+                            "latencyMs": {
+                              "type": "number"
+                            },
+                            "ok": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "ok"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "ok",
+                        "db",
+                        "redis"
+                      ],
+                      "type": "object"
+                    },
+                    "generatedAt": {
+                      "type": "string"
+                    },
+                    "indexer": {
+                      "properties": {
+                        "lagSeconds": {
+                          "type": [
+                            "null",
+                            "number"
+                          ]
+                        },
+                        "lastEventAt": {
+                          "type": [
+                            "null",
+                            "string"
+                          ]
+                        },
+                        "lastIndexedLedger": {
+                          "type": [
+                            "null",
+                            "number"
+                          ]
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "ok",
+                        "lastIndexedLedger",
+                        "lastEventAt",
+                        "lagSeconds"
+                      ],
+                      "type": "object"
+                    },
+                    "lastResolvedMarket": {
+                      "properties": {
+                        "id": {
+                          "type": "number"
+                        },
+                        "outcome": {
+                          "enum": [
+                            "yes",
+                            "no"
+                          ],
+                          "type": "string"
+                        },
+                        "question": {
+                          "type": "string"
+                        },
+                        "resolvedAt": {
+                          "type": [
+                            "null",
+                            "string"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "question",
+                        "outcome",
+                        "resolvedAt"
+                      ],
+                      "type": [
+                        "null",
+                        "object"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "degraded",
+                        "down"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "generatedAt",
+                    "api",
+                    "indexer",
+                    "lastResolvedMarket"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Public status feed for a status page",
+        "tags": [
+          "system"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Liveness and readiness probes",
+      "name": "system"
+    },
+    {
+      "description": "Prediction markets and their bets",
+      "name": "markets"
+    },
+    {
+      "description": "Player rankings",
+      "name": "leaderboard"
+    },
+    {
+      "description": "Global platform statistics",
+      "name": "stats"
+    },
+    {
+      "description": "Oracle provider submissions",
+      "name": "oracle"
+    }
+  ]
+}

@@ -194,36 +194,14 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
   }
 }
 
-import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
-import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";
-import { handleMarketCreatedEvent } from "./handlers/market_created.js";
-import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
-import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
-import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
-import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
-import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
-
-export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, redis: RedisClient): Promise<void> {
-  const [domain, action] = event.topics;
-
-  if (domain === "mkt" && action === "created") {
-    await handleMarketCreatedEvent(event, db, redis);
-  } else if (isBetPlacedTopic(event.topics)) {
-    await handleBetPlacedEvent(event, db, redis);
-  } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
-    await handleMarketResolvedEvent(event, db, redis);
-  } else if (domain === "mkt" && action === "cancelled") {
-    await handleMarketCancelledEvent(event, db, redis);
-  } else if (domain === "referral" && action === "reward") {
-    await handleReferralRewardEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "challenged") {
-    await handleOracleChallengedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "escalated") {
-    await handleOracleEscalatedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "finalized") {
-    await handleOracleFinalizedEvent(event, db, redis);
-  }
-}
+/**
+ * The single schema-validated event boundary lives in `event-router.ts`
+ * (issue #499). This module previously carried a drifted copy of the router
+ * that silently dropped unrecognized events — re-export the canonical one so
+ * every entry point validates payloads and dead-letters malformed events
+ * identically.
+ */
+export { writeEventToDb } from "./event-router.js";
 
 /**
  * Main entry point for the indexer service.

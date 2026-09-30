@@ -65,6 +65,13 @@ sink the deployment uses (see the metric catalogue in
 | Metric | Type | Description |
 | --- | --- | --- |
 | `events_processed_total` (`metrics.eventsProcessed`) | counter | Incremented once per contract event the indexer successfully handles. |
+| `indexer_lag_ledgers` | gauge | Chain tip minus the last processed cursor, refreshed every poll. Warning at 100 ledgers; critical at 500. |
+| `indexer_cursor_last_advanced_timestamp_seconds` | gauge | Unix timestamp of the last cursor advance; no advance for 60 seconds is a stalled-cursor condition. |
+
+The Prometheus rules alert on degraded lag (`>100` for 5 minutes), critical lag
+(`>500` for 10 minutes), and a stalled cursor (`time() - last_advanced > 60`
+seconds for 5 minutes). The thresholds are kept in the Prometheus rules and
+the dashboard threshold colours so operators see the same warning boundaries.
 
 **Runbook — reading `events_processed_total`:** the counter lives in process
 memory and increments inside the event router (`writeEventToDb`) each time a

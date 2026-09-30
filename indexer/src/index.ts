@@ -9,6 +9,7 @@ import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
 import { MetricsServer } from "./metrics-server.js";
+import { recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -78,6 +79,8 @@ export class Indexer {
 
   async indexOnce(): Promise<number> {
     const response = await this.runtime.fetchEvents(this.lastLedger);
+    const cursorBeforePoll = this.lastLedger;
+    recordIndexerPosition(response.latestLedger, cursorBeforePoll);
     if (typeof this.runtime.processBatchAtomically === "function") {
       // Atomic commit: cursor advances in the same transaction as event effects
       await this.runtime.processBatchAtomically(response.events, response.latestLedger);
@@ -107,6 +110,11 @@ export class Indexer {
       this.lastLedger = response.latestLedger;
       await this.runtime.saveCheckpoint(this.lastLedger);
     }
+
+    // Keep the cursor timestamp accurate after a successful durable commit.
+    // The chain-tip/lag observation is refreshed at the beginning of the next
+    // poll, while the timestamp only changes when the cursor advances.
+    recordIndexerCursorAdvance(this.lastLedger);
 
     if (this.runtime.recomputeTotals) await recomputeMarketTotalsFromBets(this.runtime.db);
     if (this.runtime.recomputeBetCounts) await recomputeMarketBetCountsFromBets(this.runtime.db);

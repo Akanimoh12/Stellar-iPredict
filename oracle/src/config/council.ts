@@ -163,6 +163,8 @@ export interface CouncilResolverDivergence {
   matches: boolean;
 }
 
+export type CouncilResolverReport = CouncilResolverDivergence;
+
 /** Compares canonical resolver addresses without exposing any secret config. */
 export function compareCouncilResolvers(
   config: CouncilConfig,

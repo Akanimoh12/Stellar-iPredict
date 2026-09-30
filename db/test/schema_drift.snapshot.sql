@@ -1107,10 +1107,24 @@ CREATE INDEX idx_markets_active_partial ON schema_drift_check.markets USING btre
 
 
 --
+-- Name: idx_markets_bettors; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_markets_bettors ON schema_drift_check.markets USING btree (bet_count DESC, created_at DESC) WHERE ((resolved = false) AND (cancelled = false));
+
+
+--
 -- Name: idx_markets_category; Type: INDEX; Schema: schema_drift_check; Owner: -
 --
 
 CREATE INDEX idx_markets_category ON schema_drift_check.markets USING btree (category);
+
+
+--
+-- Name: idx_markets_created_at; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_markets_created_at ON schema_drift_check.markets USING btree (created_at DESC);
 
 
 --
@@ -1121,10 +1135,10 @@ CREATE INDEX idx_markets_resolved ON schema_drift_check.markets USING btree (res
 
 
 --
--- Name: idx_markets_volume; Type: INDEX; Schema: schema_drift_check; Owner: -
+-- Name: idx_markets_volume_tiebreak; Type: INDEX; Schema: schema_drift_check; Owner: -
 --
 
-CREATE INDEX idx_markets_volume ON schema_drift_check.markets USING btree (((total_yes + total_no)) DESC);
+CREATE INDEX idx_markets_volume_tiebreak ON schema_drift_check.markets USING btree (((total_yes + total_no)) DESC, created_at DESC);
 
 
 --

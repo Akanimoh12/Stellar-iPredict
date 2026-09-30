@@ -83,7 +83,9 @@ remained normal for the release's agreed observation window.
   the rollback environment only when the current data and contracts remain
   compatible. Otherwise deploy a corrective contract/version and point a
   forward-compatible application release at it; do not treat a contract-ID
-  change as a database rollback.
+  change as a database rollback. For in-place contract WASM upgrades and data
+  layout compatibility, follow the
+  [Contract Upgrade Procedure & Storage Compatibility Rules](#contract-upgrade-procedure--storage-compatibility-rules).
 
 ### Staging rollback drill
 
@@ -829,161 +831,372 @@ from the inventory is a critical path nobody is watching.
 
 ---
 
-## Certificate Renewal Procedure
+## Contract Upgrade Procedure & Storage Compatibility Rules
 
-> A certificate that expires takes the platform offline instantly — browsers
-> and API clients refuse the connection outright, no graceful degradation.
-> Renewal is therefore a scheduled, monitored operation, never an emergency
-> invented at 03:00.
+Soroban smart contracts in iPredict support in-place bytecode upgrades via `env.deployer().update_current_contract_wasm(new_wasm_hash)`. This allows deploying new business logic, bug fixes, gas optimizations, and configurable parameters **without changing contract IDs (`C...`)**, preserving user token balances, leaderboard records, active predictions, and referral relationships.
 
-### What renews what
+However, in-place upgrades introduce **storage compatibility risks**. Because Soroban serializes storage entries into XDR (`ScVal`), an incompatible change to Rust structs or enums stored on ledger will cause host deserialization traps (`Error(Contract, #...)`), rendering existing markets and user bets permanently unreadable.
 
-| Endpoint / certificate | Scope | Issued by | Renewal | Who owns it |
-|---|---|---|---|---|
-| `ipredict-stellar.vercel.app` | public | Vercel (managed) | automatic — do not touch | platform |
-| `ipredict.xyz` / `www.ipredict.xyz` | public | Vercel (managed, attached domain) | automatic | platform |
-| `api.ipredict.xyz` | public | Let's Encrypt | `certbot` timer | platform |
-| Any future custom domain | public | Vercel / Let's Encrypt | automatic | platform |
-| `oracle-api.internal:8443`, mesh/mTLS, admin ports | internal | internal CA (`step-ca`/Vault PKI/self-signed) | manual or internal ACME | service owner |
-| Files under `/etc/ipredict/certs/*.crt` (CA chain, client certs) | internal | internal CA | manual | platform |
-| Internal **CA root/intermediate** itself | internal | internal CA | manual — 1–2 year cycle | platform |
+This section defines the end-to-end upgrade procedure, explicit storage compatibility rules, proven state migration patterns (including the lazy migration pattern proven in `referral_registry`), and post-upgrade verification runbooks.
 
-Every row above is a row in `infra/cert-monitor/endpoints.txt`. Third-party
-endpoints (Stellar Horizon, Soroban RPC, QuickNode) are the provider's
-certificates: we do not renew them, we monitor that our calls still succeed.
+---
 
-### The alert schedule — what to do at each step
+### 1. Upgrade Architecture & On-Chain Mechanics
 
-| Alert | When | Required action |
-|---|---|---|
-| **MEDIUM** (≤ 30 days) | early warning | Confirm renewal automation is armed: `systemctl list-timers certbot-*`, check the domain is still attached in Vercel, check the ACME DNS token has not expired. No manual renewal needed. |
-| **HIGH** (≤ 14 days) | automation should already have fired | Prove it did: `sudo certbot certificates` (look at the new `Expiry` date) or `openssl s_client … \| openssl x509 -noout -dates`. If it did not, start the manual procedure below today, not next week. |
-| **CRITICAL** (≤ 7 days) | holiday/no-fail window | Renew **now**, by hand if needed, reload the service, then `check-certs.py --force` to confirm. Page the platform on-call. Repeat CRITICALs are re-sent every 24 h until cleared. |
-| **CRITICAL — EXPIRED** | outage | Follow *When it has already expired* below. |
-| **CRITICAL — check failed** | endpoint unreachable / file missing | Investigate immediately: an unreachable endpoint hides its real expiry date. |
-| **CRITICAL — watchdog gap** | monitor did not run > 48 h | Fix the schedule first (timer/cron/CI), then `--force` to re-verify everything. |
+All four core iPredict contracts (`prediction_market`, `referral_registry`, `leaderboard`, `ipredict_token`) implement the standard in-place upgrade entry point:
 
-### Manual renewal — public endpoint on Vercel (custom domain)
-
-Vercel issues and renews these automatically; manual work is only ever about
-unblocking that automation.
-
-```bash
-# 1. what is actually being served right now?
-openssl s_client -connect ipredict.xyz:443 -servername ipredict.xyz 2>/dev/null \
-  | openssl x509 -noout -subject -issuer -dates
-
-# 2. domain still attached and DNS still pointing at Vercel?
-vercel domains ls          # or: Vercel dashboard → Project → Domains
-dig +short ipredict.xyz A  # must be Vercel's addresses
-
-# 3. force a re-issue from the Vercel dashboard (Project → Domains → the
-#    domain → regenerate/refresh its certificate), or remove + re-add the
-#    domain if DNS changed.
+```rust
+pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MarketError> {
+    Self::require_admin(&env, &admin)?;
+    admin.require_auth();
+    env.deployer().update_current_contract_wasm(new_wasm_hash);
+    Ok(())
+}
 ```
 
-Common silent failures: registrar domain expiry, a DNS record repointed during
-a migration, or a domain removed from the project while the inventory still
-expects it.
+#### Key Architectural Properties:
+1. **Contract Address Invariance:** The contract address (`Address`) remains unchanged. Clients, frontend dApps, indexers, and sibling contracts do not need address updates.
+2. **Storage Persistence:** All storage types (`instance()`, `persistent()`, `temporary()`) are retained across the upgrade. The new WASM executes against the exact ledger entries written by previous WASM versions.
+3. **Admin Authentication:** The calling account must match the stored `Admin` address and must sign the transaction (`admin.require_auth()`).
+4. **WASM Pre-Installation:** WASM bytecode is uploaded to the ledger once via `stellar contract install`, which registers the executable and yields a unique 32-byte SHA-256 hash. The `upgrade()` invocation merely updates the contract instance's code pointer to this hash.
 
-### Manual renewal — public endpoint on Let's Encrypt (certbot)
+---
 
-```bash
-# current state
-sudo certbot certificates
+### 2. End-to-End Upgrade Runbook
 
-# dry-run first: proves the ACME challenge works without burning rate limits
-sudo certbot renew --dry-run
+Follow these steps sequentially for any contract upgrade on Testnet or Mainnet.
 
-# real renewal
-sudo certbot renew --cert-name api.ipredict.xyz --force-renewal
+#### Step 2.1: Pre-Upgrade Verification & Local Build
+1. Run all unit tests and storage regression tests:
+   ```bash
+   cd contracts
+   cargo test
+   ```
+2. Build optimized WASM binaries:
+   ```bash
+   stellar contract build
+   ```
+3. Verify binary output sizes (must remain under 100 KB):
+   ```bash
+   ls -la target/wasm32v1-none/release/*.wasm
+   ```
+4. Record Git commit SHA, binary SHA-256 checksums, and author in the release log.
 
-# reload the web server so the new certificate is actually served
-sudo systemctl reload nginx        # or: sudo nginx -s reload / systemctl reload caddy
-
-# confirm what clients now receive
-openssl s_client -connect api.ipredict.xyz:443 -servername api.ipredict.xyz 2>/dev/null \
-  | openssl x509 -noout -subject -issuer -dates
-```
-
-Automation: `systemctl status certbot.timer` must be `active`; the timer renews
-when a certificate reaches 30 days remaining. The monitor still watches the
-*served* certificate, because an enabled timer with a revoked DNS API token
-fails silently.
-
-### Manual renewal — internal / private-CA certificate
-
-Works for `oracle-api.internal:8443`, mesh/mTLS certs and any file under
-`/etc/ipredict/certs/`.
+#### Step 2.2: Install WASM Bytecode On-Chain
+Upload the compiled WASM to the network. This does **not** alter the running contract yet.
 
 ```bash
-# 1. new key + CSR (keep the SAN list identical to the old certificate)
-openssl req -new -newkey rsa:2048 -nodes \
-  -keyout oracle-api.key -out oracle-api.csr \
-  -subj "/CN=oracle-api.internal" \
-  -addext "subjectAltName=DNS:oracle-api.internal,DNS:ipredict-mesh.internal"
+# Example for prediction_market
+WASM_PATH="target/wasm32v1-none/release/prediction_market.wasm"
+NETWORK="testnet" # or mainnet
+SOURCE_ADMIN="admin" # Key name in stellar CLI keychain
 
-# 2. sign with the internal CA  (omit if your CA is step-ca / Vault PKI —
-#    use its issue command instead)
-openssl x509 -req -in oracle-api.csr \
-  -CA internal-ca.crt -CAkey internal-ca.key -CAcreateserial \
-  -out oracle-api.crt -days 90 \
-  -extfile <(printf "subjectAltName=DNS:oracle-api.internal,DNS:ipredict-mesh.internal")
+NEW_WASM_HASH=$(stellar contract install \
+  --wasm "$WASM_PATH" \
+  --source "$SOURCE_ADMIN" \
+  --network "$NETWORK")
 
-# 3. install (keep key/cert permissions and ownership unchanged)
-sudo install -m 640 -o root -g ipredict oracle-api.crt /etc/ipredict/certs/oracle-api.crt
-
-# 4. reload the service that terminates TLS
-sudo systemctl restart ipredict-oracle     # mesh: rolling restart of the sidecars
+echo "Installed WASM Hash: $NEW_WASM_HASH"
 ```
 
-Certificate **files** are monitored directly, so replacing
-`/etc/ipredict/certs/*.crt` is visible to the monitor on the next run even if
-the service is not reachable from the monitor host. The internal **CA root**
-has an expiry date too — it is in the inventory as a `file:` target, and its
-30/14/7 alerts fire exactly like any other certificate. Renewing a CA root
-means re-issuing every leaf it signs, so act on its 30-day alert.
+#### Step 2.3: Multi-Contract Upgrade Dependency Order
+When upgrading multiple interacting contracts, execute upgrades in order of dependency tier to prevent authorization or call-graph mismatches:
 
-### After any renewal — verification checklist
+| Tier | Contract | Dependency / Caller Status |
+|:---:|:---|:---|
+| **Tier 0** | `ipredict_token` | Independent token contract. Upgraded first if changing token logic. |
+| **Tier 1** | `leaderboard` | Interacts with token. Upgraded before market when adding reward facades. |
+| **Tier 2** | `referral_registry` | Interacts with leaderboard, token, and market. |
+| **Tier 3** | `prediction_market` | Top of dependency graph. Calls leaderboard and token. Upgraded last. |
 
-- [ ] New certificate is what a client receives (`openssl s_client … -dates`)
-- [ ] Chain and hostname verify: `check-certs.py --only <name>` shows `verify: ok`
-- [ ] Service reloaded/restarted so it is serving the new file
-- [ ] Monitor reports a `RENEWED` notice and status `ok`
-- [ ] Restarted clients / mTLS peers still connect (internal certs)
-- [ ] Inventory line still matches reality (target, `tls_source`, `renewal`)
+> [!IMPORTANT]
+> **Minter Authorization Transition Rule (Lever G Precedent):**
+> If an upgrade transfers token minting privileges from Contract A to Contract B:
+> 1. Grant minter role to Contract B (`ipredict_token.set_minter(Contract B, true)`).
+> 2. Upgrade Contract B with logic that executes minting.
+> 3. Upgrade Contract A to stop minting directly.
+> 4. Revoke minter role from Contract A (`ipredict_token.set_minter(Contract A, false)`).
+> Never revoke before the replacement path is verified on-chain.
 
-Run it:
+#### Step 2.4: Execute In-Place Upgrade
+Invoke the `upgrade()` function on the deployed contract:
 
 ```bash
-python3 infra/cert-monitor/check-certs.py             # expect: RENEWED notice, then ok
-python3 infra/cert-monitor/check-certs.py --force     # optionally re-send the current state
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$SOURCE_ADMIN" \
+  --network "$NETWORK" \
+  -- upgrade \
+  --admin "$ADMIN_PUBLIC_KEY" \
+  --new_wasm_hash "$NEW_WASM_HASH"
 ```
 
-### When it has already expired
+Verify transaction confirmation on Stellar Expert / RPC response.
 
-1. **Renew first, diagnose second.** TLS failures are total, so restore service
-   before writing the post-mortem.
-2. Run the manual procedure for that certificate type above with
-   `--force-renewal` / a fresh issue — do not rely on the automation that just
-   missed its window.
-3. Reload every process that caches the certificate (web server, mesh sidecars,
-   any long-lived gRPC/mTLS connection pool).
-4. Re-run `check-certs.py --force` — it must print `RENEWED` and exit 0.
-5. Flush any CDN/edge cache in front of the endpoint and check OCSP stapling.
-6. Post a status-page update, then write the post-mortem: why the 30-day and
-   14-day alerts did not produce a renewal (unowned alert channel, automation
-   that failed silently, inventory line missing entirely).
+---
 
-### Why automation is not enough
+### 3. Storage Compatibility Rules
 
-Renewal automation fails silently far more often than certificates expire
-unexpectedly: an ACME DNS token that expired, a certbot timer disabled during
-an image bake, a domain detached from Vercel, a rate-limit from a previous
-broken renewal, a mesh cert bundle mounted but never rotated. The monitor
-therefore watches the certificate **as served** (and as installed on disk),
-never the exit code of the renew job — plus the watchdog gap alert covers "the
-monitor itself stopped running".
+Soroban encodes contract data types into XDR values (`ScVal`). The host deserializes stored bytes into Rust types when `.get(&key)` is called. If the Rust struct or enum does not match the byte representation on ledger, the host generates a deserialization error, causing function execution to trap.
+
+#### 3.1 `DataKey` Enum Compatibility Rules
+`DataKey` determines the storage keys under which records are stored.
+
+- ✅ **Backwards-Compatible Changes (SAFE):**
+  - **Adding new enum variants:** Appending new variants (e.g., `SubmitterBond`, `DisputerBond`, `ChallengeWindow`, `Profile(Address)`) is 100% backwards-compatible. Existing keys stored in previous ledgers are unaffected.
+  - **Adding variant payloads for new features:** Adding a new variant with parameters (e.g., `CouncilVote(u64, Address)`) as long as it does not replace an existing variant.
+- ❌ **Breaking Incompatible Changes (PROHIBITED):**
+  - **Renaming an existing variant:** Changing `DataKey::Market(u64)` to `DataKey::PredictionMarket(u64)` changes the symbol discriminant in XDR; all existing markets become unreachable.
+  - **Deleting an existing variant:** Deleting `DataKey::Registered(Address)` prevents the contract from reading legacy registrations.
+  - **Altering payload types:** Changing `DataKey::Market(u64)` to `DataKey::Market(u128)` or `DataKey::Bet(u64, Address)` to `DataKey::Bet(Address, u64)` breaks key lookup.
+  - **Reordering variants in numeric-repr enums:** Modifying numeric discriminants shifts binary serialization.
+
+#### 3.2 Struct Compatibility Rules (`Market`, `BetEntry`, `OracleSubmission`, `Config`)
+Structs represent the values stored inside persistent and instance storage slots.
+
+- ✅ **Backwards-Compatible Changes (SAFE):**
+  - **Adding new standalone keys for new fields:** Instead of adding a field to `Market`, store the new data under a separate key: `DataKey::MarketMetadata(u64)`.
+  - **Creating a new packed struct under a new key:** Store new records in `UserProfile` under `DataKey::Profile(Address)` while maintaining legacy keys (`Registered`, `DisplayName`, `Referrer`) for fallback reads.
+- ❌ **Breaking Incompatible Changes (PROHIBITED):**
+  - **Adding a field to an existing stored struct:** Adding `pub category_id: u32` to `struct Market` causes deserialization of existing ledger entries to fail because the stored map/tuple lacks the new field.
+  - **Removing a field from an existing stored struct:** Removing `pub image_url: String` from `Market` causes host parsing to fail on existing entries.
+  - **Changing field types:** Changing `pub end_time: u64` to `pub end_time: u128` or `pub outcome: bool` to `pub outcome: Option<bool>` breaks XDR decoding.
+  - **Renaming a field in a struct:** Field names are serialized as symbols in Soroban struct maps. Renaming `total_yes` to `yes_pool` breaks deserialization.
+
+#### 3.3 Storage Tier Consistency Rules
+Soroban provides three distinct storage lifetime tiers: `instance()`, `persistent()`, and `temporary()`.
+
+- ❌ **Never move keys between storage tiers across upgrades:**
+  - If a key was stored in `instance()` (e.g., `DataKey::Admin`, `DataKey::Cfg`), it cannot be read from `persistent()`.
+  - If market records are stored in `persistent()` (`DataKey::Market(u64)`), querying them via `env.storage().instance()` returns `None`.
+- ⚠️ **TTL and Rent Preservation:**
+  - Upgrading contract WASM does **not** extend or reset the TTL of existing persistent entries.
+  - Critical keys must continue to invoke `env.storage().persistent().extend_ttl(...)` using `TTL_BUMP` (36.5 days) and `TTL_HIGH` (73 days) as specified in Issue #533 to prevent storage archival.
+
+---
+
+### 4. Storage Compatibility Classification Matrix
+
+| Modification | Storage Target | Status | Operational Impact & Mitigation |
+|---|---|:---:|---|
+| **Add new variant to `DataKey`** | Keys | ✅ **Compatible** | Zero risk to existing entries. |
+| **Move hardcoded constant to storage** | Instance Storage | ✅ **Compatible** | Safe when using `env.storage().instance().get(...).unwrap_or(CONSTANT)`. |
+| **Add new struct under new `DataKey`** | Values | ✅ **Compatible** | Safe when legacy keys are kept for fallback reads (Lazy Migration). |
+| **Rename / remove `DataKey` variant** | Keys | 🚨 **BREAKING** | Existing keys on ledger become permanently inaccessible. **Never do this.** |
+| **Add / remove / rename struct field** | Stored Values | 🚨 **BREAKING** | Deserialization of existing records fails with host contract error. |
+| **Change field primitive type** (`i128` ↔ `u64`) | Stored Values | 🚨 **BREAKING** | XDR decoding mismatch panics host VM. |
+| **Change storage tier** (`instance` ↔ `persistent`) | Storage Subsystem | 🚨 **BREAKING** | Entries in old tier are invisible to the new tier. |
+| **Remove legacy read fallback logic** | Logic | 🚨 **BREAKING** | Pre-upgrade records can no longer be parsed or claimed. |
+
+---
+
+### 5. State Migration Strategies & Design Patterns
+
+When upgrading smart contracts, use one of the following four approved design patterns to introduce new data layouts safely.
+
+#### Pattern A: Dual-Read with Hardcoded Default Fallback (Moving Constants to Storage)
+
+This pattern directly solves the requirement to make hardcoded constants (`SUBMITTER_BOND = 100 XLM`, `DISPUTER_BOND = 200 XLM`, `CHALLENGE_WINDOW = 86400`, `COUNCIL_WINDOW = 259200`) configurable via governance without breaking existing markets or requiring database backfills.
+
+##### Implementation:
+1. Define the new key in `DataKey`:
+   ```rust
+   pub enum DataKey {
+       // ... existing variants ...
+       SubmitterBond,
+       DisputerBond,
+       ChallengeWindow,
+       CouncilWindow,
+   }
+   ```
+2. Read the parameter using `.unwrap_or(DEFAULT_CONSTANT)`:
+   ```rust
+   pub fn get_submitter_bond(env: &Env) -> i128 {
+       env.storage().instance()
+           .get(&DataKey::SubmitterBond)
+           .unwrap_or(SUBMITTER_BOND) // Falls back safely to 100 XLM
+   }
+   ```
+3. Expose admin setters with sanity boundary checks:
+   ```rust
+   pub fn set_submitter_bond(env: Env, admin: Address, new_bond: i128) -> Result<(), MarketError> {
+       Self::require_admin(&env, &admin)?;
+       admin.require_auth();
+       if new_bond < MIN_BET {
+           return Err(MarketError::InvalidAmount);
+       }
+       env.storage().instance().set(&DataKey::SubmitterBond, &new_bond);
+       Ok(())
+   }
+   ```
+##### Why this is safe:
+- Unconfigured deployments and existing running markets continue using the proven constant value without any migration step.
+- When the admin sets a new bond, subsequent submissions use the updated value without invalidating past submissions.
+
+---
+
+#### Pattern B: Lazy Migration (The Proven "Lever A" Pattern)
+
+This pattern was successfully developed and verified in `contracts/referral_registry/src/lib.rs` and tested in `contracts/referral_registry/src/tests.rs` (`test_legacy_user_still_readable`).
+
+##### Problem:
+Legacy registration wrote three separate persistent keys per user:
+- `DataKey::Registered(Address)`
+- `DataKey::DisplayName(Address)`
+- `DataKey::Referrer(Address)`
+
+To save gas (Lever A), the contract packed these into a single `UserProfile` struct under `DataKey::Profile(Address)`.
+
+##### Solution (Lazy Fallback Architecture):
+1. **Retain Legacy Keys in `DataKey`:**
+   ```rust
+   pub enum DataKey {
+       Admin,
+       MarketContract,
+       // Legacy per-user keys (retained for fallback reads)
+       Referrer(Address),
+       DisplayName(Address),
+       Registered(Address),
+       // Modern packed entry
+       Profile(Address),
+   }
+   ```
+2. **Implement Fallback Read Resolver (`load_profile`):**
+   ```rust
+   fn load_profile(env: &Env, user: &Address) -> Option<UserProfile> {
+       // 1. Attempt to load from modern packed layout
+       if let Some(p) = env.storage().persistent()
+           .get::<DataKey, UserProfile>(&DataKey::Profile(user.clone())) {
+           return Some(p);
+       }
+
+       // 2. Fallback: Reconstruct profile from legacy storage keys
+       if env.storage().persistent().get::<DataKey, bool>(&DataKey::Registered(user.clone())).unwrap_or(false) {
+           let display_name = env.storage().persistent()
+               .get(&DataKey::DisplayName(user.clone()))
+               .unwrap_or_else(|| String::from_str(env, ""));
+           let referrer = env.storage().persistent().get(&DataKey::Referrer(user.clone()));
+           return Some(UserProfile { display_name, referrer });
+       }
+
+       None
+   }
+   ```
+3. **Write Modern Layout on Update/New Interaction:**
+   New registrations write `DataKey::Profile(user)` directly. When a legacy user updates their profile, write the modern `Profile(user)` key and optionally purge legacy keys.
+4. **Prevent Double Registration:**
+   `is_registered()` calls `load_profile()`, ensuring that legacy users cannot re-register under the new layout.
+
+---
+
+#### Pattern C: Bounded Batch Migration via Admin Function
+
+When state must be eagerly transformed (e.g. data reorganization required for a global index):
+
+1. **Transaction Footprint Limits:** Soroban restricts each transaction to a maximum footprint (40 ledger entries in Protocol 20/21). Never attempt an unbounded loop across all historical markets or users in a single transaction.
+2. **Cursor-Based Pagination:**
+   ```rust
+   pub fn migrate_market_batch(
+       env: Env,
+       admin: Address,
+       start_market_id: u64,
+       batch_size: u32,
+   ) -> Result<u64, MarketError> {
+       Self::require_admin(&env, &admin)?;
+       admin.require_auth();
+       
+       let limit = batch_size.min(25); // Cap to safe footprint
+       let mut processed = 0;
+       let mut next_id = start_market_id;
+
+       while processed < limit && next_id <= get_total_markets(&env) {
+           // Read legacy entry, write modern format
+           next_id += 1;
+           processed += 1;
+       }
+       Ok(next_id)
+   }
+   ```
+3. **Idempotence:** Every migration step must be safely re-runnable without corrupting data or duplicating balances.
+
+---
+
+#### Pattern D: Expand/Contract Versioned Enum Envelopes
+
+For complex structs that may evolve repeatedly over time, wrap stored values in a versioned enum:
+
+```rust
+#[contracttype]
+pub enum StoredMarket {
+    V1(MarketV1),
+    V2(MarketV2),
+}
+```
+
+- When reading, match on the variant: `match stored { StoredMarket::V1(m) => convert(m), StoredMarket::V2(m) => m }`.
+- When writing, always write the latest version (`StoredMarket::V2`).
+
+---
+
+### 6. Post-Upgrade Verification Checklist
+
+Execute these checks immediately following any upgrade before reopening public traffic:
+
+#### Phase A: Non-Mutating Read Simulation (`--send=no`)
+Perform simulations to verify ABI and deserialization without committing state or spending gas:
+
+```bash
+# 1. Query general contract state
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_market_count
+
+# 2. Query an existing legacy market created before the upgrade
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_market --market_id 1
+
+# 3. Query odds and bet totals
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_odds --market_id 1
+
+# 4. In referral registry: verify legacy user reads correctly
+stellar contract invoke --id $REFERRAL_ID --source admin --network $NETWORK --send=no -- is_registered --user $KNOWN_LEGACY_USER
+```
+
+#### Phase B: State Mutation & Write Path Verification
+Execute a small on-chain transaction to verify execution and event emissions:
+1. Place a minimal bet (`1 XLM`) on an open market.
+2. Verify that `BetEntry` is written and `total_yes` or `total_no` updates correctly.
+3. Verify that `mkt` / `bet` events are emitted with unchanged topic and payload structures.
+
+#### Phase C: Indexer Synchronization Check
+1. Monitor indexer logs:
+   ```bash
+   docker compose -f infra/docker-compose.production.yml logs -f --tail=100 indexer
+   ```
+2. Confirm the indexer processes the post-upgrade ledger without JSON parsing or topic deserialization errors.
+3. Confirm database table `events` records the new event and indexer checkpoint advances monotonically.
+
+---
+
+### 7. Emergency Rollback Runbook
+
+If an issue is detected post-upgrade (e.g. deserialization failure, logic bug, or indexing incompatibility), execute an emergency rollback.
+
+#### Rollback Execution Command:
+```bash
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source admin \
+  --network "$NETWORK" \
+  -- upgrade \
+  --admin "$ADMIN_PUBLIC_KEY" \
+  --new_wasm_hash "$PREVIOUS_KNOWN_GOOD_WASM_HASH"
+```
+
+#### Rollback Safety Conditions:
+- ✅ **Safe to Roll Back:**
+  - If the upgrade strictly adhered to the **Storage Compatibility Rules** (only added new keys, used `.unwrap_or()` defaults, or used lazy migration fallbacks).
+  - The previous WASM can continue reading historical entries because existing keys and struct schemas were preserved.
+- 🚨 **Unsafe to Roll Back (Requires Forward Hotfix):**
+  - If the new WASM modified existing storage slots in a way that the previous WASM cannot deserialize.
+  - In this case, **do not downgrade** to the previous WASM. Instead, build and deploy a forward hotfix WASM that restores compatibility.
 
 ---
 

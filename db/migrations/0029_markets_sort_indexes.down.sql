@@ -1,5 +1,5 @@
--- Migration: 0028_markets_sort_indexes (rollback)
--- Removes the three indexes added in 0028 and restores idx_markets_volume.
+-- Migration: 0029_markets_sort_indexes (rollback)
+-- Removes the three indexes added in 0029 and restores idx_markets_volume.
 
 BEGIN;
 

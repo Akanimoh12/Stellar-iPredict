@@ -92,7 +92,7 @@ export class BinanceAdapter implements DataAdapter {
 
       const now = Date.now();
       const observedAtMs = extractTimestampMs(body, TIMESTAMP_KEYS, now);
-      return { price, body, observedAtMs };
+      return { price, body, observedAtMs: observedAtMs ?? null };
     });
 
     const now = Date.now();

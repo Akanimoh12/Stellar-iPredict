@@ -5,9 +5,22 @@ import {
   isRateLimitError,
   getRetryAfterMs,
   getStatusCode,
+  jitteredDelayMs,
   RetryExhaustedError,
   type RetryAttempt,
 } from "../rpc/retry.js";
+
+/** Deterministic 32-bit PRNG (mulberry32) so distribution tests are stable. */
+function seededRandom(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /** A sleep stub that records the delays it was asked to wait, without waiting. */
 function recordingSleep() {
@@ -169,6 +182,75 @@ describe("withRetry", () => {
       withRetry(fn, { sleep, isRetryable: () => false }),
     ).rejects.toBeInstanceOf(RetryExhaustedError);
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("jitteredDelayMs (full jitter, issue #503)", () => {
+  it("returns a floor draw inside [0, ceiling)", () => {
+    expect(jitteredDelayMs(1000, () => 0)).toBe(0);
+    expect(jitteredDelayMs(1000, () => 0.5)).toBe(500);
+    expect(jitteredDelayMs(1000, () => 0.999999)).toBe(999);
+  });
+
+  it("stays strictly below the ceiling for any draw in [0, 1), and clamps non-positive ceilings", () => {
+    expect(jitteredDelayMs(1000, () => 0.999999)).toBeLessThan(1000);
+    expect(jitteredDelayMs(0, () => 0.9)).toBe(0);
+    expect(jitteredDelayMs(-100, () => 0.9)).toBe(0);
+  });
+
+  it("spreads a seeded distribution across the whole interval instead of collapsing to a constant", () => {
+    const random = seededRandom(0xc0ffee);
+    const samples = Array.from({ length: 500 }, () => jitteredDelayMs(1000, random));
+
+    expect(Math.min(...samples)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...samples)).toBeLessThan(1000);
+    // Full jitter must actually de-synchronise retries: many distinct values,
+    // roughly spread over the interval's deciles.
+    expect(new Set(samples).size).toBeGreaterThan(200);
+    const deciles = new Set(samples.map((s) => Math.floor(s / 100)));
+    expect(deciles.size).toBeGreaterThanOrEqual(9);
+  });
+});
+
+describe("withRetry jitter (issue #503)", () => {
+  it("draws a fresh jitter sample for each attempt, not once per retry sequence", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("boom"));
+    const { delays, sleep } = recordingSleep();
+    const draws = [0, 0.5, 0.999999];
+    let i = 0;
+
+    await expect(
+      withRetry(fn, {
+        sleep,
+        maxRetries: 3,
+        baseDelayMs: 100,
+        random: () => draws[i++],
+      }),
+    ).rejects.toBeInstanceOf(RetryExhaustedError);
+
+    // ceilings: 100, 200, 400 → floors: 0, 100, 399. If the RNG were sampled
+    // once per sequence (or the delay reused), these would repeat a single draw.
+    expect(delays).toEqual([0, 100, 399]);
+    expect(i).toBe(3);
+  });
+
+  it("keeps every jittered delay bounded by the ceiling even with a maximal draw", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("boom"));
+    const { delays, sleep } = recordingSleep();
+
+    await expect(
+      withRetry(fn, {
+        sleep,
+        maxRetries: 6,
+        baseDelayMs: 100,
+        maxDelayMs: 800,
+        random: () => 0.999999,
+      }),
+    ).rejects.toBeInstanceOf(RetryExhaustedError);
+
+    // ceilings grow 100,200,400,800 — then the cap holds at 800.
+    expect(delays).toEqual([99, 199, 399, 799, 799, 799]);
+    expect(Math.max(...delays)).toBeLessThan(800);
   });
 });
 

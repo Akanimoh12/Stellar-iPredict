@@ -690,7 +690,9 @@ const METRICS = {
 
 // Alerts
 const ALERTS = [
-  { name: "IndexerStalled",     condition: "indexer_lag_ledgers > 100" },
+  { name: "IndexerLagWarning",   condition: "indexer_lag_ledgers > 100 for 5m" },
+  { name: "IndexerLagCritical",  condition: "indexer_lag_ledgers > 500 for 10m" },
+  { name: "IndexerCursorStalled", condition: "time() - indexer_cursor_last_advanced_timestamp_seconds > 60 for 5m" },
   { name: "HighRPCErrorRate",   condition: "rpc_errors_total rate > 5/min" },
   { name: "MarketStuck",        condition: "market unresolved > 48h past expiry" },
   { name: "HighAPILatency",     condition: "api_p99 > 2000ms" },

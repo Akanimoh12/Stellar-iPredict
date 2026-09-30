@@ -1,4 +1,4 @@
--- Migration: 0028_markets_sort_indexes
+-- Migration: 0029_markets_sort_indexes
 -- Description: Covering indexes for the four sort options on GET /api/markets.
 --
 -- BACKGROUND

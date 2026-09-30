@@ -305,7 +305,7 @@ describe("getMarkets category filter", () => {
   });
 });
 
-describe("ORDER BY expressions match migration 0028 index definitions with id tiebreaker", () => {
+describe("ORDER BY expressions match migration 0029 index definitions with id tiebreaker", () => {
   it("newest ORDER BY matches idx_markets_created_at definition", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "newest", filter: "all" }, db);

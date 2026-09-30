@@ -10,6 +10,7 @@ import {
   checkRetentionBoundary,
   DEFAULT_RETENTION_ALERT_THRESHOLD,
 } from "./rpc/getEvents.js";
+import { jitteredDelayMs } from "./rpc/retry.js";
 
 /**
  * Backfill as a recovery path.
@@ -63,11 +64,46 @@ export function isRateLimitError(err: any): boolean {
   return msg.includes("429") || msg.includes("too many requests") || msg.includes("rate limit");
 }
 
-// Retry wrapper with exponential backoff
+/**
+ * Injected randomness for retry jitter (issue #503). Defaults to
+ * `Math.random`; tests override it with a seeded source for deterministic
+ * assertions. Exposed on the options object of {@link fetchWithRetry}.
+ */
+export type RandomSource = () => number;
+
+const defaultRandom: RandomSource = () => Math.random();
+
+/**
+ * Sample the jittered delay for one retry attempt, using full jitter
+ * (a uniform draw in `[0, ceiling)`).
+ *
+ * Re-exported from the shared RPC retry helper so the backfill fetcher and the
+ * poll loop apply identical jitter semantics; kept exported (and pure) so tests
+ * can assert the distribution without driving whole retries (issue #503).
+ */
+export const jitteredBackoffDelay = (ceilingMs: number, random: RandomSource): number =>
+  jitteredDelayMs(ceilingMs, random);
+
+/**
+ * Retry wrapper with exponential backoff and per-attempt full jitter.
+ *
+ * The delay before attempt `n` is drawn uniformly from
+ * `[0, min(delay * 2^n, MAX_RETRY_DELAY_MS))` — computed fresh for every
+ * attempt, never once per retry sequence. Deterministic doubling alone made
+ * every client that hit a 429 retry in lockstep (a synchronised burst exactly
+ * when the endpoint was least able to serve it); the random draw de-synchronises
+ * concurrent indexers and the oracle aggregator sharing an RPC endpoint while
+ * keeping the exponential growth and the hard ceiling intact (issue #503).
+ *
+ * The RNG is injectable so tests can seed it and assert exact delays.
+ */
+const MAX_RETRY_DELAY_MS = 30_000;
+
 export async function fetchWithRetry<T>(
   fn: () => Promise<T>,
   retries = 5,
-  delay = 1000
+  delay = 1000,
+  random: RandomSource = defaultRandom,
 ): Promise<T> {
   try {
     return await fn();
@@ -76,9 +112,17 @@ export async function fetchWithRetry<T>(
       throw error;
     }
     if (isRateLimitError(error) && retries > 0) {
-      console.warn(`[backfill] Rate limited (429). Retrying in ${delay}ms... (Retries left: ${retries})`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return fetchWithRetry(fn, retries - 1, delay * 2);
+      const ceilingMs = Math.min(delay, MAX_RETRY_DELAY_MS);
+      // Full jitter: a fresh uniform draw in [0, ceiling) per attempt.
+      const waitMs = jitteredBackoffDelay(ceilingMs, random);
+      console.warn(
+        `[backfill] Rate limited (429). Retrying in ${waitMs}ms ` +
+        `(ceiling ${ceilingMs}ms, retries left: ${retries})...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      // The ceiling keeps growing exponentially; the jitter is redrawn for it
+      // on the next attempt.
+      return fetchWithRetry(fn, retries - 1, delay * 2, random);
     }
     throw error;
   }

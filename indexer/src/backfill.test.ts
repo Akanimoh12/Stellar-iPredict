@@ -19,6 +19,7 @@ import { pool } from "./db.js";
 import {
   isRateLimitError,
   fetchWithRetry,
+  jitteredBackoffDelay,
   writeEventToDb,
   runBackfill,
   processEventsInChunks,
@@ -113,6 +114,84 @@ describe("Backfill & Poll Module", () => {
 
       await expect(fetchWithRetry(fn, 5, 1)).rejects.toThrow(/oldest ledger/);
       expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    describe("full jitter (issue #503)", () => {
+      /** Capture the ms passed to setTimeout and let the wait resolve immediately. */
+      function captureTimeouts() {
+        const waits: number[] = [];
+        const spy = vi
+          .spyOn(globalThis, "setTimeout")
+          .mockImplementation((((cb: (...args: any[]) => void, ms?: number) => {
+            if (typeof ms === "number") waits.push(ms);
+            cb();
+            return 0 as unknown as ReturnType<typeof setTimeout>;
+          }) as unknown) as typeof setTimeout);
+        // Silence the retry warnings emitted on each 429.
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        return {
+          waits,
+          restore: () => {
+            spy.mockRestore();
+            warn.mockRestore();
+          },
+        };
+      }
+
+      it("jitteredBackoffDelay draws a floor sample within [0, ceiling) and clamps non-positive ceilings", () => {
+        expect(jitteredBackoffDelay(1000, () => 0)).toBe(0);
+        expect(jitteredBackoffDelay(1000, () => 0.5)).toBe(500);
+        expect(jitteredBackoffDelay(1000, () => 0.999999)).toBe(999);
+        expect(jitteredBackoffDelay(0, () => 0.9)).toBe(0);
+        expect(jitteredBackoffDelay(-1, () => 0.9)).toBe(0);
+      });
+
+      it("waits a fresh jittered amount per 429 attempt and preserves exponential growth", async () => {
+        const { waits, restore } = captureTimeouts();
+        try {
+          const fn = vi.fn().mockRejectedValue({ status: 429 });
+
+          await expect(fetchWithRetry(fn, 3, 100, () => 0.999999)).rejects.toBeDefined();
+
+          expect(fn).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
+          // Ceilings grow 100 → 200 → 400; full jitter sits just below each.
+          expect(waits).toEqual([99, 199, 399]);
+        } finally {
+          restore();
+        }
+      });
+
+      it("redraws jitter each attempt instead of reusing one sample for the sequence", async () => {
+        const { waits, restore } = captureTimeouts();
+        try {
+          const fn = vi.fn().mockRejectedValue({ status: 429 });
+          const draws = [0, 0.5, 0.999999];
+          let i = 0;
+
+          await expect(
+            fetchWithRetry(fn, 3, 100, () => draws[i++]),
+          ).rejects.toBeDefined();
+
+          // ceilings 100, 200, 400 → floors of the successive draws: 0, 100, 399.
+          expect(waits).toEqual([0, 100, 399]);
+          expect(i).toBe(3);
+        } finally {
+          restore();
+        }
+      });
+
+      it("caps the jittered wait at 30s even when the backoff ceiling grows past it", async () => {
+        const { waits, restore } = captureTimeouts();
+        try {
+          const fn = vi.fn().mockRejectedValue({ status: 429 });
+
+          await expect(fetchWithRetry(fn, 1, 60_000, () => 0.999999)).rejects.toBeDefined();
+
+          expect(waits).toEqual([29_999]); // min(delay, 30_000) ceiling, floor draw
+        } finally {
+          restore();
+        }
+      });
     });
   });
 

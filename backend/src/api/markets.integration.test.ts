@@ -4,17 +4,22 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createMarketsRoutes } from "./markets.js";
 import { registerErrorHandler, registerNotFoundHandler } from "../lib/errors.js";
 import type { MarketRow, Queryable } from "../db/markets.js";
-import { makeMarket } from "@ipredict/test-fixtures";
-
 function makeMarketRow(overrides: Partial<MarketRow> = {}): MarketRow {
-  // Now uses shared fixture as base, ensuring consistency
-  const base = makeMarket(overrides);
   return {
-    ...base,
-    // MarketRow-specific formatting
-    end_time: String(base.end_time),
-    total_yes: String(base.total_yes),
-    total_no: String(base.total_no),
+    id: 1,
+    question: "Will Stellar XLM reach $1 in 2026?",
+    image_url: "https://example.com/image.png",
+    category: "Crypto",
+    end_time: "1735689600",
+    total_yes: "100.0000000",
+    total_no: "50.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "G" + "A".repeat(55),
+    bet_count: 5,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+    updated_at: new Date("2026-01-01T00:00:00.000Z"),
     ...overrides,
   };
 }

@@ -4,6 +4,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createMarketsRoutes } from "./markets.js";
 import { registerErrorHandler, registerNotFoundHandler } from "../lib/errors.js";
 import type { MarketRow, Queryable } from "../db/markets.js";
+
 function makeMarketRow(overrides: Partial<MarketRow> = {}): MarketRow {
   return {
     id: 1,

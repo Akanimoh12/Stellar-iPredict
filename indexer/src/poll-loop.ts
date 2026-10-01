@@ -1,5 +1,5 @@
 import type { Logger } from "./log.js";
-import { metrics } from "./metrics.js";
+import { metrics, recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
 import { recordPollLoopProgress } from "./health.js";
 
 export interface RpcEvent {
@@ -68,9 +68,12 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
     await db.saveCheckpointLedger(latestLedger);
   }
 
-  // Compute and update indexer lag metric
-  const lag = latestLedger - (checkpoint ?? defaultStartLedger);
-  metrics.indexerLag.set(lag);
+  // Measure the backlog represented by this poll before its checkpoint is
+  // advanced. The next poll refreshes the chain-tip observation, so the
+  // gauge remains useful even when this batch catches up completely.
+  const cursorBeforePoll = checkpoint ?? defaultStartLedger;
+  const lag = recordIndexerPosition(latestLedger, cursorBeforePoll);
+  recordIndexerCursorAdvance(latestLedger);
 
   // Record poll duration
   const durationSeconds = (Date.now() - startTime) / 1000;

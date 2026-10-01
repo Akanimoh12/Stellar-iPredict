@@ -66,6 +66,17 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Full jitter (issue #503): a uniform draw in `[0, ceilingMs)`.
+ *
+ * Kept pure and exported so tests can assert the jitter distribution stays
+ * within the expected range with a seeded RNG. Full jitter spreads concurrent
+ * retry bursts far better than adding a small random offset to a fixed delay.
+ */
+export function jitteredDelayMs(ceilingMs: number, random: () => number): number {
+  return Math.floor(random() * Math.max(0, ceilingMs));
+}
+
 /** Best-effort extraction of an HTTP status code from heterogeneous error shapes. */
 export function getStatusCode(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return undefined;
@@ -159,14 +170,13 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
       }
 
       const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
-      // Full jitter: pick uniformly in [0, exponential] to spread out retries.
-      let delayMs = Math.floor(random() * exponential);
+      // Full jitter, drawn fresh for THIS attempt (never once per sequence):
+      // pick uniformly in [0, exponential) to spread out retries.
+      const jitteredMs = jitteredDelayMs(exponential, random);
 
       // Honour a server-provided Retry-After on 429s, capped by maxDelayMs.
       const retryAfterMs = getRetryAfterMs(error);
-      if (retryAfterMs !== undefined) {
-        delayMs = Math.min(maxDelayMs, retryAfterMs);
-      }
+      const delayMs = retryAfterMs !== undefined ? Math.min(maxDelayMs, retryAfterMs) : jitteredMs;
 
       options.onRetry?.({ attempt: attempt + 1, error, delayMs });
       await sleep(delayMs);

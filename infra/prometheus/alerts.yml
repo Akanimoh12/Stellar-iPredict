@@ -1,15 +1,35 @@
 groups:
   - name: ipredict.monitoring
     rules:
-      - alert: IndexerStalled
+      - alert: IndexerLagWarning
         expr: indexer_lag_ledgers > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: indexer
+        annotations:
+          summary: Indexer lag is degraded
+          description: "Indexer is {{ $value }} ledgers behind the chain tip for 5 minutes."
+
+      - alert: IndexerLagCritical
+        expr: indexer_lag_ledgers > 500
         for: 10m
         labels:
           severity: critical
           service: indexer
         annotations:
-          summary: Indexer is more than 100 ledgers behind
-          description: "Indexer lag is {{ $value }} ledgers for 10 minutes."
+          summary: Indexer lag is critical
+          description: "Indexer is {{ $value }} ledgers behind the chain tip for 10 minutes."
+
+      - alert: IndexerCursorStalled
+        expr: time() - indexer_cursor_last_advanced_timestamp_seconds > 60
+        for: 5m
+        labels:
+          severity: critical
+          service: indexer
+        annotations:
+          summary: Indexer cursor has stopped advancing
+          description: "The indexer cursor has not advanced for {{ $value | humanizeDuration }}; investigate the poll loop, RPC, or database."
 
       - alert: HighRPCErrorRate
         expr: sum by (service) (rate(rpc_errors_total[5m])) > (5 / 60)

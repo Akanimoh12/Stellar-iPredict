@@ -48,6 +48,11 @@ export class Gauge {
   }
 }
 
+/** Operational thresholds mirrored by infra/prometheus/alerts.yml. */
+export const DEFAULT_INDEXER_LAG_WARNING_LEDGERS = 100;
+export const DEFAULT_INDEXER_LAG_CRITICAL_LEDGERS = 500;
+export const DEFAULT_INDEXER_STALL_THRESHOLD_SECONDS = 60;
+
 export interface RpcErrorLabels {
   /** Process making the RPC call (for example `indexer` or `oracle`). */
   service: string;
@@ -174,6 +179,9 @@ export class EventCounter {
  * `indexerLag` corresponds to the `indexer_lag_ledgers` gauge documented in
  * `docs/ORACLE_AND_BACKEND.md`; it represents the difference between the
  * latest ledger from the RPC and the indexer's checkpoint ledger.
+ * `indexerChainTip` and `indexerCursor` make the two sides of that calculation
+ * independently visible. `indexerCursorLastAdvanced` is a Unix timestamp and
+ * is intentionally only updated when the persisted cursor moves.
  *
  * `eventsByType`: Counter for events processed, broken down by event type.
  * `eventsDeadLettered`: Counter for events that failed processing.
@@ -185,6 +193,9 @@ export class EventCounter {
 export const metrics = {
   eventsProcessed: new Counter(),
   indexerLag: new Gauge(),
+  indexerChainTip: new Gauge(),
+  indexerCursor: new Gauge(),
+  indexerCursorLastAdvanced: new Gauge(),
   rpcErrors: new RpcErrorCounter(),
   eventsByType: new EventCounter(),
   eventsDeadLettered: new Counter(),
@@ -228,6 +239,16 @@ export function serializeMetrics(): string {
   lines.push("# HELP indexer_lag_ledgers The difference between the latest ledger and the indexer checkpoint");
   lines.push("# TYPE indexer_lag_ledgers gauge");
   lines.push(`indexer_lag_ledgers ${metrics.indexerLag.get()}`);
+
+  lines.push("# HELP indexer_chain_tip_ledger Latest chain ledger observed by the indexer");
+  lines.push("# TYPE indexer_chain_tip_ledger gauge");
+  lines.push(`indexer_chain_tip_ledger ${metrics.indexerChainTip.get()}`);
+  lines.push("# HELP indexer_cursor_ledger Last ledger durably processed by the indexer");
+  lines.push("# TYPE indexer_cursor_ledger gauge");
+  lines.push(`indexer_cursor_ledger ${metrics.indexerCursor.get()}`);
+  lines.push("# HELP indexer_cursor_last_advanced_timestamp_seconds Unix time when the cursor last advanced");
+  lines.push("# TYPE indexer_cursor_last_advanced_timestamp_seconds gauge");
+  lines.push(`indexer_cursor_last_advanced_timestamp_seconds ${metrics.indexerCursorLastAdvanced.get()}`);
 
   // Events processed counter
   lines.push("# HELP events_processed_total Total number of contract events successfully processed");
@@ -284,11 +305,40 @@ export function serializeMetrics(): string {
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
   metrics.indexerLag.reset();
+  metrics.indexerChainTip.reset();
+  metrics.indexerCursor.reset();
+  metrics.indexerCursorLastAdvanced.reset();
   metrics.rpcErrors.reset();
   metrics.eventsByType.reset();
   metrics.eventsDeadLettered.reset();
   metrics.pollDuration.reset();
   metrics.deadLetterQueueDepth.reset();
+}
+
+/** Record one chain-tip/cursor observation and preserve cursor-advance time. */
+export function recordIndexerPosition(chainTip: number, cursor: number): number {
+  const safeChainTip = Math.max(0, chainTip);
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+
+  metrics.indexerChainTip.set(safeChainTip);
+  metrics.indexerCursor.set(safeCursor);
+  metrics.indexerLag.set(Math.max(0, safeChainTip - safeCursor));
+
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
+  return metrics.indexerLag.get();
+}
+
+/** Record a successful durable cursor advance without replacing the lag sample. */
+export function recordIndexerCursorAdvance(cursor: number): void {
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+  metrics.indexerCursor.set(safeCursor);
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { Logger } from "./log.js";
-import { metrics } from "./metrics.js";
+import { metrics, recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
 import { recordPollLoopProgress } from "./health.js";
 
 export interface RpcEvent {
@@ -21,6 +21,12 @@ export interface PollDb {
   getCheckpointLedger(): Promise<number | null>;
   saveCheckpointLedger(ledger: number): Promise<void>;
   insertEvents(events: RpcEvent[]): Promise<void>;
+  /**
+   * Optional atomic persistence of events and checkpoint ledger in a single transaction.
+   * If provided, pollOnce will use this to ensure cursor position and event effects
+   * commit atomically.
+   */
+  processEventsWithCheckpoint?(events: RpcEvent[], checkpointLedger: number): Promise<void>;
 }
 
 export interface PollOnceConfig {
@@ -47,15 +53,27 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
 
   const { events, latestLedger } = await rpc.getEvents({ startLedger, contractIds });
 
-  if (events.length > 0) {
-    await db.insertEvents(events);
+  if (typeof db.processEventsWithCheckpoint === "function") {
+    // Atomic commit: cursor advances in the same transaction as the event effects
+    await db.processEventsWithCheckpoint(events, latestLedger);
+  } else {
+    // Deliberate ordering for at-least-once processing:
+    // Process event effects FIRST, then advance cursor SECOND.
+    // If a crash happens between the two, events are reprocessed on recovery
+    // rather than permanently skipped (idempotent handlers guarantee no duplicates).
+    if (events.length > 0) {
+      await db.insertEvents(events);
+    }
+
+    await db.saveCheckpointLedger(latestLedger);
   }
 
-  await db.saveCheckpointLedger(latestLedger);
-
-  // Compute and update indexer lag metric
-  const lag = latestLedger - (checkpoint ?? defaultStartLedger);
-  metrics.indexerLag.set(lag);
+  // Measure the backlog represented by this poll before its checkpoint is
+  // advanced. The next poll refreshes the chain-tip observation, so the
+  // gauge remains useful even when this batch catches up completely.
+  const cursorBeforePoll = checkpoint ?? defaultStartLedger;
+  const lag = recordIndexerPosition(latestLedger, cursorBeforePoll);
+  recordIndexerCursorAdvance(latestLedger);
 
   // Record poll duration
   const durationSeconds = (Date.now() - startTime) / 1000;

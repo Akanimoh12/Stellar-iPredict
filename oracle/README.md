@@ -74,6 +74,25 @@ In production it runs as its own `oracle-monitor` service from the same image
 as the aggregator — see
 [`infra/README.md`](../infra/README.md#why-the-oracle-is-two-services).
 
+## Testing & Quality Assurance
+
+### Unit & Integration Tests
+
+```bash
+npm test
+```
+
+### Mutation Testing
+
+Coverage measures which lines execute, but mutation testing verifies whether assertions actually detect logic and boundary defects in high-value consensus and settlement code.
+
+```bash
+npm run test:mutation
+```
+
+- **Target Mutation Score:** `>= 90%` for critical modules (`src/aggregator/threshold.ts`, `src/aggregator/bond-reconciliation.ts`).
+- **Reports:** Generated at `oracle/reports/mutation-report.md` and `oracle/reports/mutation-report.json`.
+
 ## Documentation
 
 - **[Oracle Provider Integration Contract](../docs/ORACLE_AND_BACKEND.md#part-5--oracle-provider-integration-contract)** — integration guide for oracle providers: authentication, canonical signing, error codes, and client example

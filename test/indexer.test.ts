@@ -3,6 +3,26 @@ import { Indexer } from "../indexer/src/index.js";
 import { recomputeMarketTotalsFromBets } from "../indexer/src/recomputeTotals.js";
 import type { Queryable } from "../indexer/src/db.js";
 
+/**
+ * `indexer/src/index.ts` validates its environment and calls `process.exit(1)`
+ * at module load, so the variables have to be in place *before* the import is
+ * evaluated. `vi.hoisted` runs before hoisted imports, which plain statements
+ * at the top of the file do not.
+ */
+vi.hoisted(() => {
+  Object.assign(process.env, {
+    DATABASE_URL: "postgres://ipredict:ipredict@localhost:5432/ipredict_test",
+    REDIS_URL: "redis://localhost:6379",
+    SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+    NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+    MARKET_CONTRACT_ID: "C".repeat(56),
+    TOKEN_CONTRACT_ID: "C".repeat(56),
+    REFERRAL_CONTRACT_ID: "C".repeat(56),
+    LEADERBOARD_CONTRACT_ID: "C".repeat(56),
+    START_LEDGER: "1",
+  });
+});
+
 function dbMock(rowsBySql: Record<string, unknown[]> = {}) {
   const queries: Array<{ sql: string; params?: readonly unknown[] }> = [];
   return {

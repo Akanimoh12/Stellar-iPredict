@@ -372,6 +372,9 @@ const oracleSubmitBodySchema = z.object({
   timestamp: z.number().int().positive().optional(),
 });
 
+export const ORACLE_SUBMIT_PATH = "/oracle/submit";
+export const LEGACY_ORACLE_SUBMIT_PATH = "/api/oracle/submit";
+
 /**
  * Oracle routes as a Fastify plugin for proper versioning.
  * Mounted under /api/v1 by the main API router.
@@ -392,6 +395,9 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
   routes.post(
     "/oracle/submit",
     {
+      config: {
+        auth: "protected",
+      },
       schema: {
         summary: "Provider submission intake",
         description:
@@ -444,6 +450,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -458,6 +465,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -472,6 +480,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                   marketId: { type: "number" },
                 },
               },
@@ -487,6 +496,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -501,6 +511,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -783,6 +794,9 @@ export function registerOracleRoutes(
   server.post(
     "/api/oracle/submit",
     {
+      config: {
+        auth: "protected",
+      },
       schema: {
         deprecated: true,
         summary: "[DEPRECATED] Use /api/v1/oracle/submit instead",
@@ -835,6 +849,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -849,6 +864,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                 },
               },
             },
@@ -863,6 +879,7 @@ export function registerOracleRoutes(
                 properties: {
                   code: { type: "string" },
                   message: { type: "string" },
+                  requestId: { type: "string" },
                   marketId: { type: "number" },
                 },
               },

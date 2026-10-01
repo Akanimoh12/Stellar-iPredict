@@ -1,0 +1,56 @@
+# iPredict synthetic read-path inventory — read by infra/synthetic-monitor/check-synthetic.py
+#
+# One critical read path per line, eight '|'-separated fields:
+#
+#   name | method | url | payload | expect | max_ms | owner | mode
+#
+#   name     unique, lowercase, used in alerts and in the state file
+#   method   GET | POST  (POST is only allowed with a read-only JSON-RPC payload)
+#   url      absolute http(s) URL of the path, addressed exactly the way an
+#            outside client addresses it — DNS and TLS are part of the check
+#   payload  '-' for GET, otherwise a single-line JSON-RPC request body whose
+#            method must be read-only (the same allowlist the /api/rpc proxy
+#            enforces) — a synthetic check can never become a write
+#   expect   ';' separated conditions that define "working":
+#              status=200           exact code, or a range: status=200..299
+#              contains=text        literal substring of the response body
+#              json=path            JSON path must exist and be non-null
+#              json=path=value      JSON path must equal the value (as text)
+#   max_ms   latency SLO; a successful-but-slower run alerts as SLOW
+#   owner    team/human to ping when an alert fires
+#   mode     active = checked on every run
+#            pending = known path not yet deployed; printed on every run so it
+#                      cannot be forgotten, never alerts, never probed
+#
+# Sections group the report: [site] the pages a browser loads, [api] the JSON
+# read endpoints behind them.
+#
+# Adding a service: add a line here in the same PR that deploys the service.
+# A critical path missing from this file is a critical path nobody is watching.
+
+[site]
+
+# Landing page — the HTML shell every visitor gets. Proves DNS, TLS, the CDN
+# and the Next.js renderer all answer from the public internet.
+home | GET | https://ipredict-stellar.vercel.app/ | - | status=200; contains=iPredict | 3000 | platform | active
+
+# The two pages a user actually opens; their headings are asserted so a 200
+# error page or an empty shell still counts as a failure.
+markets | GET | https://ipredict-stellar.vercel.app/markets | - | status=200; contains=Markets | 3000 | platform | active
+leaderboard | GET | https://ipredict-stellar.vercel.app/leaderboard | - | status=200; contains=Leaderboard | 3000 | platform | active
+
+# Custom production domain (apex). DNS still resolves to the parked page, so
+# the line stays pending: flip to active in the PR that completes cutover.
+apex | GET | https://ipredict.xyz/ | - | status=200; contains=iPredict | 3000 | platform | pending
+
+[api]
+
+# One request that exercises origin allowlist, edge routing AND the upstream
+# Soroban RPC. The proxy answers HTTP 200 with a JSON-RPC error body when the
+# upstream is broken, so the json= condition — not the status code — is what
+# catches that.
+rpc-health | POST | https://ipredict-stellar.vercel.app/api/rpc | {"jsonrpc":"2.0","id":1,"method":"getHealth"} | status=200; json=result.status | 5000 | platform | active
+
+# Standalone API readiness probe (DB + Redis). Required slot: when
+# api.ipredict.xyz ships, flip pending -> active in the same PR.
+api-readyz | GET | https://api.ipredict.xyz/readyz | - | status=200; json=status=ready | 1500 | platform | pending

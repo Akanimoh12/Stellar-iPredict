@@ -14,6 +14,14 @@ export interface CouncilWindowExceededAlert {
   detectedAt: string;
 }
 
+export interface CouncilDeadlineApproachingAlert {
+  marketId: string;
+  escalatedAt: string;
+  councilDeadline: string;
+  hoursRemaining: number;
+  detectedAt: string;
+}
+
 export interface CouncilInactivityMonitorOptions {
   inactivityThresholdHours?: number; // Default: 48
   onAlert?: (alert: CouncilInactivityAlert) => void;
@@ -22,6 +30,7 @@ export interface CouncilInactivityMonitorOptions {
 export interface EscalatedMarketRecord {
   marketId: string;
   escalatedAt: Date;
+  councilDeadline: Date;
   status: string;
   hasCouncilVotes: boolean;
 }
@@ -60,19 +69,47 @@ export async function checkCouncilWindowExceeded(
   now: Date = new Date(),
   onAlert?: (alert: CouncilWindowExceededAlert) => void,
 ): Promise<CouncilWindowExceededAlert[]> {
-  const COUNCIL_WINDOW_HOURS = 72;
-  const windowMs = COUNCIL_WINDOW_HOURS * 60 * 60 * 1_000;
   const alerts: CouncilWindowExceededAlert[] = [];
 
   for (const record of records) {
     if (record.status === "escalated") {
-      const elapsedMs = now.getTime() - record.escalatedAt.getTime();
-      if (elapsedMs > windowMs) {
-        const hours = Math.floor(elapsedMs / (60 * 60 * 1_000));
+      if (now.getTime() > record.councilDeadline.getTime()) {
+        const exceededMs = now.getTime() - record.councilDeadline.getTime();
+        const exceededHours = Math.floor(exceededMs / (60 * 60 * 1_000));
         const alert: CouncilWindowExceededAlert = {
           marketId: record.marketId,
           escalatedAt: record.escalatedAt.toISOString(),
-          exceededByHours: hours - COUNCIL_WINDOW_HOURS,
+          exceededByHours: exceededHours,
+          detectedAt: now.toISOString(),
+        };
+        alerts.push(alert);
+        onAlert?.(alert);
+      }
+    }
+  }
+
+  return alerts;
+}
+
+export async function checkCouncilDeadlineApproaching(
+  records: EscalatedMarketRecord[],
+  now: Date = new Date(),
+  warningHours: number = 12,
+  onAlert?: (alert: CouncilDeadlineApproachingAlert) => void,
+): Promise<CouncilDeadlineApproachingAlert[]> {
+  const warningMs = warningHours * 60 * 60 * 1_000;
+  const alerts: CouncilDeadlineApproachingAlert[] = [];
+
+  for (const record of records) {
+    if (record.status === "escalated" && !record.hasCouncilVotes) {
+      const timeUntilDeadline = record.councilDeadline.getTime() - now.getTime();
+      if (timeUntilDeadline > 0 && timeUntilDeadline <= warningMs) {
+        const hoursRemaining = Math.ceil(timeUntilDeadline / (60 * 60 * 1_000));
+        const alert: CouncilDeadlineApproachingAlert = {
+          marketId: record.marketId,
+          escalatedAt: record.escalatedAt.toISOString(),
+          councilDeadline: record.councilDeadline.toISOString(),
+          hoursRemaining,
           detectedAt: now.toISOString(),
         };
         alerts.push(alert);
@@ -85,20 +122,14 @@ export async function checkCouncilWindowExceeded(
 }
 
 // The join is on the raw ids: council_votes.market_id and
-// oracle_submissions.market_id are both BIGINT (widened from INTEGER in
-// migration 0021, issue #407) so Postgres compares them directly. Casting
-// the right side to text instead raised "operator does not exist:
-// bigint = text" on every call.
+// oracle_disputes.market_id are both INTEGER so Postgres compares them directly.
 //
-// Both queries below compare `s.status` as text. `oracle_submission_status`
-// (migration 0008) has no 'escalated' member — that state currently lives in
-// oracle_disputes.status — and comparing the enum against a literal it does
-// not contain raises a Postgres error instead of returning no rows. The cast
-// makes these checks a no-op until the schema grows the state, rather than
-// failing the whole monitor cycle.
+// Both queries below query oracle_disputes.status which is an enum with 'escalated'
+// member (migration 0009), so no cast is needed.
 interface PostgresEscalatedRow extends Record<string, unknown> {
   market_id: string;
   escalated_at: string;
+  council_deadline: string;
   status: string;
   vote_count: string | number;
 }
@@ -109,19 +140,21 @@ export async function checkCouncilInactivityFromDb(
   options: CouncilInactivityMonitorOptions = {},
 ): Promise<CouncilInactivityAlert[]> {
   const result = await pool.query<PostgresEscalatedRow>(
-    `SELECT s.market_id::text AS market_id,
-            s.submitted_at::text AS escalated_at,
-            s.status,
+    `SELECT d.market_id::text AS market_id,
+            d.escalated_at::text AS escalated_at,
+            d.council_deadline::text AS council_deadline,
+            d.status,
             COUNT(v.member) AS vote_count
-       FROM oracle_submissions s
-  LEFT JOIN council_votes v ON v.market_id = s.market_id
-      WHERE s.status::text = 'escalated'
-   GROUP BY s.market_id, s.submitted_at, s.status`,
+       FROM oracle_disputes d
+  LEFT JOIN council_votes v ON v.market_id::text = d.market_id::text
+      WHERE d.status = 'escalated'
+   GROUP BY d.market_id, d.escalated_at, d.council_deadline, d.status`,
   );
 
   const records: EscalatedMarketRecord[] = result.rows.map((row) => ({
     marketId: row.market_id,
     escalatedAt: new Date(row.escalated_at),
+    councilDeadline: new Date(row.council_deadline),
     status: row.status,
     hasCouncilVotes: Number(row.vote_count) > 0,
   }));
@@ -135,22 +168,53 @@ export async function checkCouncilWindowExceededFromDb(
   onAlert?: (alert: CouncilWindowExceededAlert) => void,
 ): Promise<CouncilWindowExceededAlert[]> {
   const result = await pool.query<PostgresEscalatedRow>(
-    `SELECT s.market_id::text AS market_id,
-            s.submitted_at::text AS escalated_at,
-            s.status,
+    `SELECT d.market_id::text AS market_id,
+            d.escalated_at::text AS escalated_at,
+            d.council_deadline::text AS council_deadline,
+            d.status,
             COUNT(v.member) AS vote_count
-       FROM oracle_submissions s
-  LEFT JOIN council_votes v ON v.market_id = s.market_id
-      WHERE s.status::text = 'escalated'
-   GROUP BY s.market_id, s.submitted_at, s.status`,
+       FROM oracle_disputes d
+  LEFT JOIN council_votes v ON v.market_id::text = d.market_id::text
+      WHERE d.status = 'escalated'
+   GROUP BY d.market_id, d.escalated_at, d.council_deadline, d.status`,
   );
 
   const records: EscalatedMarketRecord[] = result.rows.map((row) => ({
     marketId: row.market_id,
     escalatedAt: new Date(row.escalated_at),
+    councilDeadline: new Date(row.council_deadline),
     status: row.status,
     hasCouncilVotes: Number(row.vote_count) > 0,
   }));
 
   return checkCouncilWindowExceeded(records, now, onAlert);
+}
+
+export async function checkCouncilDeadlineApproachingFromDb(
+  pool: QueryablePool,
+  now: Date = new Date(),
+  warningHours: number = 12,
+  onAlert?: (alert: CouncilDeadlineApproachingAlert) => void,
+): Promise<CouncilDeadlineApproachingAlert[]> {
+  const result = await pool.query<PostgresEscalatedRow>(
+    `SELECT d.market_id::text AS market_id,
+            d.escalated_at::text AS escalated_at,
+            d.council_deadline::text AS council_deadline,
+            d.status,
+            COUNT(v.member) AS vote_count
+       FROM oracle_disputes d
+  LEFT JOIN council_votes v ON v.market_id::text = d.market_id::text
+      WHERE d.status = 'escalated'
+   GROUP BY d.market_id, d.escalated_at, d.council_deadline, d.status`,
+  );
+
+  const records: EscalatedMarketRecord[] = result.rows.map((row) => ({
+    marketId: row.market_id,
+    escalatedAt: new Date(row.escalated_at),
+    councilDeadline: new Date(row.council_deadline),
+    status: row.status,
+    hasCouncilVotes: Number(row.vote_count) > 0,
+  }));
+
+  return checkCouncilDeadlineApproaching(records, now, warningHours, onAlert);
 }

@@ -4,7 +4,7 @@
 
 - [Stellar CLI](https://github.com/stellar/stellar-cli) (v25+)
 - [Rust](https://rustup.rs/) 1.85+ with `wasm32v1-none` target
-- [Node.js](https://nodejs.org/) 18+ with npm
+- [Node.js](https://nodejs.org/) 22+ with npm
 - A funded Stellar testnet account
 
 ---
@@ -64,10 +64,10 @@ Service-specific verification follows:
 | `log-collector` | It may remain running; roll back only its prior image/config if logging itself caused the incident. | New JSON logs arrive at the configured sink. |
 | `postgres` / `redis` | Do not roll back their images, volumes, or data as part of an application rollback. | Their existing health checks remain healthy. Restore from a verified backup only under the disaster-recovery procedure. |
 
-After every service is healthy, run a smoke test for market reads, authenticated
-oracle submission, indexer progress, and an oracle monitor cycle. Keep the
-deployment freeze until metrics and error rates have remained normal for the
-release's agreed observation window.
+After every service is healthy, run the **post-deployment smoke suite** (below)
+— it covers market reads, authenticated oracle submission, and the auth
+rejection path. Keep the deployment freeze until metrics and error rates have
+remained normal for the release's agreed observation window.
 
 ### Schema, migrations, and contracts
 
@@ -83,7 +83,9 @@ release's agreed observation window.
   the rollback environment only when the current data and contracts remain
   compatible. Otherwise deploy a corrective contract/version and point a
   forward-compatible application release at it; do not treat a contract-ID
-  change as a database rollback.
+  change as a database rollback. For in-place contract WASM upgrades and data
+  layout compatibility, follow the
+  [Contract Upgrade Procedure & Storage Compatibility Rules](#contract-upgrade-procedure--storage-compatibility-rules).
 
 ### Staging rollback drill
 
@@ -583,7 +585,10 @@ monitor itself stopped running".
 
 ## Verification Checklist
 
-After deployment, verify each feature end-to-end:
+TLS expiry is the one outage that is entirely predictable, so it is monitored
+for every public endpoint and every internal TLS service. Do this **in the same
+session as the deploy** — the monitor is useless if it is added later.
+## Post-deployment smoke suite
 
 - [ ] Landing page loads with live stats
 - [ ] Markets page shows seed markets
@@ -602,6 +607,482 @@ After deployment, verify each feature end-to-end:
 
 ---
 
+## Verification Checklist
+
+**Automated, required first:**
+
+- [ ] Post-deployment smoke suite exits 0 (`make smoke BASE_URL=…`)
+- [ ] The smoke run's pass/fail/warn/skip counts are recorded in the release
+      record, and any skipped check is called out
+
+Then verify each feature end-to-end:
+
+```bash
+# offline sanity check, then a real (non-delivering) run
+python3 infra/cert-monitor/check-certs.py --self-test
+python3 infra/cert-monitor/check-certs.py --dry-run
+
+# choose an alert channel
+cp infra/cert-monitor/cert-monitor.env.example /etc/ipredict/cert-monitor.env
+$EDITOR /etc/ipredict/cert-monitor.env
+
+# schedule it daily (systemd)
+sudo cp infra/cert-monitor/systemd/ipredict-cert-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ipredict-cert-monitor.timer
+```
+
+Full setup, alert routing, internal-certificate coverage and troubleshooting:
+[`infra/README.md`](../infra/README.md).
+
+**Inventory discipline:** every endpoint you deploy gets a line in
+`infra/cert-monitor/endpoints.txt` in the PR that deploys it (a `pending` slot
+before it exists, `active` the moment it does). A service missing from the
+inventory is a service nobody is watching.
+
+---
+
+## Step 8: Enable Synthetic Read-Path Monitoring
+
+Passive monitoring only records the traffic that happened. In the small hours
+there may be almost none — which is exactly when a broken read path goes
+unnoticed for hours. The synthetic monitor instead **exercises** the critical
+read paths every two minutes, from outside the deployment, so DNS, TLS, the
+load balancer, the edge and the application itself are verified continuously,
+with or without users. It also alerts when a path gets *slow*, not only when
+it fails.
+
+```bash
+# offline sanity check, then a real (non-delivering) run
+python3 infra/synthetic-monitor/check-synthetic.py --self-test
+python3 infra/synthetic-monitor/check-synthetic.py --dry-run
+
+# choose an alert channel
+cp infra/synthetic-monitor/synthetic-monitor.env.example /etc/ipredict/synthetic-monitor.env
+$EDITOR /etc/ipredict/synthetic-monitor.env
+
+# schedule it every 2 minutes (systemd)
+sudo cp infra/synthetic-monitor/systemd/ipredict-synthetic-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ipredict-synthetic-monitor.timer
+systemctl list-timers ipredict-synthetic-monitor.timer
+```
+
+The checks are read-only by construction — `GET`, or a `POST` carrying a
+read-only JSON-RPC method (anything else is refused while the inventory is
+parsed) — so they are safe to run continuously against production.
+
+Two schedules, two network paths to production:
+
+* **systemd timer (primary)** — every 2 minutes from the monitor host. First
+  sign of trouble alerts within ~2 minutes, a confirmed failure within ~4.
+* **`.github/workflows/synthetic-monitor.yml`** — every 5 minutes from a
+  GitHub-hosted runner, i.e. from outside the deployment entirely. Add the
+  `SYNTHETIC_MONITOR_WEBHOOK_URL` repository secret to arm its alerts; a
+  failed scheduled run also notifies everyone watching the repository.
+
+Full setup, alert escalation, the latency baseline and troubleshooting:
+[`infra/README.md`](../infra/README.md).
+
+**Inventory discipline:** every read path you deploy gets a line in
+`infra/synthetic-monitor/paths.txt` in the PR that deploys it (a `pending`
+slot before it exists, `active` the moment it does — e.g. the API's `/readyz`
+is already listed, waiting for `api.ipredict.xyz`). A critical path missing
+from the inventory is a critical path nobody is watching.
+
+---
+
+## Contract Upgrade Procedure & Storage Compatibility Rules
+
+Soroban smart contracts in iPredict support in-place bytecode upgrades via `env.deployer().update_current_contract_wasm(new_wasm_hash)`. This allows deploying new business logic, bug fixes, gas optimizations, and configurable parameters **without changing contract IDs (`C...`)**, preserving user token balances, leaderboard records, active predictions, and referral relationships.
+
+However, in-place upgrades introduce **storage compatibility risks**. Because Soroban serializes storage entries into XDR (`ScVal`), an incompatible change to Rust structs or enums stored on ledger will cause host deserialization traps (`Error(Contract, #...)`), rendering existing markets and user bets permanently unreadable.
+
+This section defines the end-to-end upgrade procedure, explicit storage compatibility rules, proven state migration patterns (including the lazy migration pattern proven in `referral_registry`), and post-upgrade verification runbooks.
+
+---
+
+### 1. Upgrade Architecture & On-Chain Mechanics
+
+All four core iPredict contracts (`prediction_market`, `referral_registry`, `leaderboard`, `ipredict_token`) implement the standard in-place upgrade entry point:
+
+```rust
+pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MarketError> {
+    Self::require_admin(&env, &admin)?;
+    admin.require_auth();
+    env.deployer().update_current_contract_wasm(new_wasm_hash);
+    Ok(())
+}
+```
+
+#### Key Architectural Properties:
+1. **Contract Address Invariance:** The contract address (`Address`) remains unchanged. Clients, frontend dApps, indexers, and sibling contracts do not need address updates.
+2. **Storage Persistence:** All storage types (`instance()`, `persistent()`, `temporary()`) are retained across the upgrade. The new WASM executes against the exact ledger entries written by previous WASM versions.
+3. **Admin Authentication:** The calling account must match the stored `Admin` address and must sign the transaction (`admin.require_auth()`).
+4. **WASM Pre-Installation:** WASM bytecode is uploaded to the ledger once via `stellar contract install`, which registers the executable and yields a unique 32-byte SHA-256 hash. The `upgrade()` invocation merely updates the contract instance's code pointer to this hash.
+
+---
+
+### 2. End-to-End Upgrade Runbook
+
+Follow these steps sequentially for any contract upgrade on Testnet or Mainnet.
+
+#### Step 2.1: Pre-Upgrade Verification & Local Build
+1. Run all unit tests and storage regression tests:
+   ```bash
+   cd contracts
+   cargo test
+   ```
+2. Build optimized WASM binaries:
+   ```bash
+   stellar contract build
+   ```
+3. Verify binary output sizes (must remain under 100 KB):
+   ```bash
+   ls -la target/wasm32v1-none/release/*.wasm
+   ```
+4. Record Git commit SHA, binary SHA-256 checksums, and author in the release log.
+
+#### Step 2.2: Install WASM Bytecode On-Chain
+Upload the compiled WASM to the network. This does **not** alter the running contract yet.
+
+```bash
+# Example for prediction_market
+WASM_PATH="target/wasm32v1-none/release/prediction_market.wasm"
+NETWORK="testnet" # or mainnet
+SOURCE_ADMIN="admin" # Key name in stellar CLI keychain
+
+NEW_WASM_HASH=$(stellar contract install \
+  --wasm "$WASM_PATH" \
+  --source "$SOURCE_ADMIN" \
+  --network "$NETWORK")
+
+echo "Installed WASM Hash: $NEW_WASM_HASH"
+```
+
+#### Step 2.3: Multi-Contract Upgrade Dependency Order
+When upgrading multiple interacting contracts, execute upgrades in order of dependency tier to prevent authorization or call-graph mismatches:
+
+| Tier | Contract | Dependency / Caller Status |
+|:---:|:---|:---|
+| **Tier 0** | `ipredict_token` | Independent token contract. Upgraded first if changing token logic. |
+| **Tier 1** | `leaderboard` | Interacts with token. Upgraded before market when adding reward facades. |
+| **Tier 2** | `referral_registry` | Interacts with leaderboard, token, and market. |
+| **Tier 3** | `prediction_market` | Top of dependency graph. Calls leaderboard and token. Upgraded last. |
+
+> [!IMPORTANT]
+> **Minter Authorization Transition Rule (Lever G Precedent):**
+> If an upgrade transfers token minting privileges from Contract A to Contract B:
+> 1. Grant minter role to Contract B (`ipredict_token.set_minter(Contract B, true)`).
+> 2. Upgrade Contract B with logic that executes minting.
+> 3. Upgrade Contract A to stop minting directly.
+> 4. Revoke minter role from Contract A (`ipredict_token.set_minter(Contract A, false)`).
+> Never revoke before the replacement path is verified on-chain.
+
+#### Step 2.4: Execute In-Place Upgrade
+Invoke the `upgrade()` function on the deployed contract:
+
+```bash
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source "$SOURCE_ADMIN" \
+  --network "$NETWORK" \
+  -- upgrade \
+  --admin "$ADMIN_PUBLIC_KEY" \
+  --new_wasm_hash "$NEW_WASM_HASH"
+```
+
+Verify transaction confirmation on Stellar Expert / RPC response.
+
+---
+
+### 3. Storage Compatibility Rules
+
+Soroban encodes contract data types into XDR values (`ScVal`). The host deserializes stored bytes into Rust types when `.get(&key)` is called. If the Rust struct or enum does not match the byte representation on ledger, the host generates a deserialization error, causing function execution to trap.
+
+#### 3.1 `DataKey` Enum Compatibility Rules
+`DataKey` determines the storage keys under which records are stored.
+
+- ✅ **Backwards-Compatible Changes (SAFE):**
+  - **Adding new enum variants:** Appending new variants (e.g., `SubmitterBond`, `DisputerBond`, `ChallengeWindow`, `Profile(Address)`) is 100% backwards-compatible. Existing keys stored in previous ledgers are unaffected.
+  - **Adding variant payloads for new features:** Adding a new variant with parameters (e.g., `CouncilVote(u64, Address)`) as long as it does not replace an existing variant.
+- ❌ **Breaking Incompatible Changes (PROHIBITED):**
+  - **Renaming an existing variant:** Changing `DataKey::Market(u64)` to `DataKey::PredictionMarket(u64)` changes the symbol discriminant in XDR; all existing markets become unreachable.
+  - **Deleting an existing variant:** Deleting `DataKey::Registered(Address)` prevents the contract from reading legacy registrations.
+  - **Altering payload types:** Changing `DataKey::Market(u64)` to `DataKey::Market(u128)` or `DataKey::Bet(u64, Address)` to `DataKey::Bet(Address, u64)` breaks key lookup.
+  - **Reordering variants in numeric-repr enums:** Modifying numeric discriminants shifts binary serialization.
+
+#### 3.2 Struct Compatibility Rules (`Market`, `BetEntry`, `OracleSubmission`, `Config`)
+Structs represent the values stored inside persistent and instance storage slots.
+
+- ✅ **Backwards-Compatible Changes (SAFE):**
+  - **Adding new standalone keys for new fields:** Instead of adding a field to `Market`, store the new data under a separate key: `DataKey::MarketMetadata(u64)`.
+  - **Creating a new packed struct under a new key:** Store new records in `UserProfile` under `DataKey::Profile(Address)` while maintaining legacy keys (`Registered`, `DisplayName`, `Referrer`) for fallback reads.
+- ❌ **Breaking Incompatible Changes (PROHIBITED):**
+  - **Adding a field to an existing stored struct:** Adding `pub category_id: u32` to `struct Market` causes deserialization of existing ledger entries to fail because the stored map/tuple lacks the new field.
+  - **Removing a field from an existing stored struct:** Removing `pub image_url: String` from `Market` causes host parsing to fail on existing entries.
+  - **Changing field types:** Changing `pub end_time: u64` to `pub end_time: u128` or `pub outcome: bool` to `pub outcome: Option<bool>` breaks XDR decoding.
+  - **Renaming a field in a struct:** Field names are serialized as symbols in Soroban struct maps. Renaming `total_yes` to `yes_pool` breaks deserialization.
+
+#### 3.3 Storage Tier Consistency Rules
+Soroban provides three distinct storage lifetime tiers: `instance()`, `persistent()`, and `temporary()`.
+
+- ❌ **Never move keys between storage tiers across upgrades:**
+  - If a key was stored in `instance()` (e.g., `DataKey::Admin`, `DataKey::Cfg`), it cannot be read from `persistent()`.
+  - If market records are stored in `persistent()` (`DataKey::Market(u64)`), querying them via `env.storage().instance()` returns `None`.
+- ⚠️ **TTL and Rent Preservation:**
+  - Upgrading contract WASM does **not** extend or reset the TTL of existing persistent entries.
+  - Critical keys must continue to invoke `env.storage().persistent().extend_ttl(...)` using `TTL_BUMP` (36.5 days) and `TTL_HIGH` (73 days) as specified in Issue #533 to prevent storage archival.
+
+---
+
+### 4. Storage Compatibility Classification Matrix
+
+| Modification | Storage Target | Status | Operational Impact & Mitigation |
+|---|---|:---:|---|
+| **Add new variant to `DataKey`** | Keys | ✅ **Compatible** | Zero risk to existing entries. |
+| **Move hardcoded constant to storage** | Instance Storage | ✅ **Compatible** | Safe when using `env.storage().instance().get(...).unwrap_or(CONSTANT)`. |
+| **Add new struct under new `DataKey`** | Values | ✅ **Compatible** | Safe when legacy keys are kept for fallback reads (Lazy Migration). |
+| **Rename / remove `DataKey` variant** | Keys | 🚨 **BREAKING** | Existing keys on ledger become permanently inaccessible. **Never do this.** |
+| **Add / remove / rename struct field** | Stored Values | 🚨 **BREAKING** | Deserialization of existing records fails with host contract error. |
+| **Change field primitive type** (`i128` ↔ `u64`) | Stored Values | 🚨 **BREAKING** | XDR decoding mismatch panics host VM. |
+| **Change storage tier** (`instance` ↔ `persistent`) | Storage Subsystem | 🚨 **BREAKING** | Entries in old tier are invisible to the new tier. |
+| **Remove legacy read fallback logic** | Logic | 🚨 **BREAKING** | Pre-upgrade records can no longer be parsed or claimed. |
+
+---
+
+### 5. State Migration Strategies & Design Patterns
+
+When upgrading smart contracts, use one of the following four approved design patterns to introduce new data layouts safely.
+
+#### Pattern A: Dual-Read with Hardcoded Default Fallback (Moving Constants to Storage)
+
+This pattern directly solves the requirement to make hardcoded constants (`SUBMITTER_BOND = 100 XLM`, `DISPUTER_BOND = 200 XLM`, `CHALLENGE_WINDOW = 86400`, `COUNCIL_WINDOW = 259200`) configurable via governance without breaking existing markets or requiring database backfills.
+
+##### Implementation:
+1. Define the new key in `DataKey`:
+   ```rust
+   pub enum DataKey {
+       // ... existing variants ...
+       SubmitterBond,
+       DisputerBond,
+       ChallengeWindow,
+       CouncilWindow,
+   }
+   ```
+2. Read the parameter using `.unwrap_or(DEFAULT_CONSTANT)`:
+   ```rust
+   pub fn get_submitter_bond(env: &Env) -> i128 {
+       env.storage().instance()
+           .get(&DataKey::SubmitterBond)
+           .unwrap_or(SUBMITTER_BOND) // Falls back safely to 100 XLM
+   }
+   ```
+3. Expose admin setters with sanity boundary checks:
+   ```rust
+   pub fn set_submitter_bond(env: Env, admin: Address, new_bond: i128) -> Result<(), MarketError> {
+       Self::require_admin(&env, &admin)?;
+       admin.require_auth();
+       if new_bond < MIN_BET {
+           return Err(MarketError::InvalidAmount);
+       }
+       env.storage().instance().set(&DataKey::SubmitterBond, &new_bond);
+       Ok(())
+   }
+   ```
+##### Why this is safe:
+- Unconfigured deployments and existing running markets continue using the proven constant value without any migration step.
+- When the admin sets a new bond, subsequent submissions use the updated value without invalidating past submissions.
+
+---
+
+#### Pattern B: Lazy Migration (The Proven "Lever A" Pattern)
+
+This pattern was successfully developed and verified in `contracts/referral_registry/src/lib.rs` and tested in `contracts/referral_registry/src/tests.rs` (`test_legacy_user_still_readable`).
+
+##### Problem:
+Legacy registration wrote three separate persistent keys per user:
+- `DataKey::Registered(Address)`
+- `DataKey::DisplayName(Address)`
+- `DataKey::Referrer(Address)`
+
+To save gas (Lever A), the contract packed these into a single `UserProfile` struct under `DataKey::Profile(Address)`.
+
+##### Solution (Lazy Fallback Architecture):
+1. **Retain Legacy Keys in `DataKey`:**
+   ```rust
+   pub enum DataKey {
+       Admin,
+       MarketContract,
+       // Legacy per-user keys (retained for fallback reads)
+       Referrer(Address),
+       DisplayName(Address),
+       Registered(Address),
+       // Modern packed entry
+       Profile(Address),
+   }
+   ```
+2. **Implement Fallback Read Resolver (`load_profile`):**
+   ```rust
+   fn load_profile(env: &Env, user: &Address) -> Option<UserProfile> {
+       // 1. Attempt to load from modern packed layout
+       if let Some(p) = env.storage().persistent()
+           .get::<DataKey, UserProfile>(&DataKey::Profile(user.clone())) {
+           return Some(p);
+       }
+
+       // 2. Fallback: Reconstruct profile from legacy storage keys
+       if env.storage().persistent().get::<DataKey, bool>(&DataKey::Registered(user.clone())).unwrap_or(false) {
+           let display_name = env.storage().persistent()
+               .get(&DataKey::DisplayName(user.clone()))
+               .unwrap_or_else(|| String::from_str(env, ""));
+           let referrer = env.storage().persistent().get(&DataKey::Referrer(user.clone()));
+           return Some(UserProfile { display_name, referrer });
+       }
+
+       None
+   }
+   ```
+3. **Write Modern Layout on Update/New Interaction:**
+   New registrations write `DataKey::Profile(user)` directly. When a legacy user updates their profile, write the modern `Profile(user)` key and optionally purge legacy keys.
+4. **Prevent Double Registration:**
+   `is_registered()` calls `load_profile()`, ensuring that legacy users cannot re-register under the new layout.
+
+---
+
+#### Pattern C: Bounded Batch Migration via Admin Function
+
+When state must be eagerly transformed (e.g. data reorganization required for a global index):
+
+1. **Transaction Footprint Limits:** Soroban restricts each transaction to a maximum footprint (40 ledger entries in Protocol 20/21). Never attempt an unbounded loop across all historical markets or users in a single transaction.
+2. **Cursor-Based Pagination:**
+   ```rust
+   pub fn migrate_market_batch(
+       env: Env,
+       admin: Address,
+       start_market_id: u64,
+       batch_size: u32,
+   ) -> Result<u64, MarketError> {
+       Self::require_admin(&env, &admin)?;
+       admin.require_auth();
+       
+       let limit = batch_size.min(25); // Cap to safe footprint
+       let mut processed = 0;
+       let mut next_id = start_market_id;
+
+       while processed < limit && next_id <= get_total_markets(&env) {
+           // Read legacy entry, write modern format
+           next_id += 1;
+           processed += 1;
+       }
+       Ok(next_id)
+   }
+   ```
+3. **Idempotence:** Every migration step must be safely re-runnable without corrupting data or duplicating balances.
+
+---
+
+#### Pattern D: Expand/Contract Versioned Enum Envelopes
+
+For complex structs that may evolve repeatedly over time, wrap stored values in a versioned enum:
+
+```rust
+#[contracttype]
+pub enum StoredMarket {
+    V1(MarketV1),
+    V2(MarketV2),
+}
+```
+
+- When reading, match on the variant: `match stored { StoredMarket::V1(m) => convert(m), StoredMarket::V2(m) => m }`.
+- When writing, always write the latest version (`StoredMarket::V2`).
+
+---
+
+### 6. Post-Upgrade Verification Checklist
+
+Execute these checks immediately following any upgrade before reopening public traffic:
+
+#### Phase A: Non-Mutating Read Simulation (`--send=no`)
+Perform simulations to verify ABI and deserialization without committing state or spending gas:
+
+```bash
+# 1. Query general contract state
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_market_count
+
+# 2. Query an existing legacy market created before the upgrade
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_market --market_id 1
+
+# 3. Query odds and bet totals
+stellar contract invoke --id $CONTRACT_ID --source admin --network $NETWORK --send=no -- get_odds --market_id 1
+
+# 4. In referral registry: verify legacy user reads correctly
+stellar contract invoke --id $REFERRAL_ID --source admin --network $NETWORK --send=no -- is_registered --user $KNOWN_LEGACY_USER
+```
+
+#### Phase B: State Mutation & Write Path Verification
+Execute a small on-chain transaction to verify execution and event emissions:
+1. Place a minimal bet (`1 XLM`) on an open market.
+2. Verify that `BetEntry` is written and `total_yes` or `total_no` updates correctly.
+3. Verify that `mkt` / `bet` events are emitted with unchanged topic and payload structures.
+
+#### Phase C: Indexer Synchronization Check
+1. Monitor indexer logs:
+   ```bash
+   docker compose -f infra/docker-compose.production.yml logs -f --tail=100 indexer
+   ```
+2. Confirm the indexer processes the post-upgrade ledger without JSON parsing or topic deserialization errors.
+3. Confirm database table `events` records the new event and indexer checkpoint advances monotonically.
+
+---
+
+### 7. Emergency Rollback Runbook
+
+If an issue is detected post-upgrade (e.g. deserialization failure, logic bug, or indexing incompatibility), execute an emergency rollback.
+
+#### Rollback Execution Command:
+```bash
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source admin \
+  --network "$NETWORK" \
+  -- upgrade \
+  --admin "$ADMIN_PUBLIC_KEY" \
+  --new_wasm_hash "$PREVIOUS_KNOWN_GOOD_WASM_HASH"
+```
+
+#### Rollback Safety Conditions:
+- ✅ **Safe to Roll Back:**
+  - If the upgrade strictly adhered to the **Storage Compatibility Rules** (only added new keys, used `.unwrap_or()` defaults, or used lazy migration fallbacks).
+  - The previous WASM can continue reading historical entries because existing keys and struct schemas were preserved.
+- 🚨 **Unsafe to Roll Back (Requires Forward Hotfix):**
+  - If the new WASM modified existing storage slots in a way that the previous WASM cannot deserialize.
+  - In this case, **do not downgrade** to the previous WASM. Instead, build and deploy a forward hotfix WASM that restores compatibility.
+
+---
+
+## Verification Checklist
+
+After deployment, verify each feature end-to-end:
+
+- [ ] Landing page loads with live stats
+- [ ] Markets page shows seed markets
+- [ ] Market detail page shows odds and betting panel
+- [ ] Wallet connects via Freighter / xBull / Albedo
+- [ ] Placing a bet succeeds (check transaction on Stellar Expert)
+- [ ] Leaderboard shows rankings
+- [ ] Profile page shows bet history after placing bets
+- [ ] Admin page accessible only by admin wallet
+- [ ] Resolving a market works
+- [ ] Claiming rewards works (winner gets XLM + points + tokens)
+- [ ] Referral registration works
+- [ ] Social sharing generates correct URLs
+- [ ] Certificate expiry monitor scheduled and reporting `ok` for every endpoint
+      (`python3 infra/cert-monitor/check-certs.py` — every active line green, no pending surprises)
+- [ ] Synthetic read-path monitor scheduled and reporting `ok` for every active path
+      (`python3 infra/synthetic-monitor/check-synthetic.py` — all paths green, pending slots listed,
+      and the scheduled GitHub workflow has run at least once from outside the deployment)
+
+---
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -612,262 +1093,5 @@ After deployment, verify each feature end-to-end:
 | `WASM too large` | Ensure `[profile.release]` has `opt-level = "z"` and `lto = true` |
 | `Wallet not connecting` | Ensure Freighter is on Testnet network |
 | `Build fails` | Run `rustup target add wasm32v1-none` (Stellar CLI v25+ requires this target) |
-
----
-
-## Incident Response
-
-The above table is for deploy-time hiccups. A **production incident** —
-anything that could lock or lose user funds (a stuck market holding stakes, a
-bond discrepancy, an unresolvable dispute) — follows the procedure in
-[`oracle/docs/COUNCIL_RUNBOOK.md` § "Incident Response"](../oracle/docs/COUNCIL_RUNBOOK.md#incident-response):
-
-- **Severity** — SEV1 (funds at risk/locked), SEV2 (degraded, no confirmed
-  fund impact), SEV3 (transient). **Anything touching user funds is SEV1.**
-  The aggregator's `oracle.aggregator.submit_failed` webhook carries the
-  computed `severity`.
-- **Escalation** — on-call operator is the Incident Commander; SEV1 pages the
-  IC + Oracle lead + Protocol/Funds owner, and any fund-movement action is
-  authorized through the council multisig, not a single key.
-- **User communication** — SEV1: first status within 1 hour, hourly updates,
-  a resolved post stating plainly whether funds were at risk or lost.
-- **Post-incident review** — blameless, within 5 business days of a SEV1/SEV2,
-  published, with owner-and-due-date action items tracked as
-  `production-readiness` issues; fund-safety fixes get a regression test
-  before close.
-
-### Status page & community channels
-
-Incident updates are posted to `<status page URL>` and the community channels
-below. Fill these in for your deployment:
-
-| Channel | URL | Used for |
-|---|---|---|
-| Status page | `<TBD>` | Authoritative incident status |
-| Discord / Telegram | `<TBD>` | User Q&A during an incident |
-| X / Twitter | `<TBD>` | Broad SEV1 announcements |
-
----
-
-## Oracle aggregator outage — graceful degradation
-
-Issue #645. If the oracle aggregator stops, markets stop resolving but the rest
-of the platform keeps working. The decision below is deliberate: **surface the
-delay honestly and keep the platform open**, rather than fail silently or lock
-users out.
-
-### Detection
-
-| Signal | Where | Meaning |
-|---|---|---|
-| `oracle_aggregator_unavailable_seconds` | oracle `/metrics` | Seconds since the last completed poll cycle once past the degraded threshold; `0` while healthy. From `AggregatorMetrics.serializeAvailability()`. |
-| `GET /health/live` on the aggregator | oracle health server | `503 { status: "dead" }` once `lastPollCompletedAt` is older than `MAX_POLL_STALE_MS`. |
-| `GET /resolution-status` | backend API | Backend-side inference — counts markets past `end_time + RESOLUTION_GRACE_SECONDS` that are still unresolved and not cancelled. `status`: `on_time` \| `delayed` \| `stalled`. Works even if the aggregator process is unreachable. |
-
-`assessAggregatorAvailability()` (`oracle/src/aggregator/metrics.ts`) is the
-shared definition of "too stale": degraded after 15 min, alert after 60 min
-(both overridable).
-
-### User-facing surface
-
-`GET /api/markets/resolution-status` returns the same `on_time` / `delayed` /
-`stalled` status plus `oldestOverdueSeconds` and `delayedMarketIds`. The
-frontend shows a banner on affected markets — *"Resolution is delayed. This
-market ended <n> ago and is awaiting the oracle."* A user discovering a stalled
-resolution themselves is far more damaging to trust than an acknowledged delay.
-
-### Decision: new markets during an outage
-
-**Market creation stays available.** Markets are created on-chain and the
-backend neither can nor should gate that. Instead:
-
-- the resolution-delay banner is shown at creation time and on every market
-  detail page while `status != on_time`;
-- if the outage is `stalled`, the frontend additionally warns before accepting a
-  new bet on an already-overdue market.
-
-Rationale: blocking creation pushes users to a worse, unmonitored path (raw
-contract calls) and gives no benefit — the honest signal does. Revisit only if
-an outage routinely exceeds the RPC event-retention window (see
-`docs/DEPLOYMENT-GUIDE.md` disaster-recovery notes), which would make new markets
-genuinely unresolvable.
-
-### Alerting
-
-Prometheus (add to `infra/prometheus/`):
-
-```yaml
-- alert: OracleAggregatorUnavailable
-  expr: oracle_aggregator_unavailable_seconds > 3600
-  for: 5m
-  labels: { severity: SEV2 }
-  annotations:
-    summary: "Oracle aggregator has not completed a poll in >1h"
-- alert: MarketResolutionStalled
-  expr: ipredict_resolution_oldest_overdue_seconds > 43200
-  for: 10m
-  labels: { severity: SEV2 }
-  annotations:
-    summary: "Oldest unresolved overdue market >12h — resolution stalled"
-```
-
-Escalate as SEV2 (degraded, no confirmed fund impact) unless a stalled market
-holds user stakes near a claim deadline, which is SEV1.
-
----
-
-## Database backups & verification
-
-Issue #647. The database holds all derived state — markets, bets, leaderboard,
-oracle submissions, audit records. An unverified backup is an assumption, not a
-recovery plan.
-
-### Procedure & schedule
-
-Operational detail lives in [`infra/README.md` § "Backups"](../infra/README.md#backups).
-Summary:
-
-| | What | When |
-|---|---|---|
-| Backup | `infra/scripts/backup.sh` — verified `pg_dump -Fc` + `.sha256`, 7-day retention, synced offsite | 03:15 daily (cron) |
-| Verification | `infra/scripts/verify-backup.sh` — restores the newest dump into a throwaway Postgres, checks it, tears it down | 04:15 daily (cron) |
-
-`verify-backup.sh` checks: every core table present; `pg_restore
---exit-on-error` clean (no partial restore); dump `schema_migrations` ≥ repo
-up-migration count (catches a stale backup); no orphaned `bets`. It exits
-non-zero and POSTs `{"type":"backup.verification_failed","severity":"SEV2"}` to
-`$BACKUP_ALERT_WEBHOOK_URL` on failure, and writes Prometheus metrics via
-`VERIFY_METRICS_FILE`.
-
-### Recovery objectives
-
-| Objective | Target | Measured by |
-|---|---|---|
-| **RPO** | ≤ 24h (≈ minutes effective — chain replay covers the gap) | `ipredict_backup_verify_dump_age_seconds` |
-| **RTO** | ≤ 1h | `ipredict_backup_verify_restore_seconds` + migrations + restart; confirm each DR drill |
-
-Record the last drill's observed RTO in `infra/README.md` § "Recovery
-objectives".
-
-### Alerting
-
-```yaml
-- alert: BackupVerificationFailing
-  expr: ipredict_backup_verify_success == 0 or time() - ipredict_backup_verify_timestamp_seconds > 172800
-  for: 15m
-  labels: { severity: SEV2 }
-  annotations:
-    summary: "DB backup verification failed or has not run in 48h"
-```
-
-The webhook alert (`backup.verification_failed`) is the primary signal; the
-Prometheus rule catches the case where the cron job itself stopped running.
-
----
-
-## Disaster recovery — full state reconstruction
-
-Issue #648. Most database state derives from on-chain events and is in principle
-rebuildable by replaying from the indexer. This section establishes what
-actually is, how long it takes, and where the boundary falls.
-
-### What is reconstructible from chain, and what is not
-
-| State | Table(s) | Reconstructible? | How / why not |
-|---|---|---|---|
-| Markets | `markets` | ✅ within RPC retention | Replayed from `market_created` / `market_resolved` / `market_cancelled` events by `runBackfill()`. |
-| Bets | `bets` | ✅ within RPC retention | Replayed from `bet_placed` events. `bet_count` is recomputed (`npm run backfill:bet-count`). |
-| Leaderboard | `leaderboard` | ✅ always (given `events`) | Pure fold over `events` — `npm run rebuild:leaderboard`. Holds no independent state. |
-| Raw events | `events` | ✅ within RPC retention only | `getEvents` serves a bounded window. Older ledgers cannot be re-fetched — see boundary below. |
-| Oracle submissions | `oracle_submissions` | ⚠️ partial | On-chain `resolve_market` / bond events give outcome + tx, but off-chain workflow fields (`status` transitions, `nonce`, `request_timestamp`, idempotency) are **not** on chain. |
-| Council votes | `council_votes` | ❌ not from chain | Phase 1.5 council votes are recorded off-chain before the on-chain finalize. Backup-only. |
-| Oracle disputes (workflow) | `oracle_disputes` | ⚠️ partial | Challenge/escalation exist on chain; `council_deadline`, internal status do not. |
-| Dead-letter events | `dead_letter_events` | ❌ (and not worth it) | Operational debug data; acceptable to lose. |
-| Idempotency keys / nonces | `idempotency_keys` | ❌ (and not worth it) | Short-TTL operational data; loss only re-opens a brief replay window. |
-| Token balances cache | `token_balances` | ✅ | Re-derivable from chain / re-fetch. |
-
-**Backup-only state** — `council_votes`, off-chain fields of
-`oracle_submissions` and `oracle_disputes` — is exactly the audit-class data
-with 7-year retention (`docs/DATA-RETENTION.md`). Losing it means losing the
-record of *how* a disputed market was decided. This is why the daily off-host
-backup is load-bearing and not merely a convenience.
-
-### The chain-retention boundary
-
-`getEvents` on the Soroban RPC only returns events within the provider's
-retention window (commonly ~7 days on public RPC; longer on a dedicated /
-archival node). Ledgers older than that **cannot** be replayed from chain at
-all. Consequences:
-
-- `events` older than the window → recoverable only from `events` /
-  `events_archive` in a backup.
-- The `events_archive` retention (400 days, migration `0018`) is deliberately
-  set well beyond any RPC window so the archive + a recent backup together
-  cover the full history.
-- Establish your RPC's actual retention and record it here: `<fill in>`.
-  If it is shorter than the backup interval, shorten the backup interval.
-
-`getBackfillCoverage()` (`indexer/src/backfill.ts`) reports the ledger range a
-replay can currently reach for a given database.
-
-### Reconstruction procedure (end to end)
-
-Pre-req: a Postgres instance with the schema applied (`db/migrate` or the
-`migrate` compose profile) but no data, `SOROBAN_RPC_URL` pointing at an RPC
-with the widest available retention, and `MARKET_CONTRACT_ID` set.
-
-1. **Restore the newest verified backup** if one exists (this is the primary
-   path — it recovers backup-only state too):
-   `infra/scripts/restore.sh -d "$DATABASE_URL" <dump>` then re-run migrations.
-   Skip to step 4 if the restore is complete and current.
-2. **Backfill events from chain** (fills gaps since the dump, or everything if
-   there is no dump):
-   `cd indexer && npm run build && node dist/index.js --backfill`
-   Repeat until `getBackfillCoverage().latestLedger` reaches the network head.
-3. **Recompute derived aggregates:**
-   `npm run backfill:bet-count` (bets → `markets.bet_count`), then
-   `npm run rebuild:leaderboard` (events → `leaderboard`).
-4. **Reconcile oracle/council state** that is not on chain: from the backup if
-   available; otherwise from the council audit exports
-   (`npm run audit:export` output kept in cold storage) and the
-   `oracle-monitor` alert history. Mark any market whose off-chain decision
-   record cannot be recovered for manual review before its claim deadline.
-5. **Verify:** run `infra/scripts/verify-backup.sh`-style checks against the
-   rebuilt DB — table row counts sane, no orphan bets, `schema_migrations`
-   current — then bring up the API and indexer (live polling) and confirm
-   `/readyz` and `/resolution-status`.
-
-### Measured rebuild time
-
-Fill in from a real drill (see below). Rough shape on testnet-scale data:
-
-| Step | What determines it | Observed |
-|---|---|---|
-| Restore backup | dump size, `restore_seconds` metric | `<fill in>` |
-| Backfill events | ledgers to replay, RPC rate limits (`fetchWithRetry` backs off on 429) | `<fill in>` |
-| `backfill:bet-count` | row count in `bets` | `<fill in>` |
-| `rebuild:leaderboard` | row count in `events` — `snapshot.durationMs` | `<fill in>` |
-| **Total** | | `<fill in>` — must be ≤ RTO (1h) |
-
-### Testing the procedure (non-production)
-
-Run this as a scheduled quarterly drill against staging, and after any change to
-the indexer's event handlers or the schema:
-
-```bash
-# 1. fresh scratch DB
-createdb ipredict_dr_drill
-DATABASE_URL=postgres://…/ipredict_dr_drill npm --prefix db run migrate
-
-# 2. reconstruct (no backup — worst case, chain only)
-cd indexer
-SOROBAN_RPC_URL=$ARCHIVAL_RPC MARKET_CONTRACT_ID=$MAINNET_MARKET_ID \
-  DATABASE_URL=postgres://…/ipredict_dr_drill node dist/index.js --backfill
-DATABASE_URL=…/ipredict_dr_drill npm run backfill:bet-count
-DATABASE_URL=…/ipredict_dr_drill npm run rebuild:leaderboard   # note durationMs
-
-# 3. diff against production (row counts, a sample of markets/bets, leaderboard top 50)
-```
-
-Record the date, the observed timings, the RPC retention window hit, and any
-state that did not reconstruct. Last drill: `<date>` — result: `<fill in>`.
+| Synthetic check fails but the site loads for you | The probe runs from outside the deployment — check DNS, TLS and the ingress from another network; that gap is exactly what the monitor is for |
+| `json=result.status missing` (HTTP 200) on `rpc-health` | The `/api/rpc` upstream is broken: the proxy forwards the JSON-RPC error body with status 200 — check `PUBLIC_RPC_URL` |

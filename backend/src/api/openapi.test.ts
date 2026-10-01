@@ -193,3 +193,33 @@ describe("GET /api/docs", () => {
     }
   });
 });
+
+/**
+ * Recursively sorts object keys so the snapshot only changes when the contract
+ * does. Arrays keep their order: element order (e.g. `required`, `tags`) can be
+ * meaningful, and reordering them is a real, reviewable change.
+ */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([k, v]) => [k, sortKeys(v)]),
+    );
+  }
+  return value;
+}
+
+describe("OpenAPI contract snapshot", () => {
+  it("matches the checked-in specification", async () => {
+    const spec = await fetchSpec();
+
+    // One JSON property per line in a plain file, so a contract change shows up
+    // as a normal line diff in the PR. To accept an intentional change run
+    // `npm run test:openapi:update` and commit the updated file (see README).
+    await expect(`${JSON.stringify(sortKeys(spec), null, 2)}\n`).toMatchFileSnapshot(
+      "./__snapshots__/openapi.spec.json",
+    );
+  });
+});

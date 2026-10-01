@@ -633,9 +633,9 @@ describe.skipIf(!dbAvailable)(
 
       // Seed market (id: 101) so foreign key constraints on oracle_submissions are satisfied
       await testApp.pool.query(
-        `INSERT INTO markets (id, question, end_time, total_yes, total_no, resolved, cancelled, creator, bet_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [101, "Will XLM reach $5 by 2027?", 1893456000, "0", "0", false, false, providerA.publicKey(), 0],
+        `INSERT INTO markets (id, question, end_time, total_yes, total_no, resolved, cancelled, creator, bet_count, category)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [101, "Will XLM reach $5 by 2027?", 1893456000, "0", "0", false, false, providerA.publicKey(), 0, "Crypto"],
       );
     });
 
@@ -713,3 +713,52 @@ describe.skipIf(!dbAvailable)(
     });
   },
 );
+
+describe("registerOracleRoutes - pool validation", () => {
+  it("should throw at registration time when neither pool nor dbOverride is provided", () => {
+    const server = Fastify();
+
+    expect(() => {
+      (registerOracleRoutes as any)(server);
+    }).toThrow(
+      "Oracle routes require a database pool. Pass options.pool to buildServer or dbOverride to registerOracleRoutes.",
+    );
+  });
+
+  it("should not throw when pool is provided", () => {
+    const server = Fastify();
+    const mockPool = {
+      query: () => Promise.resolve({ rows: [] }),
+    };
+
+    expect(() => {
+      registerOracleRoutes(server, mockPool as any);
+    }).not.toThrow();
+  });
+
+  it("should not throw when dbOverride is provided", () => {
+    const server = Fastify();
+    const mockDb = {
+      query: () => Promise.resolve({ rows: [] }),
+    };
+
+    expect(() => {
+      registerOracleRoutes(server, undefined as any, mockDb);
+    }).not.toThrow();
+  });
+
+  it("should not throw when both pool and dbOverride are provided", () => {
+    const server = Fastify();
+    const mockPool = {
+      query: () => Promise.resolve({ rows: [] }),
+    };
+    const mockDb = {
+      query: () => Promise.resolve({ rows: [] }),
+    };
+
+    expect(() => {
+      registerOracleRoutes(server, mockPool as any, mockDb);
+    }).not.toThrow();
+  });
+});
+

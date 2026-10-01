@@ -20,6 +20,7 @@
 import { Pool } from "pg";
 import { checkBondMinimumFromDb } from "../aggregator/bond-monitor.js";
 import {
+  checkCouncilDeadlineApproachingFromDb,
   checkCouncilInactivityFromDb,
   checkCouncilWindowExceededFromDb,
 } from "../aggregator/council-inactivity-monitor.js";
@@ -41,6 +42,7 @@ export interface MonitorCycleResult {
   lowBonds: number;
   councilInactive: number;
   councilWindowExceeded: number;
+  councilDeadlineApproaching: number;
 }
 
 export function totalAlerts(result: MonitorCycleResult): number {
@@ -50,7 +52,8 @@ export function totalAlerts(result: MonitorCycleResult): number {
     result.disputeEscalations +
     result.lowBonds +
     result.councilInactive +
-    result.councilWindowExceeded
+    result.councilWindowExceeded +
+    result.councilDeadlineApproaching
   );
 }
 
@@ -159,7 +162,7 @@ export async function runMonitorCycle(
   const markets = await listExpiredUnresolvedMarkets(pool, nowSeconds);
   const stuck = detectStuckMarkets(markets, nowSeconds, config.STUCK_MARKET_HOURS);
 
-  const [newSubmissions, escalations, lowBonds, inactive, windowExceeded] = await Promise.all([
+  const [newSubmissions, escalations, lowBonds, inactive, windowExceeded, deadlineApproaching] = await Promise.all([
     submissionWatcher.poll(),
     disputeWatcher.poll(),
     checkBondMinimumFromDb(pool, {
@@ -169,6 +172,7 @@ export async function runMonitorCycle(
       inactivityThresholdHours: config.COUNCIL_INACTIVITY_HOURS,
     }),
     checkCouncilWindowExceededFromDb(pool, now),
+    checkCouncilDeadlineApproachingFromDb(pool, now, config.COUNCIL_DEADLINE_WARNING_HOURS),
   ]);
 
   return {
@@ -178,6 +182,7 @@ export async function runMonitorCycle(
     lowBonds: await emitAll("oracle.monitor.bond_below_minimum", lowBonds),
     councilInactive: await emitAll("oracle.monitor.council_inactive", inactive),
     councilWindowExceeded: await emitAll("oracle.monitor.council_window_exceeded", windowExceeded),
+    councilDeadlineApproaching: await emitAll("oracle.monitor.council_deadline_approaching", deadlineApproaching),
   };
 }
 

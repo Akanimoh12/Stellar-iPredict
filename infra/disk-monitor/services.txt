@@ -1,0 +1,29 @@
+# iPredict stateful-service inventory — read by infra/disk-monitor/check-disk.py
+#
+# One stateful service per line, five '|'-separated fields:
+#
+#   name | type | target | owner | mode
+#
+#   name      unique, lowercase, used in alerts and in the state file
+#   type      postgres | redis | elasticsearch | mount
+#   target    filesystem path to check (e.g. /var/lib/postgresql/data)
+#   owner     team/human to ping when an alert fires
+#   mode      active = checked on every run
+#             pending = known service not yet deployed; printed on every run
+#                       so it cannot be forgotten, never alerts
+#
+# Adding a service: add a line here in the same PR that deploys the service.
+# A service missing from this file is a service nobody is watching.
+
+[postgres]
+# Primary PostgreSQL database — stores events, dead letter events, oracle
+# submissions, and audit records. No retention policy means unbounded growth.
+postgres-data | postgres | /var/lib/postgresql/data | platform | active
+
+[redis]
+# Redis cache and session store.
+redis-data | redis | /var/lib/redis | platform | active
+
+[mount]
+# Additional mount points that need monitoring.
+# Add lines here for any new stateful volume.

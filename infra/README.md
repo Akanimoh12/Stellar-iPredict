@@ -1,5 +1,11 @@
 # Infrastructure
 
+## Certificate expiry monitoring (`cert-monitor/`)
+
+An expired TLS certificate takes iPredict offline instantly — every browser and
+every API client refuses the connection — and expiry is 100% predictable. This
+directory is the thing that watches the expiry date so nobody has to remember
+it.
 ## Disk-space and database-growth monitoring (`disk-monitor/`)
 
 A full disk takes the database down hard — and recovery is considerably harder
@@ -10,6 +16,119 @@ time-to-full** so there is enough lead time to act.
 ```
 infra/
 ├── README.md                     ← you are here
+└── cert-monitor/
+    ├── check-certs.py            monitor (Python 3 stdlib only)
+    ├── endpoints.txt             inventory of every certificate-bearing endpoint
+    ├── cert-monitor.env.example  alert-channel / internal-CA configuration
+    └── systemd/
+        ├── ipredict-cert-monitor.service
+        └── ipredict-cert-monitor.timer
+```
+
+Renewal itself is documented in
+[`docs/DEPLOYMENT-GUIDE.md` → Certificate Renewal Procedure](../docs/DEPLOYMENT-GUIDE.md#certificate-renewal-procedure).
+
+### What is monitored
+
+Everything that presents a certificate, in `cert-monitor/endpoints.txt`:
+
+| Section | What it covers | Examples |
+|---|---|---|
+| `[public]` | Internet-facing TLS: the site, every custom domain, the API host | `ipredict-stellar.vercel.app`, apex/www, `api.` |
+| `[internal]` | Internal services that speak TLS (private CA, mTLS, admin/oracle ports) | oracle API on `:8443`, mesh/mTLS, ops dashboards |
+| `[internal]` `file:` targets | Certificates that are not reachable over the network but are mounted on disk | `/etc/ipredict/certs/*.crt` (internal CA chain, client certs) |
+
+Two shapes of target, both checked on every run:
+
+* `host:port` — full TLS handshake (SNI honoured), so the certificate **as
+  clients actually receive it** is the one measured. Also verifies the chain
+  and hostname for `[public]` endpoints.
+* `file:/path/*.pem` — reads the PEM/DER file directly (glob allowed). This is
+  how internal/MTLS certificates that never answer on a public socket are still
+  covered.
+
+A line that is not yet deployed is marked `pending`: it is printed on every run
+so it cannot be quietly forgotten, but it never produces a false alert. When
+the service ships, the PR that deploys it flips `pending` → `active`.
+
+> **Rule: no endpoint may exist without a line in `endpoints.txt`.** A service
+> with no inventory line is a service nobody is watching.
+
+### Alert escalation
+
+Thresholds are crossed once per certificate and each crossing fires exactly one
+alert — state is remembered between runs, so a run every 10 minutes does not
+become a run every 10 minutes of noise.
+
+| Days to expiry | Level | Channels | Exit code |
+|---|---|---|---|
+| > 30 | `ok` | none (logged in the report) | 0 |
+| ≤ 30 | **MEDIUM** | chat webhook | 0 (1 with `--fail-on any`) |
+| ≤ 14 | **HIGH** | chat webhook + email | 0 (1 with `--fail-on any`) |
+| ≤ 7 | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| expired | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| check failed (DNS/conn/file) | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+| monitor gap > 48 h | **CRITICAL** | chat webhook + email + non-zero exit | **2** |
+
+Why 30/14/7: a single alert at T-7 lands in someone's holiday. 30 days is the
+"confirm the automation is armed" nudge, 14 days is "verify it fired or fire it
+by hand", 7 days is "do it now, page the on-call". Criticals are re-sent every
+24 h until cleared so they survive on-call handovers.
+
+Extras that keep the monitor honest:
+
+* **Renewal notices** — when a certificate's fingerprint changes, a `RENEWED`
+  (or `RECOVERED`) notice is printed. Silence between two expiry alerts means
+  automation worked; the notice is the proof. A renewal that does *not* move
+  the level back to `ok` alerts immediately ("replacement certificate is
+  already near expiry").
+* **Watchdog gap** — if the previous run is older than `--stale-after-hours`
+  (default 48 h), the run reports the gap as CRITICAL. Catches a dead cron
+  job / disabled timer while the rest of the system is fine.
+* **External dead-man's-switch** — point `CERT_MONITOR_HEARTBEAT_URL` at
+  healthchecks.io (or similar): if *every* scheduler dies, that service is the
+  one left to notice.
+* **Scheduled CI** — `.github/workflows/cert-monitor.yml` runs the same check
+  daily on a clean runner and publishes a report to the job summary. A failed
+  scheduled run notifies everyone watching the repository, which is an alert
+  channel this host does not control.
+
+### Install
+
+Everything is stdlib Python 3.9+ — no packages, no virtualenv.
+
+```bash
+# 1. look at what it would say today
+python3 infra/cert-monitor/check-certs.py --self-test     # offline assertions
+python3 infra/cert-monitor/check-certs.py --dry-run       # real checks, no delivery
+
+# 2. pick an alert channel (any subset)
+cp infra/cert-monitor/cert-monitor.env.example /etc/ipredict/cert-monitor.env
+$EDITOR /etc/ipredict/cert-monitor.env
+
+# 3a. systemd (recommended)
+sudo cp infra/cert-monitor/systemd/ipredict-cert-monitor.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ipredict-cert-monitor.timer
+systemctl list-timers ipredict-cert-monitor.timer
+
+# 3b. or cron
+echo '17 6 * * * python3 /opt/ipredict/infra/cert-monitor/check-certs.py --fail-on critical' | crontab -
+
+# 3c. or the scheduled GitHub Actions workflow (already in the repo — just
+#     add the CERT_MONITOR_WEBHOOK_URL secret)
+```
+
+The first run stores its state (default
+`$XDG_STATE_HOME/ipredict-cert-monitor/state.json`, override with
+`CERT_MONITOR_STATE_FILE`); later runs only alert on escalation.
+
+### Configuration
+
+Read from the environment (see `cert-monitor/cert-monitor.env.example`):
+
+| Variable | Purpose |
+|---|---|
 └── disk-monitor/
     ├── check-disk.py             monitor (Python 3 stdlib only)
     ├── services.txt              inventory of every stateful service
@@ -600,6 +719,14 @@ CLI flags: `--dry-run`, `--force` (re-send everything currently in alert),
 
 | Symptom | Cause / fix |
 |---|---|
+| `inventory error: … expected 6 fields` | a line in `endpoints.txt` is missing a `\|` separator — see the header comment in that file |
+| `no certificate files match …` CRITICAL | a `file:` target points at a path that does not exist on this host, or the deployment never wrote the cert |
+| `verify: failed: certificate has expired` | renewal did not happen — follow the renewal procedure immediately |
+| `verify: failed: self-signed certificate` on an `[public]` endpoint | wrong/missing chain in production; the public endpoint must present a publicly trusted certificate |
+| `verify: skipped (internal, no CERT_MONITOR_CA_FILE)` | expected until you set the internal CA bundle; expiry is still monitored |
+| Alerts repeat every run | state file was deleted or the job runs on ephemeral runners without cache — restore `CERT_MONITOR_STATE_FILE`, or accept re-alerts on a clean runner |
+| `WATCHDOG: monitor did not run …` | timer/cron disabled, host was down, or CI schedule paused — fix the schedule, then `--force` |
+| No alerts at all but nothing ran | check `systemctl list-timers ipredict-cert-monitor.timer` / crontab, and point `CERT_MONITOR_HEARTBEAT_URL` at a dead-man's-switch |
 | `inventory error: … expected 8 fields` | a line in `paths.txt` is missing a `\|` separator — see the header comment in that file |
 | `… is not a read-only RPC method` | a POST check tried to use a write/tx-polling method; use a read method from the allowlist |
 | `detail: body is not JSON` on `rpc-health` | the proxy returned an HTML error page — check the Vercel deployment / edge logs |

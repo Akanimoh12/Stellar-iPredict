@@ -3,6 +3,9 @@
 > **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
 > [Stuck Market Runbook](../oracle/docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
 > and maps which runbook covers what. This file covers a merged overview of the council and optimistic oracle runbooks.
+>
+> **Looking for the full alert → runbook map?** See the
+> [Runbook Index](./RUNBOOK_INDEX.md).
 
 > End-to-end operational procedures for the iPredict oracle system — council
 > resolution (Phase 1.5) and optimistic oracle (Phase 2).
@@ -12,6 +15,15 @@
 > **Source of truth:** `contracts/prediction_market/src/lib.rs` (constants),  
 > `oracle/src/` (off-chain services), `oracle_submissions` / `council_votes`
 > tables (DB).
+>
+> **Runbook locations** — all runbooks now live in `oracle/docs/` or `docs/`:
+>
+> | File | Contents |
+> |---|---|
+> | [`oracle/docs/STUCK_MARKET_RUNBOOK.md`](../oracle/docs/STUCK_MARKET_RUNBOOK.md) | Primary on-call procedure for `oracle.monitor.market_stuck` |
+> | [`oracle/docs/COUNCIL_RUNBOOK.md`](../oracle/docs/COUNCIL_RUNBOOK.md) | Council voting, severity levels, incident response |
+> | [`oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md`](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md) | Bonded oracle: submit, challenge, finalize |
+> | [`oracle/docs/COUNCIL_FLOW_RUNBOOK.md`](../oracle/docs/COUNCIL_FLOW_RUNBOOK.md) | Manual council flow (QA / testnet) |
 
 ---
 
@@ -641,7 +653,7 @@ Every state transition publishes a typed event. Topics are
 ## See Also
 
 - [`docs/ORACLE_AND_BACKEND.md`](./ORACLE_AND_BACKEND.md) — full architecture, bond constants, event schema
-- [`oracle/src/OPTIMISTIC_ORACLE_RUNBOOK.md`](../oracle/src/OPTIMISTIC_ORACLE_RUNBOOK.md) — optimistic oracle operational detail
+- [`oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md`](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md) — optimistic oracle operational detail
 - [`oracle/docs/COUNCIL_RUNBOOK.md`](../oracle/docs/COUNCIL_RUNBOOK.md) — council vote flow and audit export
 - [`oracle/src/ORACLE_SECURITY_CHECKLIST.md`](../oracle/src/ORACLE_SECURITY_CHECKLIST.md) — PR review checklist for oracle changes
 - [`oracle/test/`](../oracle/test/) — unit tests for all oracle components

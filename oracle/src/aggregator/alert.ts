@@ -65,6 +65,62 @@ function meetsMinSeverity(sev: Severity, minSev: Severity): boolean {
   return SEVERITY_RANK[sev] <= SEVERITY_RANK[minSev];
 }
 
+// ── Severity ──────────────────────────────────────────────────────────────────
+
+/**
+ * SEV1 — user funds at risk (bond discrepancy, unresolved market with funds locked).
+ * SEV2 — persistent, non-fund failure (5+ consecutive submit failures).
+ * SEV3 — likely transient (few failures, circuit breaker open but no fund risk).
+ */
+export type AlertSeverity = "SEV1" | "SEV2" | "SEV3";
+
+const SEVERITY_ORDER: AlertSeverity[] = ["SEV3", "SEV2", "SEV1"];
+
+function severityIndex(s: AlertSeverity): number {
+  return SEVERITY_ORDER.indexOf(s);
+}
+
+function meetsMinSeverity(actual: AlertSeverity, min: AlertSeverity): boolean {
+  return severityIndex(actual) >= severityIndex(min);
+}
+
+// ── Alert payload ─────────────────────────────────────────────────────────────
+
+export interface AlertPayload {
+  marketId?: string;
+  attempts?: number;
+  error?: Error | unknown;
+  holdsFunds?: boolean;
+  /** Additional free-form context fields. */
+  [key: string]: unknown;
+}
+
+/** A complete alert ready to route. */
+export interface Alert {
+  type: string;
+  severity: AlertSeverity;
+  /** The entity this alert concerns — used as the deduplication key alongside `type`. */
+  entityId: string;
+  payload: AlertPayload;
+  /** ISO-8601 timestamp when this occurrence was first detected. */
+  firedAt: string;
+  /** True when this notification is a resolution (the condition cleared). */
+  resolved?: boolean;
+  /**
+   * Groups alerts of the same (type, severity) detected in the same poll cycle.
+   * Consumers can thread webhook messages by this value.
+   */
+  groupKey?: string;
+  /**
+   * Direct link to the runbook procedure for this alert type. Embedded in
+   * every webhook payload so an engineer has the procedure at hand without
+   * needing to search for documentation.
+   */
+  runbook_url?: string;
+}
+
+// ── Classify severity ─────────────────────────────────────────────────────────
+
 /**
  * Classify a persistent submission failure.
  *
@@ -378,6 +434,8 @@ export function alertBondReconciliationFailure(
   }
 }
 
+// ── createWebhookAlertSender (used by alert.test.ts + index.ts) ───────────────
+
 /**
  * Helper to deliver bond alerts to webhook (fire-and-forget)
  */
@@ -438,6 +496,8 @@ export function alertCircuitBreakerOpen(
     });
   }
 }
+
+// ── createAmbiguousTallyAlertSender ──────────────────────────────────────────
 
 /**
  * Alert when a market is stuck past resolution lag threshold (Issue #571)

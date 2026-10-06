@@ -1,12 +1,8 @@
 # Optimistic Oracle Runbook
 
-> **This file has moved.**
-> The canonical location is [`oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md`](../../docs/OPTIMISTIC_ORACLE_RUNBOOK.md).
-> This copy is kept so existing bookmarks and editor jumps still resolve, but
-> the authoritative version is in `oracle/docs/`. Please update any links.
-
 > **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
-> [Stuck Market Runbook](../../docs/STUCK_MARKET_RUNBOOK.md).
+> [Stuck Market Runbook](../docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers the bonded optimistic oracle: submit, challenge and finalize.
 
 This runbook documents the end-to-end operational procedures for the iPredict
 optimistic oracle: **submit**, **challenge**, and **finalize** operations. It
@@ -14,8 +10,8 @@ is the primary reference for operators, on-call engineers, and council members
 exercising these flows in testnet or production.
 
 Related reference: [`docs/ORACLE_AND_BACKEND.md`](../../docs/ORACLE_AND_BACKEND.md)  
-Security checklist: [`oracle/src/ORACLE_SECURITY_CHECKLIST.md`](./ORACLE_SECURITY_CHECKLIST.md)  
-Council finalization flow: [`oracle/src/aggregator/COUNCIL_FLOW_RUNBOOK.md`](./aggregator/COUNCIL_FLOW_RUNBOOK.md)
+Security checklist: [`oracle/src/ORACLE_SECURITY_CHECKLIST.md`](../src/ORACLE_SECURITY_CHECKLIST.md)  
+Council finalization flow: [`oracle/docs/COUNCIL_FLOW_RUNBOOK.md`](./COUNCIL_FLOW_RUNBOOK.md)
 
 ---
 
@@ -544,6 +540,6 @@ required.
 ## See Also
 
 - [`docs/ORACLE_AND_BACKEND.md`](../../docs/ORACLE_AND_BACKEND.md) — architecture, bond constants, event schema, data source priority
-- [`oracle/src/ORACLE_SECURITY_CHECKLIST.md`](./ORACLE_SECURITY_CHECKLIST.md) — PR review checklist for any oracle change
-- [`oracle/src/aggregator/COUNCIL_FLOW_RUNBOOK.md`](./aggregator/COUNCIL_FLOW_RUNBOOK.md) — council vote flow and audit export
+- [`oracle/src/ORACLE_SECURITY_CHECKLIST.md`](../src/ORACLE_SECURITY_CHECKLIST.md) — PR review checklist for any oracle change
+- [`oracle/docs/COUNCIL_FLOW_RUNBOOK.md`](./COUNCIL_FLOW_RUNBOOK.md) — council vote flow and audit export
 - `oracle/test/` — unit tests for all components referenced in this runbook

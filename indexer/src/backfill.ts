@@ -2,6 +2,15 @@ import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "./config/index.js";
 import { pool } from "./db.js";
 import { insertProcessedEvent } from "./handlers/idempotency.js";
+import {
+  isRetentionExceededError,
+  extractOldestLedger,
+  formatRetentionExceededMessage,
+  RetentionExceededError,
+  checkRetentionBoundary,
+  DEFAULT_RETENTION_ALERT_THRESHOLD,
+} from "./rpc/getEvents.js";
+import { jitteredDelayMs } from "./rpc/retry.js";
 
 /**
  * Backfill as a recovery path.
@@ -55,19 +64,65 @@ export function isRateLimitError(err: any): boolean {
   return msg.includes("429") || msg.includes("too many requests") || msg.includes("rate limit");
 }
 
-// Retry wrapper with exponential backoff
+/**
+ * Injected randomness for retry jitter (issue #503). Defaults to
+ * `Math.random`; tests override it with a seeded source for deterministic
+ * assertions. Exposed on the options object of {@link fetchWithRetry}.
+ */
+export type RandomSource = () => number;
+
+const defaultRandom: RandomSource = () => Math.random();
+
+/**
+ * Sample the jittered delay for one retry attempt, using full jitter
+ * (a uniform draw in `[0, ceiling)`).
+ *
+ * Re-exported from the shared RPC retry helper so the backfill fetcher and the
+ * poll loop apply identical jitter semantics; kept exported (and pure) so tests
+ * can assert the distribution without driving whole retries (issue #503).
+ */
+export const jitteredBackoffDelay = (ceilingMs: number, random: RandomSource): number =>
+  jitteredDelayMs(ceilingMs, random);
+
+/**
+ * Retry wrapper with exponential backoff and per-attempt full jitter.
+ *
+ * The delay before attempt `n` is drawn uniformly from
+ * `[0, min(delay * 2^n, MAX_RETRY_DELAY_MS))` — computed fresh for every
+ * attempt, never once per retry sequence. Deterministic doubling alone made
+ * every client that hit a 429 retry in lockstep (a synchronised burst exactly
+ * when the endpoint was least able to serve it); the random draw de-synchronises
+ * concurrent indexers and the oracle aggregator sharing an RPC endpoint while
+ * keeping the exponential growth and the hard ceiling intact (issue #503).
+ *
+ * The RNG is injectable so tests can seed it and assert exact delays.
+ */
+const MAX_RETRY_DELAY_MS = 30_000;
+
 export async function fetchWithRetry<T>(
   fn: () => Promise<T>,
   retries = 5,
-  delay = 1000
+  delay = 1000,
+  random: RandomSource = defaultRandom,
 ): Promise<T> {
   try {
     return await fn();
   } catch (error) {
+    if (isRetentionExceededError(error)) {
+      throw error;
+    }
     if (isRateLimitError(error) && retries > 0) {
-      console.warn(`[backfill] Rate limited (429). Retrying in ${delay}ms... (Retries left: ${retries})`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return fetchWithRetry(fn, retries - 1, delay * 2);
+      const ceilingMs = Math.min(delay, MAX_RETRY_DELAY_MS);
+      // Full jitter: a fresh uniform draw in [0, ceiling) per attempt.
+      const waitMs = jitteredBackoffDelay(ceilingMs, random);
+      console.warn(
+        `[backfill] Rate limited (429). Retrying in ${waitMs}ms ` +
+        `(ceiling ${ceilingMs}ms, retries left: ${retries})...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      // The ceiling keeps growing exponentially; the jitter is redrawn for it
+      // on the next attempt.
+      return fetchWithRetry(fn, retries - 1, delay * 2, random);
     }
     throw error;
   }
@@ -103,6 +158,58 @@ async function insertDeadLetterEvent(
   } catch (error) {
     console.error(`[backfill] Failed to insert dead-letter event: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Number of events processed per chunk within a single RPC page.
+ *
+ * Events are decoded and written one at a time, but processing them in
+ * chunks lets us yield to the event loop between chunks so the GC can
+ * reclaim already-processed events and the process stays responsive
+ * (metrics, health checks, shutdown) even when a page is large.
+ */
+export const EVENTS_PROCESSING_CHUNK_SIZE = 50;
+
+/**
+ * Process a page of events in bounded chunks rather than materialising the
+ * whole page's decoded representation at once.
+ *
+ * The raw RPC page is already in memory (the SDK parses the full JSON
+ * response), so peak memory is primarily bounded by `EVENTS_PER_PAGE` (see
+ * `MAX_EVENTS_PER_PAGE` in `config/index.ts`). This chunked loop ensures we
+ * never hold more than `chunkSize` decoded events at a time and yields to
+ * the event loop between chunks.
+ */
+export async function processEventsInChunks(
+  events: rpc.Api.EventResponse[],
+  chunkSize: number = EVENTS_PROCESSING_CHUNK_SIZE,
+  processor: (event: rpc.Api.EventResponse, eventIndex: number) => Promise<void>,
+): Promise<void> {
+  if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    throw new Error("chunkSize must be a positive integer");
+  }
+  for (let i = 0; i < events.length; i += chunkSize) {
+    const chunk = events.slice(i, i + chunkSize);
+    for (const [chunkIndex, event] of chunk.entries()) {
+      await processor(event, i + chunkIndex);
+    }
+    // Yield to the event loop between chunks so processed events can be
+    // GC'd and the process can service other work (metrics, shutdown).
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Sample current process memory usage for logging/observability.
+ */
+export function sampleMemoryUsage(): { rss: number; heapUsed: number; heapTotal: number; external: number } {
+  const m = process.memoryUsage();
+  return {
+    rss: m.rss,
+    heapUsed: m.heapUsed,
+    heapTotal: m.heapTotal,
+    external: m.external,
+  };
 }
 
 // Parse and write a single event to the database
@@ -182,6 +289,24 @@ export async function runBackfill(): Promise<number> {
 
   console.log(`[backfill] Network head ledger is ${headLedger}. Starting backfill from ${config.START_LEDGER}...`);
 
+  // Proactively check retention boundary if getHealth is supported
+  if (typeof (server as any).getHealth === "function") {
+    try {
+      const health = await (server as any).getHealth();
+      const oldestLedger = Number(health?.oldestLedger);
+      if (!isNaN(oldestLedger)) {
+        if (config.START_LEDGER < oldestLedger) {
+          const { message, unavailableRange } = formatRetentionExceededMessage(config.START_LEDGER, oldestLedger);
+          console.error(message);
+          throw new RetentionExceededError(config.START_LEDGER, oldestLedger, message, unavailableRange);
+        }
+        await checkRetentionBoundary(server, config.START_LEDGER, DEFAULT_RETENTION_ALERT_THRESHOLD);
+      }
+    } catch (err) {
+      if (err instanceof RetentionExceededError) throw err;
+    }
+  }
+
   await ensureDeadLetterTable();
 
   let currentLedger = config.START_LEDGER;
@@ -204,9 +329,27 @@ export async function runBackfill(): Promise<number> {
       `[backfill] Fetching events page: ${cursor ? `cursor=${cursor}` : `startLedger=${currentLedger}`} (limit=${config.EVENTS_PER_PAGE})`
     );
 
-    const response: rpc.Api.GetEventsResponse = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
-      return await server.getEvents(request);
-    });
+    let response: rpc.Api.GetEventsResponse;
+    try {
+      response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
+        return await server.getEvents(request);
+      });
+    } catch (err: any) {
+      if (isRetentionExceededError(err)) {
+        const msg = err instanceof Error ? err.message : String(err);
+        let oldestLedger = extractOldestLedger(msg);
+        if (oldestLedger === null && typeof (server as any).getHealth === "function") {
+          try {
+            const health = await (server as any).getHealth();
+            oldestLedger = Number(health?.oldestLedger);
+          } catch {}
+        }
+        const { message, unavailableRange } = formatRetentionExceededMessage(currentLedger, oldestLedger);
+        console.error(message);
+        throw new RetentionExceededError(currentLedger, oldestLedger, message, unavailableRange);
+      }
+      throw err;
+    }
     const events = response.events || [];
 
     if (events.length === 0) {
@@ -221,7 +364,8 @@ export async function runBackfill(): Promise<number> {
     }
 
     console.log(`[backfill] Processing ${events.length} events...`);
-    for (const [eventIndex, event] of events.entries()) {
+    const pageStartMem = sampleMemoryUsage();
+    await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
       let topics: any[];
       let data: any;
       try {
@@ -230,14 +374,22 @@ export async function runBackfill(): Promise<number> {
       } catch (err) {
         console.error(`[backfill] Failed to decode event: `, err);
         await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
-        continue;
+        return;
       }
       await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
-    }
+    });
+    const pageEndMem = sampleMemoryUsage();
+    console.log(
+      `[backfill] Page memory: heapUsed=${(pageEndMem.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+      `rss=${(pageEndMem.rss / 1024 / 1024).toFixed(1)}MB ` +
+      `heapDelta=${((pageEndMem.heapUsed - pageStartMem.heapUsed) / 1024 / 1024).toFixed(1)}MB`
+    );
 
     const lastEventLedger = events[events.length - 1].ledger;
     currentLedger = lastEventLedger;
     cursor = response.cursor;
+
+    await checkRetentionBoundary(server, currentLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
 
     console.log(`[backfill] Processed events up to ledger ${lastEventLedger}`);
 

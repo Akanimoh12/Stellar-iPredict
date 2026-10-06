@@ -1,7 +1,10 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
-export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig } from "./resolve.js";
+export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig, RawPayloadSink } from "./resolve.js";
 export { FileProvenanceStore, InMemoryProvenanceStore } from "./provenance.js";
 export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
+export { NormalizationError } from "./normalize.js";
+export type { NormalizedOutcome, RawPayloadByCategory } from "./normalize.js";
+export { normalizeOutcome } from "./normalize.js";
 export {
   ADAPTER_API_KEY_ENV,
   loadAdapterApiKeys,
@@ -11,6 +14,7 @@ export type { AdapterApiKeyName, AdapterApiKeys, AdapterEnvironment } from "./co
 
 export type { AdapterMarketCategory as MarketCategory } from "@ipredict/shared";
 import type { AdapterMarketCategory } from "@ipredict/shared";
+import type { QuoteStatus } from "./freshness.js";
 
 /** Comparator applied between the fetched value and `params.threshold` for threshold-style markets. */
 export type ThresholdComparator = "gte" | "lte";
@@ -29,6 +33,15 @@ export interface PoliticsMarketParams {
   expectedOutcome: string;
 }
 
+export interface SportsMarketParams {
+  sportKey: string;
+  homeTeam: string;
+  awayTeam: string;
+  selectedTeam: string;
+  eventId?: string;
+  season?: string;
+}
+
 export interface Market {
   id: string;
   category: AdapterMarketCategory;
@@ -37,16 +50,58 @@ export interface Market {
   params: Record<string, unknown>;
 }
 
+/**
+ * Provenance metadata for a provider fetch.
+ *
+ * `AdapterOutcome.raw` holds the response body, but a body alone is not
+ * evidence: without knowing *who* answered, *what we asked*, and *when* they
+ * answered, a reviewer cannot tell a genuine reading from a stale cache hit or
+ * from the wrong market's response being attributed here. These three fields
+ * make the payload attributable, and are what `adapter_raw_payloads` persists.
+ */
+export interface AdapterProvenance {
+  /** Provider/adapter identity, e.g. `"binance"`. Defaults to the adapter id. */
+  provider?: string;
+  /** The request that produced this response (URL, params, query). Redacted before storage. */
+  request?: unknown;
+  /** When the provider responded, ISO-8601. */
+  respondedAt?: string;
+}
+
 export interface AdapterOutcome {
   outcome: boolean;
   /** 0-1 confidence in the outcome, for weighting/aggregation upstream. */
   confidence: number;
   /** Raw provider payload, kept for audit/dispute review. */
   raw: unknown;
+  /**
+   * Attributable fetch metadata (who/what/when) to persist alongside `raw`.
+   * Optional so existing adapters keep working; `fetchSource` fills in
+   * `provider` and `respondedAt` when an adapter omits them.
+   */
+  provenance?: AdapterProvenance;
   /** Provider reports that the event cannot settle normally. */
   cancellation?: {
     reason: "postponed" | "cancelled";
     message?: string;
+  };
+  /**
+   * How old the underlying observation was, when the adapter can tell
+   * (issue #744). Present on price adapters; absent on providers that return
+   * a one-shot event result with no notion of an observation time.
+   *
+   * Kept on the outcome rather than only in `raw` so the audit trail and the
+   * dispute view can answer "was this number current when we acted on it?"
+   * without re-parsing a provider payload.
+   */
+  freshness?: {
+    status: QuoteStatus;
+    /** Age of the provider's observation in ms; `null` when untimestamped. */
+    ageMs: number | null;
+    /** Provider observation time in epoch ms; `null` when untimestamped. */
+    observedAtMs: number | null;
+    /** Hard bound that was applied, so a later review can see the policy. */
+    maxAgeMs: number;
   };
 }
 
@@ -91,6 +146,35 @@ export function isPoliticsMarketParams(
     params.expectedOutcome.length > 0
   );
 }
+
+/** Type guard shared by sports adapters (SportDataAPI, TheOddsAPI, ...) to validate `market.params`. */
+export function isSportsMarketParams(
+  params: Record<string, unknown>,
+): params is Record<string, unknown> & SportsMarketParams {
+  return (
+    typeof params.sportKey === "string" &&
+    params.sportKey.length > 0 &&
+    typeof params.homeTeam === "string" &&
+    params.homeTeam.length > 0 &&
+    typeof params.awayTeam === "string" &&
+    params.awayTeam.length > 0 &&
+    typeof params.selectedTeam === "string" &&
+    params.selectedTeam.length > 0
+  );
+}
+
+export { CoinGeckoAdapter } from "./coingecko.js";
+export type { CoinGeckoAdapterOptions } from "./coingecko.js";
+export { BinanceAdapter } from "./binance.js";
+export type { BinanceAdapterOptions } from "./binance.js";
+export { CoinMarketCapAdapter } from "./coinmarketcap.js";
+export type { CoinMarketCapAdapterOptions } from "./coinmarketcap.js";
+export { SportDataApiAdapter } from "./sportdataapi.js";
+export type { SportDataApiAdapterOptions } from "./sportdataapi.js";
+export { TheOddsApiAdapter } from "./theoddsapi.js";
+export type { TheOddsApiAdapterOptions } from "./theoddsapi.js";
+export { ReutersAdapter } from "./reuters.js";
+export { PolymarketFeedAdapter } from "./polymarketfeed.js";
 
 /**
  * Selects data adapters for a market by category and optional metadata tags. Adapters are tried in
@@ -149,3 +233,53 @@ export { InMemoryReviewQueue } from "./reviewQueue.js";
 export type { ManualReviewItem, ManualReviewQueue, ReviewReason } from "./reviewQueue.js";
 export { FixtureReplayAdapter, RecordingAdapter } from "./fixtures.js";
 export type { AdapterFixture, FixtureSink } from "./fixtures.js";
+export {
+  assessQuote,
+  applyConfidenceCeiling,
+  DEFAULT_FRESHNESS_POLICY,
+  extractTimestampMs,
+  freshnessPolicyFromEnv,
+  isNotFresh,
+  resolveFreshnessPolicy,
+  StaleQuoteError,
+  StalenessTracker,
+} from "./freshness.js";
+export type {
+  AdapterStalenessReport,
+  FreshnessEnvironment,
+  FreshnessPolicy,
+  QuoteFreshness,
+  QuoteStatus,
+  StalenessTrackerOptions,
+} from "./freshness.js";
+export {
+  getStalenessTracker,
+  recordQuoteStatus,
+  resetStalenessRegistry,
+  setStalenessTracker,
+  staleAdapterReports,
+  staleDataAlerts,
+} from "./stalenessRegistry.js";
+export type { StaleDataAlert } from "./stalenessRegistry.js";
+export { normalizeCryptoQuote } from "./normalize.js";
+export type { CryptoQuoteInput } from "./normalize.js";
+export {
+  assertMarketMappable,
+  collectUnmappableMarkets,
+  DEFAULT_MAPPABLE_SYMBOLS,
+  MAPPABLE_CATEGORIES,
+  MappabilityOverrides,
+  MarketMappabilityRegistry,
+  UnmappableMarketError,
+  validateMarketMappability,
+} from "./mappability.js";
+export type {
+  MappabilityOverride,
+  MappabilityVerdict,
+  MappabilityRegistryOptions,
+  SweepOptions,
+  SweepableMarket,
+  UnmappableOpenMarket,
+  UnmappableReason,
+  ValidateMappabilityOptions,
+} from "./mappability.js";

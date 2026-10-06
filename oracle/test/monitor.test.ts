@@ -35,11 +35,10 @@ function fakePool(tables: Partial<Record<string, Row[]>> = {}): QueryablePool & 
       if (/FROM markets/.test(text)) return { rows: (tables.markets ?? []) as T[] };
       if (/MAX\(id\) AS max_id/.test(text)) return { rows: (tables.submissionWatermark ?? [{ max_id: null }]) as T[] };
       if (/MAX\(escalated_at\)/.test(text)) return { rows: (tables.disputeWatermark ?? [{ max_escalated_at: null }]) as T[] };
+      // Council inactivity queries now use oracle_disputes table with council_votes join
+      if (/LEFT JOIN council_votes/.test(text)) return { rows: (tables.escalated ?? []) as T[] };
       if (/FROM oracle_disputes/.test(text)) return { rows: (tables.disputes ?? []) as T[] };
       if (/bond_amount, status/.test(text)) return { rows: (tables.bonds ?? []) as T[] };
-      // Checked before the bare `oracle_submissions` match: the council
-      // queries join the two tables and would otherwise be routed to it.
-      if (/council_votes/.test(text)) return { rows: (tables.escalated ?? []) as T[] };
       if (/FROM oracle_submissions/.test(text)) return { rows: (tables.submissions ?? []) as T[] };
       return { rows: [] as T[] };
     },
@@ -267,14 +266,48 @@ describe("runMonitorCycle", () => {
   it("alerts on council inactivity and on an exceeded council window", async () => {
     const emit = vi.fn(async () => {});
     const escalatedAt = new Date(NOW.getTime() - 80 * HOUR).toISOString();
+    const councilDeadline = new Date(NOW.getTime() - 8 * HOUR).toISOString();
     const pool = fakePool({
-      escalated: [{ market_id: "8", escalated_at: escalatedAt, status: "escalated", vote_count: "0" }],
+      escalated: [
+        {
+          market_id: "8",
+          escalated_at: escalatedAt,
+          council_deadline: councilDeadline,
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
     });
 
     const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
 
     expect(result.councilInactive).toBe(1);
     expect(result.councilWindowExceeded).toBe(1);
+  });
+
+  it("alerts when council deadline is approaching", async () => {
+    const emit = vi.fn(async () => {});
+    const escalatedAt = new Date(NOW.getTime() - 60 * HOUR).toISOString();
+    const councilDeadline = new Date(NOW.getTime() + 10 * HOUR).toISOString();
+    const pool = fakePool({
+      escalated: [
+        {
+          market_id: "9",
+          escalated_at: escalatedAt,
+          council_deadline: councilDeadline,
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
+    });
+
+    const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
+
+    expect(result.councilDeadlineApproaching).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.council_deadline_approaching",
+      payload: expect.objectContaining({ marketId: "9" }),
+    });
   });
 });
 

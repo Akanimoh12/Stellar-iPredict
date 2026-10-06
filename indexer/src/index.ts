@@ -9,6 +9,7 @@ import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
 import { MetricsServer } from "./metrics-server.js";
+import { recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -29,6 +30,14 @@ export interface IndexerRuntime {
   recomputeTotals?: boolean;
   recomputeBetCounts?: boolean;
   logger?: Logger;
+  /**
+   * Optional atomic batch processor: processes all events in a batch and saves the
+   * checkpoint ledger within a single database transaction.
+   */
+  processBatchAtomically?(
+    events: RawEvent[],
+    checkpointLedger: number,
+  ): Promise<void>;
 }
 
 export interface RawEvent { ledger: number; txHash: string; [key: string]: unknown }
@@ -70,25 +79,43 @@ export class Indexer {
 
   async indexOnce(): Promise<number> {
     const response = await this.runtime.fetchEvents(this.lastLedger);
-    for (const event of response.events) {
-      if (this.stopping) break;
-      this.processing = true;
-      try {
-        const decoded = this.runtime.decodeEvent(event);
-        await this.runtime.writeEventToDb(decoded);
-      } catch (error) {
-        await persistDeadLetterEvent(this.runtime.db, {
-          ledger: event.ledger,
-          txHash: event.txHash,
-          rawEvent: event,
-          error,
-        });
-      } finally {
-        this.processing = false;
+    const cursorBeforePoll = this.lastLedger;
+    recordIndexerPosition(response.latestLedger, cursorBeforePoll);
+    if (typeof this.runtime.processBatchAtomically === "function") {
+      // Atomic commit: cursor advances in the same transaction as event effects
+      await this.runtime.processBatchAtomically(response.events, response.latestLedger);
+      this.lastLedger = response.latestLedger;
+    } else {
+      // Deliberate ordering for at-least-once processing:
+      // Process event effects FIRST, then advance cursor SECOND.
+      // If a crash happens mid-batch, events are reprocessed on recovery
+      // rather than permanently skipped (idempotent handlers guarantee no duplicates).
+      for (const event of response.events) {
+        if (this.stopping) break;
+        this.processing = true;
+        try {
+          const decoded = this.runtime.decodeEvent(event);
+          await this.runtime.writeEventToDb(decoded);
+        } catch (error) {
+          await persistDeadLetterEvent(this.runtime.db, {
+            ledger: event.ledger,
+            txHash: event.txHash,
+            rawEvent: event,
+            error,
+          });
+        } finally {
+          this.processing = false;
+        }
       }
+      this.lastLedger = response.latestLedger;
+      await this.runtime.saveCheckpoint(this.lastLedger);
     }
-    this.lastLedger = response.latestLedger;
-    await this.runtime.saveCheckpoint(this.lastLedger);
+
+    // Keep the cursor timestamp accurate after a successful durable commit.
+    // The chain-tip/lag observation is refreshed at the beginning of the next
+    // poll, while the timestamp only changes when the cursor advances.
+    recordIndexerCursorAdvance(this.lastLedger);
+
     if (this.runtime.recomputeTotals) await recomputeMarketTotalsFromBets(this.runtime.db);
     if (this.runtime.recomputeBetCounts) await recomputeMarketBetCountsFromBets(this.runtime.db);
     return this.lastLedger;
@@ -132,7 +159,7 @@ export function installGracefulShutdown(indexer: Indexer): void {
  * returns, so unit tests can exercise it without an infinite timer.
  */
 export async function startLivePolling(fromLedger: number): Promise<void> {
-  const [{ config }, { writeEventToDb: writeBackfillEvent }, stellar] = await Promise.all([
+  const [{ config }, { writeEventToDb: writeBackfillEvent, processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE }, stellar] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
     import("@stellar/stellar-sdk"),
@@ -154,12 +181,16 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
           limit: config.EVENTS_PER_PAGE,
         });
 
-        for (const event of response.events || []) {
+        await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event) => {
           const topics = event.topic.map((t: any) => scValToNative(t));
           const data = scValToNative(event.value);
           await writeBackfillEvent(event.ledger, event.txHash, topics, data);
-        }
+        });
         currentLedger = response.latestLedger;
+        try {
+          const { saveCheckpointLedger, pool: dbPool } = await import("./db.js");
+          await saveCheckpointLedger(dbPool, currentLedger);
+        } catch {}
       }
     } catch (err) {
       console.error("[live-poll] Error in polling loop:", err);
@@ -171,36 +202,14 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
   }
 }
 
-import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
-import { handleBetPlacedEvent, isBetPlacedTopic } from "./handlers/bet_placed.js";
-import { handleMarketCreatedEvent } from "./handlers/market_created.js";
-import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
-import { handleOracleChallengedEvent, handleOracleEscalatedEvent } from "./handlers/oracle_challenge.js";
-import { handleOracleFinalizedEvent } from "./handlers/oracle_finalized.js";
-import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
-import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
-
-export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, redis: RedisClient): Promise<void> {
-  const [domain, action] = event.topics;
-
-  if (domain === "mkt" && action === "created") {
-    await handleMarketCreatedEvent(event, db, redis);
-  } else if (isBetPlacedTopic(event.topics)) {
-    await handleBetPlacedEvent(event, db, redis);
-  } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
-    await handleMarketResolvedEvent(event, db, redis);
-  } else if (domain === "mkt" && action === "cancelled") {
-    await handleMarketCancelledEvent(event, db, redis);
-  } else if (domain === "referral" && action === "reward") {
-    await handleReferralRewardEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "challenged") {
-    await handleOracleChallengedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "escalated") {
-    await handleOracleEscalatedEvent(event, db, redis);
-  } else if (domain === "oracle" && action === "finalized") {
-    await handleOracleFinalizedEvent(event, db, redis);
-  }
-}
+/**
+ * The single schema-validated event boundary lives in `event-router.ts`
+ * (issue #499). This module previously carried a drifted copy of the router
+ * that silently dropped unrecognized events — re-export the canonical one so
+ * every entry point validates payloads and dead-letters malformed events
+ * identically.
+ */
+export { writeEventToDb } from "./event-router.js";
 
 /**
  * Main entry point for the indexer service.

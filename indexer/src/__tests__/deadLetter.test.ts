@@ -11,7 +11,7 @@ describe("deadLetter", () => {
     const __dirname = fileURLToPath(new URL(".", import.meta.url));
     const migrationPath = resolve(
       __dirname,
-      "../../../../db/migrations/0026_dead_letter_events_timestamptz.sql"
+      "../../../db/migrations/0026_dead_letter_events_timestamptz.sql"
     );
     const sql = readFileSync(migrationPath, "utf8");
 

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+vi.mock("./metrics-server.js", () => ({
+  MetricsServer: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 // Mock config
 vi.mock("./config/index.js", () => {
   return {
@@ -20,6 +27,12 @@ vi.mock("./backfill.js", () => {
   return {
     runBackfill: vi.fn().mockResolvedValue(125),
     writeEventToDb: vi.fn(),
+    processEventsInChunks: vi.fn(async (events: any[], _chunkSize: number, processor: any) => {
+      for (const event of events) {
+        await processor(event);
+      }
+    }),
+    EVENTS_PROCESSING_CHUNK_SIZE: 50,
   };
 });
 

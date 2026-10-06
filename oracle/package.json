@@ -5,7 +5,7 @@
   "description": "iPredict oracle \u2014 council aggregator, data adapters, submitter, monitor",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -15,8 +15,10 @@
     "dev:monitor": "tsx watch src/monitor/run.ts",
     "submit": "tsx src/aggregator/submit-cli.ts",
     "audit:export": "tsx src/aggregator/audit-cli.ts",
+    "sweep:unmappable": "tsx src/adapters/unmappableSweep.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:mutation": "tsx scripts/mutation-runner.ts",
     "typecheck": "tsc --noEmit",
     "check:sdk-version": "node ../scripts/check-sdk-version.js",
     "lint": "tsc --noEmit"
@@ -32,6 +34,7 @@
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.0",
     "typescript": "^5.7.3",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.6",
+    "@vitest/coverage-v8": "^3.2.6"
   }
 }

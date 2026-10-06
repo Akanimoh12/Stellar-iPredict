@@ -70,8 +70,10 @@ async function main(): Promise<void> {
   // Minimal DbClient wrapper around the pool — each query gets a fresh
   // connection so individual event replay failures don't poison the session.
   const db: DbClient = {
-    query: <T = unknown>(text: string, params?: readonly unknown[]) =>
-      pool.query<T>(text, params as unknown[]) as ReturnType<DbClient["query"]>,
+    async query<T = unknown>(text: string, params?: readonly unknown[]) {
+      const result = await pool.query(text, params ? [...params] : undefined);
+      return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
+    },
   };
 
   // Redis is optional: cache invalidation degrades gracefully without it.

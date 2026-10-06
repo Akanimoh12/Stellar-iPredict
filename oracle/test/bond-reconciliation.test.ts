@@ -1,13 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import {
   reconcileBonds,
   runBondReconciliation,
+  runBondReconciliationSafe,
   recordSettlement,
   type TerminalSubmission,
   type BondSettlement,
   type BondReconciliationOptions,
 } from "../src/aggregator/bond-reconciliation.js";
+import * as alertModule from "../src/aggregator/alert.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -106,29 +108,151 @@ describe("runBondReconciliation", () => {
     expect(result.discrepancies).toHaveLength(0);
   });
 
-  it("calls onDiscrepancy for each unsettled submission", async () => {
+  it("calls onDiscrepancy for each unsettled submission and logs discrepancies", async () => {
     const pool = buildPool(
       [
-        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
-        { market_id: "2", submitter: "GYYY", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
+        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01T00:00:00Z" },
+        { market_id: "2", submitter: "GYYY", bond_amount: "2500000000", status: "cancelled", finalized_at: "2026-01-02T00:00:00Z" },
       ],
-      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02" }],
+      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02T00:00:00Z" }],
     );
 
     const alerts: string[] = [];
+    const warn = vi.fn();
+    const info = vi.fn();
+    const logger = { warn, info, error: vi.fn(), debug: vi.fn() };
     const options: BondReconciliationOptions = {
       onDiscrepancy: (d) => { alerts.push(d.marketId); },
+      logger: logger as unknown as BondReconciliationOptions["logger"],
     };
 
     const result = await runBondReconciliation(pool, options);
+    expect(result.checkedCount).toBe(2);
+    expect(result.settledCount).toBe(1);
     expect(result.discrepancies).toHaveLength(1);
+    expect(result.discrepancies[0]).toMatchObject({
+      marketId: "2",
+      submitter: "GYYY",
+      expectedAmount: 2500000000n,
+      status: "cancelled",
+    });
     expect(alerts).toEqual(["2"]);
+    expect(warn).toHaveBeenCalledWith(
+      "bond refund discrepancy detected",
+      expect.objectContaining({
+        marketId: "2",
+        submitter: "GYYY",
+        expectedAmountStroops: "2500000000",
+        status: "cancelled",
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "bond reconciliation complete",
+      expect.objectContaining({
+        checkedCount: 2,
+        settledCount: 1,
+        discrepancyCount: 1,
+      }),
+    );
+
+    // Verify SQL filter includes finalized, cancelled, and expired statuses
+    const [subQuery] = (pool.query as any).mock.calls[0];
+    expect(subQuery).toContain("WHERE status IN ('finalized', 'cancelled', 'expired')");
   });
 
   it("returns ranAt as an ISO timestamp", async () => {
     const pool = buildPool([], []);
     const result = await runBondReconciliation(pool);
     expect(result.ranAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("calls alertBondDiscrepancy for each discrepancy (Issue #573)", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondDiscrepancy");
+    
+    const pool = buildPool(
+      [
+        { market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" },
+        { market_id: "2", submitter: "GYYY", bond_amount: "2000000000", status: "finalized", finalized_at: "2026-01-01" },
+      ],
+      [], // No settlements
+    );
+
+    await runBondReconciliation(pool);
+
+    expect(alertSpy).toHaveBeenCalledTimes(2);
+    // Updated to match new signature with optional webhookUrl and logger
+    expect(alertSpy).toHaveBeenCalledWith("1", "GXXX", 1000000000n, null, ["GXXX"], undefined, undefined);
+    expect(alertSpy).toHaveBeenCalledWith("2", "GYYY", 2000000000n, null, ["GYYY"], undefined, undefined);
+    
+    alertSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runBondReconciliationSafe (wrapper that alerts on failure)
+// ---------------------------------------------------------------------------
+
+describe("runBondReconciliationSafe", () => {
+  function buildPool(submissions: object[], settlements: object[]) {
+    return {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes("oracle_submissions")) return { rows: submissions };
+        if (sql.includes("bond_settlements")) return { rows: settlements };
+        return { rows: [] };
+      }),
+    };
+  }
+
+  it("returns result when reconciliation succeeds", async () => {
+    const pool = buildPool(
+      [{ market_id: "1", submitter: "GXXX", bond_amount: "1000000000", status: "finalized", finalized_at: "2026-01-01" }],
+      [{ market_id: "1", recipient: "GXXX", settled_amount: "1000000000", settled_at: "2026-01-02" }],
+    );
+    
+    const result = await runBondReconciliationSafe(pool);
+    expect(result).not.toBeNull();
+    expect(result?.checkedCount).toBe(1);
+  });
+
+  it("alerts and re-throws when reconciliation fails (Issue #573)", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondReconciliationFailure");
+    const pool = {
+      query: vi.fn().mockRejectedValue(new Error("Database connection lost")),
+    };
+    
+    await expect(runBondReconciliationSafe(pool, {}, "2026-09-28T10:00:00Z")).rejects.toThrow("Database connection lost");
+    
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    // Updated to match new signature with webhookUrl and logger
+    expect(alertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Database connection lost" }),
+      0,
+      "2026-09-28T10:00:00Z",
+      undefined,
+      undefined,
+    );
+    
+    alertSpy.mockRestore();
+  });
+
+  it("alerts with null lastSuccessfulRun when not provided", async () => {
+    const alertSpy = vi.spyOn(alertModule, "alertBondReconciliationFailure");
+    const pool = {
+      query: vi.fn().mockRejectedValue(new Error("Query timeout")),
+    };
+    
+    await expect(runBondReconciliationSafe(pool)).rejects.toThrow("Query timeout");
+    
+    // Updated to match new signature
+    expect(alertSpy).toHaveBeenCalledWith(
+      expect.any(Error),
+      0,
+      null,
+      undefined,
+      undefined,
+    );
+    
+    alertSpy.mockRestore();
   });
 });
 
@@ -161,7 +285,7 @@ describe("recordSettlement", () => {
     expect(result).toBe(false);
   });
 
-  it("passes marketId, recipient, and amount to the query", async () => {
+  it("passes marketId, recipient, and amount to the query at exact positional indices", async () => {
     const pool = {
       query: vi.fn().mockResolvedValue({ rows: [{ market_id: "5" }] }),
     };
@@ -172,8 +296,8 @@ describe("recordSettlement", () => {
     });
     const [sql, params] = pool.query.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("ON CONFLICT");
-    expect(params).toContain("5");
-    expect(params).toContain("GABC");
-    expect(params).toContain("2000000000");
+    expect(params[0]).toBe("5");
+    expect(params[1]).toBe("GABC");
+    expect(params[2]).toBe("2000000000");
   });
 });

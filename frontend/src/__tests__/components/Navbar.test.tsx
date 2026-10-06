@@ -70,7 +70,7 @@ describe("Navbar", () => {
 
   it("renders the logo / brand name", () => {
     render(<Navbar />);
-    expect(screen.getByText(/iPredict/i)).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "iPredict" })).toBeInTheDocument();
   });
 
   it("renders all navigation links", () => {
@@ -87,7 +87,7 @@ describe("Navbar", () => {
 
   it("logo links to home page", () => {
     render(<Navbar />);
-    const logo = screen.getByText(/iPredict/i);
+    const logo = screen.getByRole("img", { name: "iPredict" });
     expect(logo.closest("a")).toHaveAttribute("href", "/");
   });
 

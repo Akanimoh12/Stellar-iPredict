@@ -62,5 +62,9 @@ yarn-error.log*
 # ── Stellar CLI local identity keystore ────────────────────────────────────────
 .stellar/
 
+# ── Certificate expiry monitor (Python cache + per-run state) ─────────────────
+__pycache__/
+*.py[cod]
+infra/cert-monitor/.state.json
 # Coverage output
 coverage/

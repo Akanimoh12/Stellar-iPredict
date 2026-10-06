@@ -67,6 +67,7 @@ services:
       # Desktop (virtiofs) and is fragile elsewhere. dashboards.yml points its
       # file provider at this directory.
       - ./grafana/business.json:/etc/grafana/provisioning/dashboards-json/business.json:ro
+      - ./grafana/cache.json:/etc/grafana/provisioning/dashboards-json/cache.json:ro
       - ./grafana/oracle.json:/etc/grafana/provisioning/dashboards-json/oracle.json:ro
       - ./grafana/system.json:/etc/grafana/provisioning/dashboards-json/system.json:ro
     networks:

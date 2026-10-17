@@ -19,9 +19,10 @@ export interface SubmissionStore {
 /**
  * Pure aggregation over a market's current submissions.
  *
- * De-duplicates by member (latest vote wins), consistent with
- * `selectThresholdOutcome` and `detectConflict`, so every consumer of
- * council votes agrees on the same tally.
+ * `council_votes` is the authoritative source: its `(market_id, member)`
+ * primary key and upsert write path already guarantee one current row per
+ * member. This in-memory dedupe remains defensive for custom stores, mocks,
+ * or malformed query results; it is redundant for the Postgres store.
  */
 export function computeTally(marketId: string, votes: readonly CouncilVote[]): MarketTally {
   const votesByMember = new Map<string, boolean>();

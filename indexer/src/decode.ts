@@ -29,7 +29,7 @@ export function setDeadLetterHandler(
 export function decodeTopics(topics: xdr.ScVal[]): DecodedTopics {
   const decoded = topics.map((t) => scValToNative(t));
   return {
-    type: String(decoded[0] ?/ ""),
+    type: String(decoded[0] ?? ""),
     subtype: decoded.length > 1 ? String(decoded[1]) : undefined,
     args: decoded.slice(2),
   };

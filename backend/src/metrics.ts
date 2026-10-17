@@ -1,4 +1,7 @@
 import type { FastifyInstance } from "fastify";
+import { serializeCacheMetrics } from "./cache/hitRate.js";
+import { serializeNegativeCacheMetrics } from "./cache/negativeCache.js";
+import { serializeOracleAuthFailureMetrics } from "./lib/oracleAuthFailures.js";
 
 /**
  * Request-duration histogram — issue #87
@@ -101,6 +104,63 @@ let activeBuckets: readonly number[] = DEFAULT_BUCKETS;
 
 /** Key: normalised route label (`"METHOD /path"`). Value: 5xx response count. */
 const errorRegistry = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Status code registry — issue #492
+// ---------------------------------------------------------------------------
+
+/**
+ * Key: `"<route label>\u0000<statusCode>"`. Value: response count.
+ *
+ * Cardinality stays bounded by the route table (a fixed, small set of
+ * templates) times the small set of HTTP status codes actually returned —
+ * never the raw request path, which is what would make this unbounded.
+ */
+const statusRegistry = new Map<string, number>();
+
+function statusKey(label: string, statusCode: number): string {
+  return `${label}\u0000${statusCode}`;
+}
+
+// ---------------------------------------------------------------------------
+// Abandoned-query counter registry — issue #475
+// ---------------------------------------------------------------------------
+
+/**
+ * Key: normalised route label, or `"unknown"` when no route was supplied.
+ * Value: number of queries cancelled because the client disconnected before
+ * the query resolved (see db/pool.ts `queryWithCancel`).
+ */
+const abandonedQueryRegistry = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Database query histogram — database load (db_query_duration_ms)
+// ---------------------------------------------------------------------------
+
+/**
+ * Duration of every statement executed through the shared Postgres pool.
+ *
+ * This is the "database load" half of the cache/DB correlation: when the hit
+ * rate for a namespace falls, `rate(db_query_duration_ms_count[...])` is what
+ * rises, because every miss that the cache cannot absorb becomes a query.
+ * `docs/ORACLE_AND_BACKEND.md#monitoring` lists it as a canonical metric and
+ * the `DatabaseSlow` alert already reads its buckets, so until now that alert
+ * had no series to evaluate.
+ *
+ * It gets its own histogram rather than a route label on the API histogram:
+ * a database query is not a request, and the bucket ladder that makes sense
+ * for HTTP responses (mostly <100 ms) is not the one that makes sense for SQL.
+ */
+let dbQueryHistogram: HistogramEntry = newDbQueryEntry();
+
+function newDbQueryEntry(): HistogramEntry {
+  return {
+    buckets: DEFAULT_BUCKETS,
+    counts: new Array<number>(DEFAULT_BUCKETS.length).fill(0),
+    sum: 0,
+    count: 0,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -258,6 +318,145 @@ export function resetErrorCounts(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Status code counter API — issue #492
+// ---------------------------------------------------------------------------
+
+/** Immutable snapshot of a per-route, per-status response count. */
+export interface StatusCountSnapshot {
+  readonly route: string;
+  readonly statusCode: number;
+  readonly count: number;
+}
+
+/**
+ * Record one completed response for a route/status pair.
+ *
+ * @param method     HTTP method in upper-case, e.g. `"GET"`.
+ * @param routePath  Fastify route template, e.g. `"/api/markets/:id"`.
+ * @param statusCode HTTP status code of the response.
+ */
+export function recordStatus(method: string, routePath: string, statusCode: number): void {
+  const label = normaliseLabel(method, routePath);
+  const key = statusKey(label, statusCode);
+  statusRegistry.set(key, (statusRegistry.get(key) ?? 0) + 1);
+}
+
+/** Status-code counts for every route/status pair observed, sorted by route then status. */
+export function getStatusCounts(): StatusCountSnapshot[] {
+  return Array.from(statusRegistry.entries())
+    .map(([key, count]) => {
+      const [route, statusStr] = key.split("\u0000");
+      return Object.freeze({ route: route!, statusCode: Number(statusStr), count });
+    })
+    .sort((a, b) => a.route.localeCompare(b.route) || a.statusCode - b.statusCode);
+}
+
+/** Reset all status-code count data. Useful in tests. */
+export function resetStatusCounts(): void {
+  statusRegistry.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Abandoned-query counter API — issue #475
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one query that was cancelled because its client disconnected
+ * before the query resolved. Making this a first-class counter (rather than
+ * only a log line) is what lets us confirm the win claimed in #475 is
+ * real — i.e. that clients actually disconnect mid-request often enough for
+ * cancellation to matter — before investing further here.
+ *
+ * @param route Fastify route label, e.g. `"GET /api/markets"`. Falls back to
+ *              `"unknown"` when the caller doesn't have one handy.
+ */
+export function recordAbandonedQuery(route?: string): void {
+  const label = route ?? "unknown";
+  const current = abandonedQueryRegistry.get(label) ?? 0;
+  abandonedQueryRegistry.set(label, current + 1);
+}
+
+/** Total abandoned-query count for a single route, or `undefined` if none. */
+export function getAbandonedQueryCount(route: string): number | undefined {
+  return abandonedQueryRegistry.get(route);
+}
+
+/** Abandoned-query counts for every route that has recorded at least one. */
+export function getAbandonedQueryCounts(): ErrorCountSnapshot[] {
+  return Array.from(abandonedQueryRegistry.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, count]) => Object.freeze({ route: label, count }));
+}
+
+/** Reset all abandoned-query count data. Useful in tests. */
+export function resetAbandonedQueryCounts(): void {
+  abandonedQueryRegistry.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Database query histogram API
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one completed database query.
+ *
+ * @param durationMs Wall-clock time of the statement, in milliseconds.
+ *                   A query that throws still cost the round trip, so
+ *                   callers record in a `finally`.
+ */
+export function observeDbQuery(durationMs: number): void {
+  const idx = dbQueryHistogram.buckets.findIndex((b) => durationMs <= b);
+  const bucketIdx = idx === -1 ? dbQueryHistogram.counts.length - 1 : idx;
+  dbQueryHistogram.counts[bucketIdx]!++;
+  dbQueryHistogram.sum += durationMs;
+  dbQueryHistogram.count++;
+}
+
+/**
+ * Snapshot of the database query histogram.
+ *
+ * Uses the route label `"db"` so it can reuse {@link HistogramSnapshot};
+ * there is only ever one of these, so the label carries no information and
+ * is not exported as a Prometheus label.
+ */
+export function getDbQueryHistogram(): HistogramSnapshot {
+  return snapshotEntry("db", dbQueryHistogram)!;
+}
+
+/** Reset the database query histogram. Useful in tests. */
+export function resetDbQueryHistogram(): void {
+  dbQueryHistogram = newDbQueryEntry();
+}
+
+/**
+ * Serialize the database query histogram in Prometheus text exposition format.
+ *
+ * Emitted unconditionally, including before the first query: a series that
+ * only appears once traffic arrives is one the `DatabaseSlow` alert cannot
+ * evaluate and no dashboard panel can be built against.
+ */
+export function serializeDbQueryMetrics(): string {
+  const snapshot = getDbQueryHistogram();
+  const cumulative = cumulativeCounts(snapshot.counts);
+
+  const lines = [
+    "# HELP db_query_duration_ms Duration of statements executed through the shared Postgres pool, in milliseconds",
+    "# TYPE db_query_duration_ms histogram",
+  ];
+
+  for (let i = 0; i < snapshot.buckets.length; i++) {
+    const le = snapshot.buckets[i];
+    const leStr = le === Infinity ? "+Inf" : String(le);
+    lines.push(`db_query_duration_ms_bucket{le="${leStr}"} ${cumulative[i]}`);
+  }
+
+  lines.push(`db_query_duration_ms_sum ${snapshot.sum}`);
+  lines.push(`db_query_duration_ms_count ${snapshot.count}`);
+
+  return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -340,7 +539,56 @@ export function serializeMetrics(): string {
     }
   }
 
-  return lines.join("\n") + "\n";
+  // Status code breakdown, labelled by route pattern (never the raw path) so
+  // cardinality stays bounded by the route table times the status codes
+  // actually returned.
+  const statusCounts = getStatusCounts();
+  if (statusCounts.length > 0) {
+    lines.push("# HELP api_requests_total Total number of responses, by route and status code");
+    lines.push("# TYPE api_requests_total counter");
+    for (const entry of statusCounts) {
+      const route = escapeLabelValue(entry.route);
+      lines.push(`api_requests_total{route="${route}",status="${entry.statusCode}"} ${entry.count}`);
+    }
+  }
+
+  // Oracle authentication-failure telemetry (issue #576). Always emitted, so
+  // the alert expressions and the dashboard panels exist before the incident.
+  const oracleAuth = serializeOracleAuthFailureMetrics();
+
+  // Cache hit rate (issue #214), negative-cache hit rate, and database query
+  // duration. All always emitted, even before the first lookup or query — a
+  // series that only appears once traffic arrives is a series nobody can
+  // build a dashboard panel or an alert against.
+  return [
+    lines.join("\n"),
+    oracleAuth,
+    serializeCacheMetrics(),
+    serializeNegativeCacheMetrics(),
+    serializeDbQueryMetrics(),
+  ]
+    .map((block) => block.replace(/\n+$/, ""))
+    .join("\n") + "\n";
+}
+
+/**
+ * Serialise the database connection-pool gauges (issue #417).
+ *
+ * The pool module is imported lazily so that loading the metrics serialiser
+ * never forces a `DATABASE_URL`/pool to be created in tests or other contexts
+ * that never touch the metrics endpoint.
+ */
+export async function serializePoolMetrics(): Promise<string> {
+  const { getPoolMetrics } = await import("./db/pool.js");
+  const { total, idle, waiting } = getPoolMetrics();
+
+  return [
+    "# HELP db_pool_connections Database connection pool occupancy",
+    "# TYPE db_pool_connections gauge",
+    `db_pool_connections_total ${total}`,
+    `db_pool_connections_idle ${idle}`,
+    `db_pool_connections_waiting ${waiting}`,
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +613,7 @@ export function registerMetricsHook(app: FastifyInstance): void {
     const routePath: string =
       (request.routeOptions as { url?: string }).url ?? request.url;
     observe(request.method, routePath, reply.elapsedTime);
+    recordStatus(request.method, routePath, reply.statusCode);
 
     // Record 5xx server errors for monitoring
     if (reply.statusCode >= 500 && reply.statusCode < 600) {
@@ -373,17 +622,49 @@ export function registerMetricsHook(app: FastifyInstance): void {
   });
 }
 
+/** Header carrying the scrape token that gates the metrics endpoint. */
+export const METRICS_TOKEN_HEADER = "x-metrics-token";
+
+/**
+ * Checks whether a request is allowed to read `/metrics`.
+ *
+ * The endpoint carries request-rate and latency data that is operationally
+ * sensitive (traffic shape, route inventory), so it must not be reachable by
+ * anyone who can reach the API. Without a configured token the endpoint is
+ * closed entirely — there is no "open by default" fallback — since a
+ * scraper that hasn't been given a token yet is not a reason to leave the
+ * route exposed to the public internet in the meantime.
+ */
+export function isMetricsRequestAuthorized(
+  headerValue: string | string[] | undefined,
+  expectedToken: string | undefined
+): boolean {
+  if (!expectedToken) return false;
+  const provided = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return provided === expectedToken;
+}
+
 /**
  * Register the /metrics endpoint that serves Prometheus metrics.
  *
+ * Gated by a shared-secret token (`METRICS_TOKEN` env var, sent as the
+ * `x-metrics-token` header) so the endpoint is not publicly exposed — a
+ * missing or mismatched token gets the same 404 as any other unknown route,
+ * so the endpoint's existence isn't disclosed either.
+ *
  * Call this once inside {@link buildServer} to expose metrics at GET /metrics.
  */
-export function registerMetricsEndpoint(app: FastifyInstance): void {
+export function registerMetricsEndpoint(
+  app: FastifyInstance,
+  options: { token?: string } = {}
+): void {
+  const expectedToken = options.token ?? process.env.METRICS_TOKEN;
+
   app.get(
     "/metrics",
     {
       schema: {
-        summary: "Prometheus metrics endpoint",
+        summary: "Prometheus metrics endpoint (requires x-metrics-token header)",
         tags: ["system"],
         response: {
           200: {
@@ -393,8 +674,16 @@ export function registerMetricsEndpoint(app: FastifyInstance): void {
         },
       },
     },
-    async (_req, reply) => {
-      reply.type("text/plain; version=0.0.4; charset=utf-8").send(serializeMetrics());
+    async (req, reply) => {
+      if (!isMetricsRequestAuthorized(req.headers[METRICS_TOKEN_HEADER], expectedToken)) {
+        reply.callNotFound();
+        return;
+      }
+
+      const pool = await serializePoolMetrics();
+      reply
+        .type("text/plain; version=0.0.4; charset=utf-8")
+        .send(`${serializeMetrics()}\n${pool}`);
     }
   );
 }

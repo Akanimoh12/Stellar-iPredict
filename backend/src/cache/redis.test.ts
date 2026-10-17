@@ -1,17 +1,27 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { cache, redisClient } from './redis';
+import { describe, it, expect, beforeEach } from "vitest";
+import type { Redis } from "ioredis";
+import { cache, getRedisClient, setRedisClient } from "./redis";
+import { createTestRedis, MemRedis } from "../test/fakeRedis.js";
 
-describe('Redis Cache Client', () => {
+// Runs entirely against the in-memory FakeRedis bootstrap (src/test/fakeRedis.ts) —
+// no real Redis server required, so the suite is deterministic everywhere.
+
+function installTestClient(): MemRedis {
+  const fake = createTestRedis();
+  setRedisClient(fake as unknown as Redis);
+  return fake;
+}
+
+function installedClient(): MemRedis {
+  return getRedisClient() as unknown as MemRedis;
+}
+
+describe("Redis Cache Client", () => {
   beforeEach(() => {
-    // Clear the store before each test
-    redisClient.flushall();
+    installTestClient();
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should set and get typed JSON data', async () => {
+  it("should set and get typed JSON data", async () => {
     interface TestData {
       id: number;
       name: string;
@@ -30,9 +40,8 @@ describe('Redis Cache Client', () => {
   });
 
   it('should return null when reading invalid JSON', async () => {
-    // Manually set an invalid JSON string directly via the client
-    await redisClient.set('bad_json', '{ bad json');
-    
+    await installedClient().set('bad_json', '{ bad json');
+
     const retrieved = await cache.get('bad_json');
     expect(retrieved).toBeNull();
   });
@@ -40,9 +49,9 @@ describe('Redis Cache Client', () => {
   it('should set data with TTL', async () => {
     const data = { temp: true };
     await cache.set('temp_key', data, 10);
-    
+
     // Check if TTL is roughly 10 seconds
-    const ttl = await redisClient.ttl('temp_key');
+    const ttl = await installedClient().ttl('temp_key');
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(10);
   });
@@ -50,7 +59,7 @@ describe('Redis Cache Client', () => {
   it('should delete keys', async () => {
     await cache.set('to_del', { a: 1 });
     await cache.del('to_del');
-    
+
     const retrieved = await cache.get('to_del');
     expect(retrieved).toBeNull();
   });

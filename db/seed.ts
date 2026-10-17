@@ -36,6 +36,34 @@ type SeedLeaderboard = {
   lost_bets: number;
 };
 
+type SeedOracleSubmission = {
+  market_id: number;
+  submitter: string;
+  outcome: "yes" | "no";
+  bond_amount: string;
+  status: "submitted" | "challenged" | "finalized" | "rejected";
+  decision: string | null;
+};
+
+type SeedOracleDispute = {
+  market_id: number;
+  submitter: string;
+  challenger: string;
+  outcome: "yes" | "no";
+  submitter_bond: string;
+  challenger_bond: string;
+  status: "challenged" | "escalated";
+  challenged_at: number;
+  escalated_at: number | null;
+  council_deadline: number | null;
+};
+
+type SeedCouncilVote = {
+  market_id: number;
+  member: string;
+  outcome: boolean;
+};
+
 const SEED_MARKETS: SeedMarket[] = [
   {
     id: 1,
@@ -78,6 +106,90 @@ const SEED_MARKETS: SeedMarket[] = [
     cancelled: false,
     creator: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
     bet_count: 4
+  },
+  {
+    id: 4,
+    question: "Will XLM close above $0.25 by Dec 31, 2026?",
+    image_url: null,
+    category: "Crypto",
+    end_time: 1788048000,
+    total_yes: "10.0000000",
+    total_no: "5.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "GS100000000000000000000000000000000000000000000000000000",
+    bet_count: 0
+  },
+  {
+    id: 5,
+    question: "Will Team Beta win the regional final?",
+    image_url: null,
+    category: "Sports",
+    end_time: 1788048000,
+    total_yes: "20.0000000",
+    total_no: "10.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "GS200000000000000000000000000000000000000000000000000000",
+    bet_count: 0
+  },
+  {
+    id: 6,
+    question: "Will a resolution pass in the 2026 assembly?",
+    image_url: null,
+    category: "Politics",
+    end_time: 1788048000,
+    total_yes: "30.0000000",
+    total_no: "15.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "GS300000000000000000000000000000000000000000000000000000",
+    bet_count: 0
+  },
+  {
+    id: 7,
+    question: "Will the science mission launch this quarter?",
+    image_url: null,
+    category: "Science",
+    end_time: 1788048000,
+    total_yes: "0.0000000",
+    total_no: "0.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "GS100000000000000000000000000000000000000000000000000000",
+    bet_count: 0
+  },
+  {
+    id: 8,
+    question: "Will the new policy pass the entertainment vote?",
+    image_url: null,
+    category: "Entertainment",
+    end_time: 1788048000,
+    total_yes: "0.0000000",
+    total_no: "0.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: true,
+    creator: "GS400000000000000000000000000000000000000000000000000000",
+    bet_count: 0
+  },
+  {
+    id: 9,
+    question: "Will Team Gamma win the consolation bracket?",
+    image_url: null,
+    category: "Sports",
+    end_time: 1788048000,
+    total_yes: "0.0000000",
+    total_no: "0.0000000",
+    resolved: false,
+    outcome: null,
+    cancelled: false,
+    creator: "GS300000000000000000000000000000000000000000000000000000",
+    bet_count: 0
   }
 ];
 
@@ -140,6 +252,128 @@ const SEED_LEADERBOARD: SeedLeaderboard[] = [
   }
 ];
 
+// Deterministic oracle fixtures so tests can assert against stable IDs.
+// Submitter/challenger/council addresses are 56-char Stellar-style keys.
+const SUBMITTER_1 = "GS100000000000000000000000000000000000000000000000000000";
+const SUBMITTER_2 = "GS200000000000000000000000000000000000000000000000000000";
+const SUBMITTER_3 = "GS300000000000000000000000000000000000000000000000000000";
+const SUBMITTER_4 = "GS400000000000000000000000000000000000000000000000000000";
+const CHALLENGER_1 = "GC100000000000000000000000000000000000000000000000000000";
+const CHALLENGER_2 = "GC200000000000000000000000000000000000000000000000000000";
+const CHALLENGER_3 = "GC300000000000000000000000000000000000000000000000000000";
+const COUNCIL_MEMBER_1 = "GCOUNCIL100000000000000000000000000000000000000000000000";
+const COUNCIL_MEMBER_2 = "GCOUNCIL200000000000000000000000000000000000000000000000";
+const COUNCIL_MEMBER_3 = "GCOUNCIL300000000000000000000000000000000000000000000000";
+const COUNCIL_MEMBER_4 = "GCOUNCIL400000000000000000000000000000000000000000000000";
+const COUNCIL_MEMBER_5 = "GCOUNCIL500000000000000000000000000000000000000000000000";
+
+// One oracle submission per market (oracle_submissions is UNIQUE on
+// market_id), one per status so the full lifecycle is represented.
+const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
+  {
+    market_id: 4,
+    submitter: SUBMITTER_1,
+    outcome: "yes",
+    bond_amount: "1000000000",
+    status: "submitted",
+    decision: null,
+  },
+  {
+    market_id: 5,
+    submitter: SUBMITTER_1,
+    outcome: "yes",
+    bond_amount: "1000000000",
+    status: "challenged",
+    decision: null,
+  },
+  {
+    market_id: 6,
+    submitter: SUBMITTER_2,
+    outcome: "yes",
+    bond_amount: "1500000000",
+    status: "challenged",
+    decision: null,
+  },
+  {
+    market_id: 7,
+    submitter: SUBMITTER_1,
+    outcome: "yes",
+    bond_amount: "1000000000",
+    status: "finalized",
+    decision: "finalized",
+  },
+  {
+    market_id: 8,
+    submitter: SUBMITTER_4,
+    outcome: "no",
+    bond_amount: "1200000000",
+    status: "rejected",
+    decision: "rejected",
+  },
+  {
+    market_id: 9,
+    submitter: SUBMITTER_3,
+    outcome: "no",
+    bond_amount: "1200000000",
+    status: "challenged",
+    decision: null,
+  },
+];
+
+// Disputes mirror the challenged/escalated submissions. The contract rule
+// requires the challenger bond to exceed the submitter bond.
+const SEED_ORACLE_DISPUTES: SeedOracleDispute[] = [
+  {
+    market_id: 5,
+    submitter: SUBMITTER_1,
+    challenger: CHALLENGER_1,
+    outcome: "yes",
+    submitter_bond: "1000000000",
+    challenger_bond: "2000000000",
+    status: "challenged",
+    challenged_at: 1788206400,
+    escalated_at: null,
+    council_deadline: null,
+  },
+  {
+    market_id: 6,
+    submitter: SUBMITTER_2,
+    challenger: CHALLENGER_2,
+    outcome: "yes",
+    submitter_bond: "1500000000",
+    challenger_bond: "3000000000",
+    status: "escalated",
+    challenged_at: 1788206400,
+    escalated_at: 1788207000,
+    council_deadline: 1788210600,
+  },
+  {
+    market_id: 9,
+    submitter: SUBMITTER_3,
+    challenger: CHALLENGER_3,
+    outcome: "no",
+    submitter_bond: "1200000000",
+    challenger_bond: "2500000000",
+    status: "escalated",
+    challenged_at: 1788206400,
+    escalated_at: 1788207100,
+    council_deadline: 1788210700,
+  },
+];
+
+// Council votes for the escalated markets. Market 6 reaches the 4-of-7
+// threshold (4 yes votes); market 9 does not (only 3 votes, 2 yes + 1 no).
+const SEED_COUNCIL_VOTES: SeedCouncilVote[] = [
+  { market_id: 6, member: COUNCIL_MEMBER_1, outcome: true },
+  { market_id: 6, member: COUNCIL_MEMBER_2, outcome: true },
+  { market_id: 6, member: COUNCIL_MEMBER_3, outcome: true },
+  { market_id: 6, member: COUNCIL_MEMBER_4, outcome: true },
+  { market_id: 6, member: COUNCIL_MEMBER_5, outcome: false },
+  { market_id: 9, member: COUNCIL_MEMBER_1, outcome: true },
+  { market_id: 9, member: COUNCIL_MEMBER_2, outcome: true },
+  { market_id: 9, member: COUNCIL_MEMBER_3, outcome: false },
+];
+
 async function ensureSchema(db: Queryable): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS markets (
@@ -181,6 +415,52 @@ async function ensureSchema(db: Queryable): Promise<void> {
       won_bets      INTEGER NOT NULL DEFAULT 0,
       lost_bets     INTEGER NOT NULL DEFAULT 0,
       updated_at    TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS oracle_submissions (
+      id              SERIAL PRIMARY KEY,
+      market_id       INTEGER NOT NULL UNIQUE,
+      submitter       VARCHAR(255) NOT NULL,
+      outcome         VARCHAR(255) NOT NULL,
+      bond_amount     NUMERIC NOT NULL,
+      submitted_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      status          VARCHAR(20) NOT NULL DEFAULT 'submitted',
+      decision        VARCHAR(255),
+      tx_hash         CHAR(64),
+      finalized_at    TIMESTAMPTZ,
+      council_votes   JSONB DEFAULT '{}'::jsonb,
+      nonce           VARCHAR(64),
+      request_timestamp TIMESTAMPTZ
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS oracle_disputes (
+      id                SERIAL PRIMARY KEY,
+      market_id         INTEGER NOT NULL UNIQUE,
+      submitter         VARCHAR(255) NOT NULL,
+      challenger        VARCHAR(255) NOT NULL,
+      outcome           VARCHAR(255) NOT NULL,
+      submitter_bond    NUMERIC NOT NULL,
+      challenger_bond   NUMERIC NOT NULL,
+      total_bond        NUMERIC GENERATED ALWAYS AS (submitter_bond + challenger_bond) STORED,
+      status            VARCHAR(20) NOT NULL DEFAULT 'challenged',
+      challenged_at     TIMESTAMPTZ,
+      escalated_at      TIMESTAMPTZ,
+      council_deadline  TIMESTAMPTZ,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS council_votes (
+      market_id     BIGINT NOT NULL,
+      member        CHAR(56) NOT NULL,
+      outcome       BOOLEAN NOT NULL,
+      submitted_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (market_id, member)
     )
   `);
 }
@@ -298,6 +578,97 @@ async function seedLeaderboard(db: Queryable): Promise<void> {
   }
 }
 
+async function seedOracleSubmissions(db: Queryable): Promise<void> {
+  const query = `
+    INSERT INTO oracle_submissions (
+      market_id,
+      submitter,
+      outcome,
+      bond_amount,
+      status,
+      decision
+    )
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT (market_id) DO UPDATE SET
+      submitter = EXCLUDED.submitter,
+      outcome = EXCLUDED.outcome,
+      bond_amount = EXCLUDED.bond_amount,
+      status = EXCLUDED.status,
+      decision = EXCLUDED.decision
+  `;
+
+  for (const submission of SEED_ORACLE_SUBMISSIONS) {
+    await db.query(query, [
+      submission.market_id,
+      submission.submitter,
+      submission.outcome,
+      submission.bond_amount,
+      submission.status,
+      submission.decision,
+    ]);
+  }
+}
+
+async function seedOracleDisputes(db: Queryable): Promise<void> {
+  const query = `
+    INSERT INTO oracle_disputes (
+      market_id,
+      submitter,
+      challenger,
+      outcome,
+      submitter_bond,
+      challenger_bond,
+      status,
+      challenged_at,
+      escalated_at,
+      council_deadline
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8), to_timestamp($9), to_timestamp($10))
+    ON CONFLICT (market_id) DO UPDATE SET
+      submitter = EXCLUDED.submitter,
+      challenger = EXCLUDED.challenger,
+      outcome = EXCLUDED.outcome,
+      submitter_bond = EXCLUDED.submitter_bond,
+      challenger_bond = EXCLUDED.challenger_bond,
+      status = EXCLUDED.status,
+      challenged_at = EXCLUDED.challenged_at,
+      escalated_at = EXCLUDED.escalated_at,
+      council_deadline = EXCLUDED.council_deadline
+  `;
+
+  for (const dispute of SEED_ORACLE_DISPUTES) {
+    await db.query(query, [
+      dispute.market_id,
+      dispute.submitter,
+      dispute.challenger,
+      dispute.outcome,
+      dispute.submitter_bond,
+      dispute.challenger_bond,
+      dispute.status,
+      dispute.challenged_at,
+      dispute.escalated_at,
+      dispute.council_deadline,
+    ]);
+  }
+}
+
+async function seedCouncilVotes(db: Queryable): Promise<void> {
+  const query = `
+    INSERT INTO council_votes (
+      market_id,
+      member,
+      outcome
+    )
+    VALUES ($1, $2, $3)
+    ON CONFLICT (market_id, member) DO UPDATE SET
+      outcome = EXCLUDED.outcome
+  `;
+
+  for (const vote of SEED_COUNCIL_VOTES) {
+    await db.query(query, [vote.market_id, vote.member, vote.outcome]);
+  }
+}
+
 export async function runSeed(db: Queryable): Promise<void> {
   await db.query("BEGIN");
   try {
@@ -305,6 +676,9 @@ export async function runSeed(db: Queryable): Promise<void> {
     await seedMarkets(db);
     await seedBets(db);
     await seedLeaderboard(db);
+    await seedOracleSubmissions(db);
+    await seedOracleDisputes(db);
+    await seedCouncilVotes(db);
     await db.query("COMMIT");
   } catch (error) {
     await db.query("ROLLBACK");

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { Keypair } from "@stellar/stellar-sdk";
 
 const { getBetsByBettorMock, poolQueryMock } = vi.hoisted(() => ({
   getBetsByBettorMock: vi.fn(),
@@ -11,13 +12,14 @@ vi.mock("../db/pool.js", () => ({ pool: { query: poolQueryMock } }));
 
 import { buildServer } from "../server.js";
 import { API_PREFIX, API_VERSION, routers } from "./index.js";
+import { createFakePool } from "../test/fakePool.js";
 
-const ADDRESS = `G${"A".repeat(55)}`;
+const ADDRESS = Keypair.random().publicKey();
 
 let server: FastifyInstance | undefined;
 
 function makeServer(): FastifyInstance {
-  server = buildServer({ corsOrigins: [] });
+  server = buildServer({ corsOrigins: [], pool: createFakePool(poolQueryMock) });
   return server;
 }
 

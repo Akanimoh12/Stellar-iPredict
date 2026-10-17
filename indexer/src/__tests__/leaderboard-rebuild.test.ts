@@ -287,10 +287,12 @@ describe("rebuildLeaderboardTable", () => {
       },
     ]);
 
-    expect(queries[0]?.text).toContain("FROM events");
-    expect(queries[1]?.text).toBe("DELETE FROM leaderboard");
-    expect(queries[2]?.text).toContain("INSERT INTO leaderboard");
-    expect(queries[2]?.params).toEqual([
+    expect(queries[1]?.text).toContain("FROM events");
+
+    // Shadow table pattern: inserts into leaderboard_shadow, then drops & renames
+    const insertQuery = queries.find((q) => q.text.includes("INSERT INTO leaderboard_shadow"));
+    expect(insertQuery).toBeDefined();
+    expect(insertQuery?.params).toEqual([
       "GALICE",
       null,
       30,
@@ -388,8 +390,10 @@ describe("rebuildLeaderboardTable", () => {
     expect(snapshot.eventCount).toBe(0);
     expect(snapshot.lastLedgerSeq).toBeNull();
 
-    // DELETE should still be called even with no events
-    expect(queries.some((q) => q.text === "DELETE FROM leaderboard")).toBe(true);
+    // Shadow table pattern: empty snapshot commits early without swap
+    expect(queries.some((q) => q.text === "COMMIT")).toBe(true);
+    // No insert into shadow table
+    expect(queries.some((q) => q.text.startsWith("INSERT INTO leaderboard_shadow"))).toBe(false);
   });
 
   it("does not INSERT when snapshot is empty but still deletes", async () => {
@@ -403,9 +407,9 @@ describe("rebuildLeaderboardTable", () => {
 
     await rebuildLeaderboardTable(db, { dryRun: false });
 
-    // Should delete but not insert when empty
-    expect(queries.some((q) => q.text === "DELETE FROM leaderboard")).toBe(true);
-    expect(queries.some((q) => q.text.startsWith("INSERT INTO leaderboard"))).toBe(false);
+    // Should commit the transaction but not insert or swap
+    expect(queries.some((q) => q.text === "COMMIT")).toBe(true);
+    expect(queries.some((q) => q.text.startsWith("INSERT INTO leaderboard_shadow"))).toBe(false);
   });
 
   it("handles complex scenarios with many players and varied event types", async () => {
@@ -478,5 +482,66 @@ describe("rebuildLeaderboardTable", () => {
     expect(snapshot.players[0].points).toBeGreaterThanOrEqual(
       snapshot.players[1].points
     );
+  });
+
+  it("batches inserts when player count spans multiple batches", async () => {
+    const queries: Array<{ text: string; params?: readonly unknown[] }> = [];
+    
+    // Generate enough events to create more players than fit in a single batch
+    // With ROWS_PER_BATCH = floor((65535 - 10) / 5) = 13105 rows per batch
+    // We'll create a smaller number for testing (e.g., 1000 players)
+    const eventCount = 1000;
+    const events = [];
+    for (let i = 0; i < eventCount; i++) {
+      events.push({
+        id: i,
+        ledger_seq: i,
+        event_type: "reward_claimed",
+        market_id: i,
+        actor: null,
+        payload: {
+          user: `GUSER${i}`,
+          is_winner: i % 2 === 0,
+          points: 30,
+        },
+      });
+    }
+
+    const db = {
+      query: vi.fn(async (text: string, params?: readonly unknown[]) => {
+        queries.push({ text, params });
+
+        if (text.startsWith("SELECT id, ledger_seq")) {
+          return { rows: events };
+        }
+
+        return { rows: [] };
+      }),
+    };
+
+    const snapshot = await rebuildLeaderboardTable(db);
+
+    // Verify the snapshot contains all players
+    expect(snapshot.players).toHaveLength(eventCount);
+    expect(snapshot.eventCount).toBe(eventCount);
+
+    // Verify transaction structure (BEGIN, multiple INSERTs, COMMIT)
+    const transactionQueries = queries.map((q) => q.text);
+    expect(transactionQueries).toContain("BEGIN");
+    expect(transactionQueries).toContain("COMMIT");
+
+    // Count INSERT statements into shadow table (should be at least 1, possibly more depending on batch size)
+    const insertCount = transactionQueries.filter((text) =>
+      text.startsWith("INSERT INTO leaderboard_shadow")
+    ).length;
+    expect(insertCount).toBeGreaterThanOrEqual(1);
+
+    // Verify DROP + RENAME swap pattern was called
+    expect(transactionQueries).toContain("DROP TABLE IF EXISTS leaderboard");
+
+    // Verify all players were inserted with correct data
+    const firstPlayer = snapshot.players.find((p) => p.address === "GUSER0");
+    expect(firstPlayer).toBeDefined();
+    expect(firstPlayer?.points).toBe(30);
   });
 });

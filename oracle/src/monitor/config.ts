@@ -24,6 +24,9 @@ const schema = z.object({
   /** Hours an escalated market may sit without council votes before alerting. */
   COUNCIL_INACTIVITY_HOURS: positiveNumber.default(48),
 
+  /** Hours before council deadline to alert that deadline is approaching. */
+  COUNCIL_DEADLINE_WARNING_HOURS: positiveNumber.default(12),
+
   /** Minimum submitter bond, in XLM. Submissions below it are flagged. */
   SUBMITTER_BOND_XLM: positiveNumber.default(100),
 

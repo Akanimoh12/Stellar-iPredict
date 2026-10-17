@@ -1,0 +1,13 @@
+{
+  "data": {
+    "markets": [
+      {
+        "id": "us-election-2024",
+        "question": "Will Candidate A win the 2024 Presidential Election?",
+        "outcome": "Candidate A",
+        "status": "resolved",
+        "resolution": "Candidate A"
+      }
+    ]
+  }
+}

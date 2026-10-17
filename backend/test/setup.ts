@@ -22,7 +22,10 @@ const MIGRATIONS_DIR = path.resolve(__dirname, "../../db/migrations");
 
 /** Tables managed by db/migrations, ordered so TRUNCATE ... CASCADE never fights a FK. */
 const MANAGED_TABLES = [
+  "idempotency_keys",
+  "oracle_disputes",
   "oracle_submissions",
+  "oracle_providers",
   "events",
   "bets",
   "leaderboard",
@@ -88,7 +91,7 @@ export async function runMigrations(pool: Pool): Promise<void> {
 
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
-    .filter((file) => file.endsWith(".sql"))
+    .filter((file) => file.endsWith(".sql") && !file.endsWith(".down.sql"))
     .sort();
 
   for (const file of files) {

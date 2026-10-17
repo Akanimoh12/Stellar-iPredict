@@ -1,0 +1,97 @@
+name: Synthetic read-path monitor
+
+# External vantage point for the synthetic checks:
+#  * runs every 5 minutes and after manual dispatch,
+#  * exercises the critical read paths from a GitHub-hosted runner — outside
+#    the deployment, so DNS, TLS, the edge and the ingress are all part of
+#    every probe (what an in-cluster probe cannot see),
+#  * sends failure / latency-degradation alerts through the configured webhook,
+#  * fails the run on a critical finding (second consecutive failed run, or a
+#    monitor gap) — a failed scheduled workflow is itself an alert, because
+#    GitHub notifies everyone who watches the repository.
+#
+# The systemd timer (infra/synthetic-monitor/systemd/) is the primary,
+# every-2-minutes schedule on the monitor host; this workflow is the second,
+# independent network path to production.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-read-paths:
+    name: Exercise critical read paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore monitor state (failure counting + alert de-duplication)
+        uses: actions/cache/restore@v4
+        with:
+          path: infra/synthetic-monitor/.state.json
+          key: synthetic-monitor-state-${{ github.run_id }}
+          restore-keys: |
+            synthetic-monitor-state-
+
+      - name: Self-test the monitor
+        run: python3 infra/synthetic-monitor/check-synthetic.py --self-test
+
+      - name: Check every critical read path
+        id: check
+        env:
+          SYNTHETIC_MONITOR_WEBHOOK_URL: ${{ secrets.SYNTHETIC_MONITOR_WEBHOOK_URL }}
+          SYNTHETIC_MONITOR_WEBHOOK_FORMAT: ${{ vars.SYNTHETIC_MONITOR_WEBHOOK_FORMAT || 'slack' }}
+          SYNTHETIC_MONITOR_HEARTBEAT_URL: ${{ secrets.SYNTHETIC_MONITOR_HEARTBEAT_URL }}
+        run: |
+          python3 infra/synthetic-monitor/check-synthetic.py \
+            --state-file infra/synthetic-monitor/.state.json \
+            --fail-on critical \
+            --stale-after-hours 3 \
+            --json > synthetic-report.json
+
+      - name: Publish report to the job summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = "synthetic-report.json"
+          if not os.path.exists(path):
+              print("no report produced", file=sys.stderr)
+              raise SystemExit(0)
+          rep = json.load(open(path))
+          lines = ["## Synthetic read-path report", ""]
+          lines += ["| check | section | result | HTTP | latency | SLO | p50 | detail |",
+                    "|---|---|---|---|---|---|---|---|"]
+          for r in rep["results"]:
+              cond = r["condition"]
+              latency = "-" if r["latency_ms"] is None else f"{r['latency_ms']:.0f} ms"
+              p50 = "-" if r["baseline_p50_ms"] is None else f"{r['baseline_p50_ms']:.0f} ms"
+              status = "-" if r["status"] is None else r["status"]
+              lines.append(f"| {r['check']} | {r['section']} | {cond} | {status} "
+                           f"| {latency} | {r['max_ms']} ms | {p50} | {r['detail'] or '-'} |")
+          if rep["pending"]:
+              lines += ["", "**Pending (not yet deployed, not checked):** "
+                        + ", ".join(rep["pending"])]
+          if rep["watchdog"]:
+              lines += ["", f"> **Watchdog:** {rep['watchdog']}"]
+          lines += ["", f"**{len(rep['alerts'])} alert(s)**, "
+                        f"**{len(rep['recoveries'])} recovery notice(s)** this run."]
+          for a in rep["alerts"]:
+              lines.append(f"- `{a['check']}` — **{a['level']}** — {a['reason']}")
+          for r in rep["recoveries"]:
+              lines.append(f"- `{r['check']}` — recovered (was {r['was']})")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          PY
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: infra/synthetic-monitor/.state.json
+          key: synthetic-monitor-state-${{ github.run_id }}

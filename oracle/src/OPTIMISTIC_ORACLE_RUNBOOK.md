@@ -1,5 +1,13 @@
 # Optimistic Oracle Runbook
 
+> **This file has moved.**
+> The canonical location is [`oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md`](../../docs/OPTIMISTIC_ORACLE_RUNBOOK.md).
+> This copy is kept so existing bookmarks and editor jumps still resolve, but
+> the authoritative version is in `oracle/docs/`. Please update any links.
+
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](../../docs/STUCK_MARKET_RUNBOOK.md).
+
 This runbook documents the end-to-end operational procedures for the iPredict
 optimistic oracle: **submit**, **challenge**, and **finalize** operations. It
 is the primary reference for operators, on-call engineers, and council members

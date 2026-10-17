@@ -57,7 +57,7 @@ export function xlmToStroops(xlm: AmountInput): bigint {
   let text: string;
 
   if (typeof xlm === "number") {
-    if (!Number.isFinite(xlm) || Math.abs(xlm) >= 1e21) {
+    if (!Number.isFinite(xlm) || Math.abs(xlm) > Number.MAX_SAFE_INTEGER) {
       throw new TypeError(
         "xlm must be a non-negative decimal with at most 7 decimal places"
       );
@@ -86,8 +86,31 @@ export function xlmToStroops(xlm: AmountInput): bigint {
 }
 
 /**
+ * Adds two XLM amount representations exactly without converting to floating-point numbers.
+ * The result is formatted as a fixed seven-decimal string.
+ */
+export function addXlmAmounts(a: AmountInput, b: AmountInput): string {
+  const stroopsA = xlmToStroops(a);
+  const stroopsB = xlmToStroops(b);
+  return stroopsToXlm(stroopsA + stroopsB);
+}
+
+/**
+ * Ensures the PostgreSQL client driver returns NUMERIC columns (OID 1700)
+ * as raw strings rather than parsing them into lossy JavaScript numbers.
+ */
+export function configurePgNumericParser(pgTypes: {
+  setTypeParser: (oid: number, fn: (val: string) => unknown) => void;
+  builtins?: { NUMERIC: number };
+}): void {
+  const numericOid = pgTypes.builtins?.NUMERIC ?? 1700;
+  pgTypes.setTypeParser(numericOid, (val: string) => val);
+}
+
+/**
  * Converts XLM to a JavaScript number of stroops when the result is safe.
- * Use xlmToStroops for amounts that may exceed Number.MAX_SAFE_INTEGER.
+ * @deprecated Use xlmToStroops for amounts that may exceed Number.MAX_SAFE_INTEGER.
+ * Any amount path that converts through a JS number can silently lose precision on large values.
  */
 export function xlmToStroopsNumber(xlm: AmountInput): number {
   const stroops = xlmToStroops(xlm);
@@ -98,3 +121,4 @@ export function xlmToStroopsNumber(xlm: AmountInput): number {
 
   return Number(stroops);
 }
+

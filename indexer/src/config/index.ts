@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+/**
+ * Upper bound for `EVENTS_PER_PAGE`.
+ *
+ * The Soroban RPC `getEvents` endpoint accepts limits up to 10,000, but
+ * allowing arbitrarily large pages lets a misconfigured indexer materialise
+ * an unbounded batch of decoded events in memory during a backfill over a
+ * busy ledger range. `1000` is 5x the default and keeps peak memory
+ * proportional to the page size rather than to the size of the ledger range
+ * being replayed. Values above this are rejected at startup.
+ */
+export const MAX_EVENTS_PER_PAGE = 1000;
+
 const configSchema = z.object({
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
   REDIS_URL: z.string().url("REDIS_URL must be a valid URL").default("redis://localhost:6379"),
@@ -18,6 +30,7 @@ const configSchema = z.object({
     .number()
     .int("EVENTS_PER_PAGE must be an integer")
     .positive("EVENTS_PER_PAGE must be positive")
+    .max(MAX_EVENTS_PER_PAGE, `EVENTS_PER_PAGE must be at most ${MAX_EVENTS_PER_PAGE}`)
     .default(200),
   START_LEDGER: z.coerce
     .number()

@@ -20,21 +20,73 @@ export {
   leaderboardKey,
   statsKey,
   betsKey,
+  oddsKey,
+  CACHE_TTLS,
+  CACHE_TTL_MS,
+  CACHE_KEYS,
+  CACHE_REGISTRY,
+  CACHE_ENTITIES,
+  cacheNamespaceOf,
+  type CacheEntity,
+  type CacheNamespace,
 } from "./cacheKeys.js";
 
 export {
-  SlidingWindowStore,
+  cacheControlPublic,
+  cacheControlPrivate,
+  cacheControlNoStore,
+} from "./cacheControl.js";
+
+export {
+  RedisCircuitBreaker,
+  DEFAULT_CIRCUIT_OPTIONS,
+  getCircuitBreaker,
+  resetCircuitBreaker,
+  serializeCircuitMetrics,
+  type CircuitBreakerOptions,
+  type CircuitMetrics,
+  type CircuitState,
+} from "./circuitBreaker.js";
+
+export {
+    SlidingWindowStore,
   resolveRateLimit,
   registerRateLimiter,
-  RATE_LIMITS,
+    RATE_LIMITS,
+  RATE_LIMITS_AUTHENTICATED,
+  RATE_LIMITS_ANONYMOUS,
   type RateLimitConfig,
   type RateLimitStore,
   type RateLimitResult,
 } from "./rateLimiter.js";
 
 export { RedisSlidingWindowStore } from "./rateLimiterRedis.js";
-export { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "./negativeCache.js";
+export {
+  NegativeCache,
+  NEGATIVE_CACHE_TTL_MS,
+  computeNegativeHitRate,
+  getNegativeCacheHitRate,
+  getNegativeCacheStats,
+  recordNegativeCacheHit,
+  recordNegativeCacheMiss,
+  resetNegativeCacheStats,
+  serializeNegativeCacheMetrics,
+  type NegativeCacheCounts,
+  type NegativeCacheStatsSnapshot,
+} from "./negativeCache.js";
 export { getOrSet, withSingleFlight } from "./cacheAside.js";
+export {
+  CACHE_NAMESPACES,
+  computeHitRate,
+  getCacheHitRate,
+  getCacheStats,
+  recordCacheHit,
+  recordCacheMiss,
+  resetCacheStats,
+  serializeCacheMetrics,
+  type CacheCounts,
+  type CacheStatsSnapshot,
+} from "./hitRate.js";
 export {
   invalidate,
   invalidateOnMarketCreated,

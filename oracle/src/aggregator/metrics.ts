@@ -18,8 +18,120 @@
  * ```
  */
 
+import { createServer, type Server } from "node:http";
+import type { QueryablePool } from "./tally.js";
+
+export interface ResolutionMetricStore {
+  recordResolution(entry: ResolutionLagEntry): Promise<void>;
+}
+
+/** Creates the durable resolution observation writer used after finalization. */
+export function createPostgresResolutionMetricStore(pool: QueryablePool): ResolutionMetricStore {
+  return {
+    async recordResolution(entry) {
+      await pool.query(
+        `INSERT INTO oracle_resolution_lag (market_id, end_time, resolved_at_epoch, lag_hours)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (market_id) DO NOTHING`,
+        [entry.marketId, entry.endTime, entry.resolvedAt, entry.lagHours],
+      );
+    },
+  };
+}
+
+/**
+ * Meaningful histogram bucket boundaries in hours for oracle resolution lag (#450).
+ * Tuned for market expiry-to-resolution cycles (15m up to 1 week).
+ */
+export const DEFAULT_LAG_BUCKETS_HOURS: readonly number[] = Object.freeze([
+  0.25, 0.5, 1, 2, 4, 8, 12, 24, 48, 72, 168, Infinity,
+]);
+
 /** Canonical Prometheus-style metric name for resolution lag in hours. */
 export const ORACLE_RESOLUTION_LAG_H_METRIC = "oracle_resolution_lag_h" as const;
+
+/**
+ * Canonical metric name for how long the aggregator has been unable to
+ * complete a poll cycle. `0` while healthy. Issue #645.
+ */
+export const ORACLE_AGGREGATOR_UNAVAILABLE_SECONDS_METRIC =
+  "oracle_aggregator_unavailable_seconds" as const;
+
+/** Health level derived from how long the aggregator has been stalled. */
+export type AggregatorAvailabilityLevel = "ok" | "degraded" | "critical";
+
+export interface AggregatorAvailability {
+  /** `true` while the last successful poll is within `degradedAfterMs`. */
+  available: boolean;
+  /** Epoch ms of the last completed poll, or `null` if none yet. */
+  lastPollCompletedAt: number | null;
+  /** ms since the last completed poll, or `null` if none yet. */
+  sinceLastPollMs: number | null;
+  /** Consecutive failed poll attempts since the last success. */
+  consecutiveFailures: number;
+  level: AggregatorAvailabilityLevel;
+  /** `true` once the stall has exceeded `degradedAfterMs`. */
+  degraded: boolean;
+  /**
+   * `true` once the stall has exceeded `alertAfterMs` — sustained
+   * unavailability that operators must be paged about.
+   */
+  shouldAlert: boolean;
+}
+
+export interface AssessAggregatorAvailabilityInput {
+  lastPollCompletedAt: number | null;
+  /** "now" in epoch ms. */
+  now: number;
+  consecutiveFailures?: number;
+  /** Stall beyond this (ms) is degraded. Default 15 min. */
+  degradedAfterMs?: number;
+  /** Stall beyond this (ms) alerts. Default 60 min. */
+  alertAfterMs?: number;
+}
+
+const DEFAULT_DEGRADED_AFTER_MS = 15 * 60_000;
+const DEFAULT_ALERT_AFTER_MS = 60 * 60_000;
+
+/**
+ * Pure assessment of aggregator availability from its last successful poll.
+ *
+ * The backend cannot see the aggregator process directly; it infers the same
+ * condition from unresolved-but-overdue markets. This function is the shared
+ * definition of "how stale is too stale" so both sides agree. Issue #645.
+ */
+export function assessAggregatorAvailability(
+  input: AssessAggregatorAvailabilityInput,
+): AggregatorAvailability {
+  const degradedAfterMs = input.degradedAfterMs ?? DEFAULT_DEGRADED_AFTER_MS;
+  const alertAfterMs = input.alertAfterMs ?? DEFAULT_ALERT_AFTER_MS;
+  const consecutiveFailures = input.consecutiveFailures ?? 0;
+
+  const sinceLastPollMs =
+    input.lastPollCompletedAt === null
+      ? null
+      : Math.max(0, input.now - input.lastPollCompletedAt);
+
+  // No poll has ever completed — treat as unavailable from process start.
+  const stalledMs = sinceLastPollMs ?? Number.POSITIVE_INFINITY;
+  const degraded = stalledMs > degradedAfterMs;
+  const shouldAlert = stalledMs > alertAfterMs;
+  const level: AggregatorAvailabilityLevel = shouldAlert
+    ? "critical"
+    : degraded
+      ? "degraded"
+      : "ok";
+
+  return {
+    available: !degraded,
+    lastPollCompletedAt: input.lastPollCompletedAt,
+    sinceLastPollMs,
+    consecutiveFailures,
+    level,
+    degraded,
+    shouldAlert,
+  };
+}
 
 export interface ResolutionLagEntry {
   marketId: string;
@@ -60,13 +172,30 @@ export interface NamedMetric {
 }
 
 export class AggregatorMetrics {
+  public static readonly MAX_ENTRIES = 50;
   private readonly entries: ResolutionLagEntry[] = [];
+  private readonly lagBuckets: readonly number[];
+  private readonly lagBucketCounts: number[];
+  private _lagSumHours = 0;
+  private _lagCount = 0;
+
+  private _marketsProcessed = 0;
+  private _marketsFinalized = 0;
+  private _marketsSkipped = 0;
+  private _marketsFailed = 0;
+
   private _totalSubmissions = 0;
   private _totalDisputes = 0;
+  private _lastPollCompletedAt: number | null = null;
+  private _consecutivePollFailures = 0;
+
+  constructor(lagBuckets: readonly number[] = DEFAULT_LAG_BUCKETS_HOURS) {
+    this.lagBuckets = lagBuckets;
+    this.lagBucketCounts = new Array(lagBuckets.length).fill(0);
+  }
 
   /**
-   * Record a resolution event and return a `NamedMetric` for
-   * `oracle_resolution_lag_h` alongside the raw entry.
+   * Record a resolution event and update the resolution lag histogram.
    *
    * @param marketId   - unique market identifier
    * @param endTime    - market expiry Unix timestamp (seconds)
@@ -80,8 +209,68 @@ export class AggregatorMetrics {
     const lagSeconds = resolvedAt - endTime;
     const lagHours = lagSeconds / 3_600;
     const entry: ResolutionLagEntry = { marketId, endTime, resolvedAt, lagHours };
+
+    // Record into histogram (ignore negative lag for sum, but record in bucket)
+    this._lagSumHours += Math.max(0, lagHours);
+    this._lagCount += 1;
+    for (let i = 0; i < this.lagBuckets.length; i++) {
+      if (lagHours <= this.lagBuckets[i]) {
+        this.lagBucketCounts[i] += 1;
+      }
+    }
+
+    // Keep bounded in-memory list for snapshot/recent queries
     this.entries.push(entry);
+    if (this.entries.length > AggregatorMetrics.MAX_ENTRIES) {
+      this.entries.shift();
+    }
+
     return entry;
+  }
+
+  /** Record a market being evaluated in the poll iteration. */
+  recordMarketProcessed(): void {
+    this._marketsProcessed += 1;
+  }
+
+  /** Record a market successfully finalized on-chain. */
+  recordMarketFinalized(): void {
+    this._marketsFinalized += 1;
+  }
+
+  /** Record a market skipped (e.g. cancelled, already resolved, threshold not met). */
+  recordMarketSkipped(): void {
+    this._marketsSkipped += 1;
+  }
+
+  /** Record a market failing processing or erroring. */
+  recordMarketFailed(): void {
+    this._marketsFailed += 1;
+  }
+
+  get marketsProcessed(): number {
+    return this._marketsProcessed;
+  }
+
+  get marketsFinalized(): number {
+    return this._marketsFinalized;
+  }
+
+  get marketsSkipped(): number {
+    return this._marketsSkipped;
+  }
+
+  get marketsFailed(): number {
+    return this._marketsFailed;
+  }
+
+  get lagHistogram() {
+    return {
+      buckets: this.lagBuckets,
+      counts: [...this.lagBucketCounts],
+      sum: this._lagSumHours,
+      count: this._lagCount,
+    };
   }
 
   /** Record a new submission event. */
@@ -92,6 +281,64 @@ export class AggregatorMetrics {
   /** Record a new dispute (escalated market) event. */
   recordDispute(): void {
     this._totalDisputes += 1;
+  }
+
+  /**
+   * Record a poll cycle that completed. Clears the failure streak and is the
+   * heartbeat `assessAggregatorAvailability()` measures staleness against.
+   */
+  recordPollCompleted(atMs: number = Date.now()): void {
+    this._lastPollCompletedAt = atMs;
+    this._consecutivePollFailures = 0;
+  }
+
+  /** Record a poll cycle that threw before completing. */
+  recordPollFailure(): void {
+    this._consecutivePollFailures += 1;
+  }
+
+  /** Epoch ms of the last completed poll cycle, or `null` if none yet. */
+  get lastPollCompletedAt(): number | null {
+    return this._lastPollCompletedAt;
+  }
+
+  /**
+   * Current availability assessment. `now` and the thresholds are injected so
+   * this stays testable and matches the backend's overdue-market heuristic.
+   * Issue #645.
+   */
+  availability(
+    nowMs: number = Date.now(),
+    opts: { degradedAfterMs?: number; alertAfterMs?: number } = {},
+  ): AggregatorAvailability {
+    return assessAggregatorAvailability({
+      lastPollCompletedAt: this._lastPollCompletedAt,
+      now: nowMs,
+      consecutiveFailures: this._consecutivePollFailures,
+      degradedAfterMs: opts.degradedAfterMs,
+      alertAfterMs: opts.alertAfterMs,
+    });
+  }
+
+  /**
+   * Prometheus text lines for the aggregator-availability gauges. Pair with the
+   * `oracle_aggregator_unavailable_seconds` alert rule (see
+   * `docs/DEPLOYMENT-GUIDE.md` § "Oracle aggregator outage").
+   */
+  serializeAvailability(
+    nowMs: number = Date.now(),
+    opts: { degradedAfterMs?: number; alertAfterMs?: number } = {},
+  ): string[] {
+    const a = this.availability(nowMs, opts);
+    // Seconds stalled once degraded; 0 while healthy so the gauge is a clean
+    // "how long has this been broken" signal for alerting.
+    const unavailableSeconds =
+      a.degraded && a.sinceLastPollMs !== null ? a.sinceLastPollMs / 1_000 : 0;
+    return [
+      `${ORACLE_AGGREGATOR_UNAVAILABLE_SECONDS_METRIC} ${unavailableSeconds}`,
+      `oracle_aggregator_available ${a.available ? 1 : 0}`,
+      `oracle_aggregator_consecutive_poll_failures ${a.consecutiveFailures}`,
+    ];
   }
 
   /**
@@ -193,7 +440,132 @@ export class AggregatorMetrics {
   /** Reset all recorded metrics. */
   reset(): void {
     this.entries.length = 0;
+    this.lagBucketCounts.fill(0);
+    this._lagSumHours = 0;
+    this._lagCount = 0;
+    this._marketsProcessed = 0;
+    this._marketsFinalized = 0;
+    this._marketsSkipped = 0;
+    this._marketsFailed = 0;
     this._totalSubmissions = 0;
     this._totalDisputes = 0;
+    this._lastPollCompletedAt = null;
+    this._consecutivePollFailures = 0;
+  }
+
+  /**
+   * Export aggregator metrics in standard Prometheus exposition format (#450).
+   */
+  toPrometheus(nowMs: number = Date.now()): string {
+    const lines: string[] = [];
+
+    // Counters for markets processed, finalized, skipped, failed
+    lines.push("# HELP oracle_aggregator_markets_processed_total Total markets processed by the aggregator");
+    lines.push("# TYPE oracle_aggregator_markets_processed_total counter");
+    lines.push(`oracle_aggregator_markets_processed_total ${this._marketsProcessed}`);
+
+    lines.push("# HELP oracle_aggregator_markets_finalized_total Total markets finalized on-chain by the aggregator");
+    lines.push("# TYPE oracle_aggregator_markets_finalized_total counter");
+    lines.push(`oracle_aggregator_markets_finalized_total ${this._marketsFinalized}`);
+
+    lines.push("# HELP oracle_aggregator_markets_skipped_total Total markets skipped during processing");
+    lines.push("# TYPE oracle_aggregator_markets_skipped_total counter");
+    lines.push(`oracle_aggregator_markets_skipped_total ${this._marketsSkipped}`);
+
+    lines.push("# HELP oracle_aggregator_markets_failed_total Total markets that failed during processing");
+    lines.push("# TYPE oracle_aggregator_markets_failed_total counter");
+    lines.push(`oracle_aggregator_markets_failed_total ${this._marketsFailed}`);
+
+    lines.push("# HELP oracle_aggregator_submissions_total Total oracle submissions observed");
+    lines.push("# TYPE oracle_aggregator_submissions_total counter");
+    lines.push(`oracle_aggregator_submissions_total ${this._totalSubmissions}`);
+
+    lines.push("# HELP oracle_aggregator_disputes_total Total oracle disputes observed");
+    lines.push("# TYPE oracle_aggregator_disputes_total counter");
+    lines.push(`oracle_aggregator_disputes_total ${this._totalDisputes}`);
+
+    // Resolution lag histogram
+    lines.push("# HELP oracle_aggregator_resolution_lag_hours Lag between market expiry and resolution in hours");
+    lines.push("# TYPE oracle_aggregator_resolution_lag_hours histogram");
+    for (let i = 0; i < this.lagBuckets.length; i++) {
+      const le = this.lagBuckets[i] === Infinity ? "+Inf" : String(this.lagBuckets[i]);
+      lines.push(`oracle_aggregator_resolution_lag_hours_bucket{le="${le}"} ${this.lagBucketCounts[i]}`);
+    }
+    lines.push(`oracle_aggregator_resolution_lag_hours_sum ${this._lagSumHours}`);
+    lines.push(`oracle_aggregator_resolution_lag_hours_count ${this._lagCount}`);
+
+    // Availability gauges
+    const avail = this.serializeAvailability(nowMs);
+    for (const line of avail) {
+      lines.push(line);
+    }
+
+    return lines.join("\n") + "\n";
   }
 }
+
+export interface AggregatorMetricsServerOptions {
+  metrics: AggregatorMetrics;
+  port?: number;
+  host?: string;
+}
+
+/**
+ * Scrape server exposing aggregator metrics at GET /metrics.
+ */
+export class AggregatorMetricsServer {
+  private server: Server | null = null;
+  private readonly port: number;
+  private readonly host: string;
+  private readonly metrics: AggregatorMetrics;
+
+  constructor(options: AggregatorMetricsServerOptions) {
+    this.metrics = options.metrics;
+    this.port = options.port ?? 9102;
+    this.host = options.host ?? "0.0.0.0";
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = createServer((req, res) => {
+        const path = (req.url ?? "").split("?")[0];
+        if (path === "/metrics") {
+          const body = this.metrics.toPrometheus();
+          res.writeHead(200, {
+            "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+          });
+          res.end(body);
+        } else if (path === "/health") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok" }));
+        } else {
+          res.writeHead(404);
+          res.end("Not Found");
+        }
+      });
+
+      server.on("error", reject);
+      server.listen(this.port, this.host, () => {
+        this.server = server;
+        resolve();
+      });
+    });
+  }
+
+  address(): { address: string; port: number } | null {
+    const addr = this.server?.address();
+    if (!addr || typeof addr === "string") return null;
+    return { address: addr.address, port: addr.port };
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.server) return resolve();
+      this.server.close(() => {
+        this.server = null;
+        resolve();
+      });
+    });
+  }
+}
+

@@ -74,8 +74,30 @@ In production it runs as its own `oracle-monitor` service from the same image
 as the aggregator — see
 [`infra/README.md`](../infra/README.md#why-the-oracle-is-two-services).
 
+## Testing & Quality Assurance
+
+### Unit & Integration Tests
+
+```bash
+npm test
+```
+
+### Mutation Testing
+
+Coverage measures which lines execute, but mutation testing verifies whether assertions actually detect logic and boundary defects in high-value consensus and settlement code.
+
+```bash
+npm run test:mutation
+```
+
+- **Target Mutation Score:** `>= 90%` for critical modules (`src/aggregator/threshold.ts`, `src/aggregator/bond-reconciliation.ts`).
+- **Reports:** Generated at `oracle/reports/mutation-report.md` and `oracle/reports/mutation-report.json`.
+
 ## Documentation
 
+- **[Oracle Provider Integration Contract](../docs/ORACLE_AND_BACKEND.md#part-5--oracle-provider-integration-contract)** — integration guide for oracle providers: authentication, canonical signing, error codes, and client example
+- **[Webhook Signature Verification](./docs/WEBHOOK_VERIFICATION.md)** — guide for verifying HMAC-SHA256 signatures on outgoing notifications
+- **[Stuck Market Runbook](./docs/STUCK_MARKET_RUNBOOK.md)** — on-call procedure for `oracle.monitor.market_stuck`: diagnosis, remediation, authorization and bond consequences
 - **[Council Runbook](./docs/COUNCIL_RUNBOOK.md)** — operational guide for council members and aggregator operators
 - **[Architecture Overview](../docs/ORACLE_AND_BACKEND.md)** — design document for oracle and backend systems
 
@@ -86,14 +108,18 @@ Pick an open issue labelled `area:oracle`, claim it, branch off
 
 ### Aggregator image runbook
 
-Build the production aggregator image from the `oracle/` directory. The
-Dockerfile lives under `src/aggregator/` so the build context can still
-include `package-lock.json`, `tsconfig.json`, and the full source tree.
+Build the production aggregator image from the repository root. The
+Dockerfile remains under `oracle/src/aggregator/`, but the root build context
+is required because the oracle imports the `@ipredict/shared` workspace.
 
 ```bash
-cd oracle
-docker build -f src/aggregator/Dockerfile -t ipredict-oracle-aggregator:local .
+docker build -f oracle/src/aggregator/Dockerfile -t ipredict-oracle-aggregator:local .
 ```
+
+The image runs as the non-root `aggregator` user. Its Docker healthcheck calls
+`/health/ready` on `HEALTH_PORT` (9103 by default), so a stale poll loop or an
+unready DB/RPC dependency marks the container unhealthy; Prometheus metrics
+remain on port 9102.
 
 Run the image with the same environment variables documented in
 `oracle/.env.example`.

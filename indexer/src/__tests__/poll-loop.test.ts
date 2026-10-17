@@ -158,3 +158,158 @@ describe("runPollLoop", () => {
     expect(rpc.getEvents).not.toHaveBeenCalled();
   });
 });
+
+describe("Atomicity & Crash-Recovery Guarantees", () => {
+  it("commits cursor position and event effects atomically using processEventsWithCheckpoint when implemented", async () => {
+    const event = makeRpcEvent({ contractId: CONTRACT_A, ledger: 101 });
+    const rpc = makeMockRpc({ events: [event], latestLedger: 105 });
+
+    const processEventsWithCheckpoint = vi.fn().mockResolvedValue(undefined);
+    const insertEvents = vi.fn();
+    const saveCheckpointLedger = vi.fn();
+
+    const db: PollDb = {
+      getCheckpointLedger: vi.fn().mockResolvedValue(100),
+      saveCheckpointLedger,
+      insertEvents,
+      processEventsWithCheckpoint,
+    };
+
+    const result = await pollOnce({ rpc, db, contractIds: [CONTRACT_A] });
+
+    expect(processEventsWithCheckpoint).toHaveBeenCalledWith([event], 105);
+    // Non-atomic fallback methods should NOT be called when atomic handler is used
+    expect(insertEvents).not.toHaveBeenCalled();
+    expect(saveCheckpointLedger).not.toHaveBeenCalled();
+    expect(result.latestLedger).toBe(105);
+  });
+
+  it("ensures deliberate ordering: inserts events before advancing checkpoint in fallback mode", async () => {
+    const event = makeRpcEvent({ contractId: CONTRACT_A, ledger: 101 });
+    const rpc = makeMockRpc({ events: [event], latestLedger: 105 });
+
+    const executionOrder: string[] = [];
+    const db: PollDb = {
+      getCheckpointLedger: vi.fn().mockResolvedValue(100),
+      insertEvents: vi.fn().mockImplementation(async () => {
+        executionOrder.push("insertEvents");
+      }),
+      saveCheckpointLedger: vi.fn().mockImplementation(async () => {
+        executionOrder.push("saveCheckpointLedger");
+      }),
+    };
+
+    await pollOnce({ rpc, db, contractIds: [CONTRACT_A] });
+
+    expect(executionOrder).toEqual(["insertEvents", "saveCheckpointLedger"]);
+  });
+
+  it("crash mid-batch never causes an event to be permanently skipped, and reprocessing produces no duplicated effects", async () => {
+    // Simulated database state
+    let persistedCheckpoint: number | null = 100;
+    const appliedEvents: Array<{ txHash: string; eventIndex: number; ledger: number; payload: string }> = [];
+    const eventAuditLog = new Set<string>(); // Simulates UNIQUE(tx_hash, event_index)
+
+    // Idempotent event applicator simulating handler behavior with insertProcessedEvent
+    const applyEventIdempotent = (event: { txHash: string; eventIndex: number; ledger: number; payload: string }) => {
+      const key = `${event.txHash}:${event.eventIndex}`;
+      if (eventAuditLog.has(key)) {
+        // Duplicate skipped due to ON CONFLICT (tx_hash, event_index) DO NOTHING
+        return false;
+      }
+      eventAuditLog.add(key);
+      appliedEvents.push(event);
+      return true;
+    };
+
+    const batchEvents: RpcEvent[] = [
+      makeRpcEvent({ contractId: CONTRACT_A, ledger: 101, body: { txHash: "tx1", eventIndex: 0, val: "A" } }),
+      makeRpcEvent({ contractId: CONTRACT_A, ledger: 102, body: { txHash: "tx2", eventIndex: 0, val: "B" } }),
+      makeRpcEvent({ contractId: CONTRACT_A, ledger: 103, body: { txHash: "tx3", eventIndex: 0, val: "C" } }),
+    ];
+
+    const rpc: RpcClient = {
+      getEvents: vi.fn().mockImplementation(async ({ startLedger }) => {
+        const events = batchEvents.filter((e) => e.ledger >= startLedger);
+        return { events, latestLedger: 103 };
+      }),
+    };
+
+    // Step 1: Initial poll fails/crashes mid-batch (e.g. after processing second event)
+    let shouldCrash = true;
+    const db: PollDb = {
+      getCheckpointLedger: async () => persistedCheckpoint,
+      saveCheckpointLedger: async (ledger: number) => {
+        persistedCheckpoint = ledger;
+      },
+      insertEvents: async () => {},
+      processEventsWithCheckpoint: async (events: RpcEvent[], checkpointLedger: number) => {
+        // Atomic transaction simulator
+        const staging: typeof appliedEvents = [];
+        const stagingKeys: string[] = [];
+
+        for (let i = 0; i < events.length; i++) {
+          if (shouldCrash && i === 2) {
+            // Simulated crash mid-batch before commit
+            throw new Error("Simulated node crash mid-batch");
+          }
+          const body = events[i].body as any;
+          const key = `${body.txHash}:${body.eventIndex}`;
+          if (!eventAuditLog.has(key)) {
+            stagingKeys.push(key);
+            staging.push({
+              txHash: body.txHash,
+              eventIndex: body.eventIndex,
+              ledger: events[i].ledger,
+              payload: body.val,
+            });
+          }
+        }
+
+        // Commit transaction atomically
+        for (const k of stagingKeys) eventAuditLog.add(k);
+        for (const item of staging) appliedEvents.push(item);
+        persistedCheckpoint = checkpointLedger;
+      },
+    };
+
+    // Poll attempt 1: Crashes mid-batch
+    await expect(pollOnce({ rpc, db, contractIds: [CONTRACT_A] })).rejects.toThrow("Simulated node crash mid-batch");
+
+    // Assert that checkpoint was NOT updated after the crash
+    expect(persistedCheckpoint).toBe(100);
+    // Assert that atomic rollback prevented partial uncommitted effects
+    expect(appliedEvents).toHaveLength(0);
+
+    // Step 2: Recovery poll after indexer restart
+    shouldCrash = false;
+    const recoveryResult = await pollOnce({ rpc, db, contractIds: [CONTRACT_A] });
+
+    // Assert that recovery re-polled starting from checkpoint + 1 (101)
+    expect(rpc.getEvents).toHaveBeenLastCalledWith(
+      expect.objectContaining({ startLedger: 101 })
+    );
+
+    // Assert all 3 events are processed without any being skipped
+    expect(appliedEvents).toHaveLength(3);
+    expect(appliedEvents.map((e) => e.txHash)).toEqual(["tx1", "tx2", "tx3"]);
+
+    // Assert checkpoint is successfully advanced to 103
+    expect(persistedCheckpoint).toBe(103);
+    expect(recoveryResult.latestLedger).toBe(103);
+
+    // Step 3: Reprocessing the exact same range (e.g. redundant replay) produces no duplicate effects
+    const replayResult = await pollOnce({
+      rpc: {
+        getEvents: vi.fn().mockResolvedValue({ events: batchEvents, latestLedger: 103 }),
+      },
+      db,
+      contractIds: [CONTRACT_A],
+    });
+
+    // Still exactly 3 applied events due to idempotency
+    expect(appliedEvents).toHaveLength(3);
+    expect(replayResult.latestLedger).toBe(103);
+  });
+});
+

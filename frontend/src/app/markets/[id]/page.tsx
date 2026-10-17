@@ -25,6 +25,7 @@ import ErrorBoundary from "@/components/ui/ErrorBoundary";
 import type { MarketEvent } from "@/types";
 import { FiClock, FiUsers, FiTrendingUp, FiAward, FiArrowLeft } from "react-icons/fi";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 
 function getStatusBadge(market: { resolved: boolean; outcome: boolean; cancelled: boolean }) {
   if (market.cancelled) return { variant: "cancelled" as const, label: "Cancelled" };
@@ -34,11 +35,8 @@ function getStatusBadge(market: { resolved: boolean; outcome: boolean; cancelled
   return { variant: "active" as const, label: "Active" };
 }
 
-export default function MarketDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+export default function MarketDetailPage() {
+  const params = useParams<{ id: string }>();
   const marketId = Number(params.id);
   const { market, userBet, loading, error, refetch } = useMarket(marketId);
   const { publicKey } = useWallet();

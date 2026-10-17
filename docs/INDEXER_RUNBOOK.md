@@ -63,7 +63,7 @@ Every variable below is read and validated by `indexer/src/config/index.ts`
 | `REFERRAL_CONTRACT_ID` | **yes** | — | Stellar contract ID of the referral-registry contract. |
 | `LEADERBOARD_CONTRACT_ID` | **yes** | — | Stellar contract ID of the leaderboard contract. |
 | `POLL_INTERVAL_MS` | no | `5000` | Sleep between poll iterations (positive integer). |
-| `EVENTS_PER_PAGE` | no | `200` | Max events fetched per `getEvents` page (positive integer). |
+| `EVENTS_PER_PAGE` | no | `200` | Max events fetched per `getEvents` page (positive integer, at most `1000`). Values above `1000` are rejected at startup to bound backfill memory usage. |
 | `START_LEDGER` | no | `0` | Ledger to begin indexing from when no checkpoint exists (`0` = earliest available). |
 | `CONTRACT_IDS` | * | — | Comma-separated allowlist of Stellar contract IDs for the poll loop (`contract-filter.ts`). Required when the poll loop runtime is used. |
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error`. |
@@ -160,6 +160,34 @@ it after a fresh deploy, a data wipe, or a ledger reorg.
   `EVENTS_PER_PAGE`.
 - Retry behaviour mirrors the polling loop: transient failures (429, 5xx,
   network) retry with exponential backoff via `fetchWithRetry`.
+
+### Memory characteristics
+
+Backfill memory usage is bounded by configuration, not by the size of the
+ledger range being replayed:
+
+- **`EVENTS_PER_PAGE` is capped at `1000`** (`MAX_EVENTS_PER_PAGE` in
+  `src/config/index.ts`). The Soroban RPC `getEvents` endpoint accepts limits
+  up to 10,000, but allowing arbitrarily large pages would let a single page
+  materialise an unbounded batch of decoded events in memory. The cap is
+  enforced at startup — an unreasonably large value causes the indexer to
+  exit with a validation error.
+- **Events are processed in chunks** (`EVENTS_PROCESSING_CHUNK_SIZE = 50` in
+  `src/backfill.ts`). Each page is decoded and written in batches of 50 events,
+  yielding to the event loop between chunks so processed events can be garbage
+  collected and the process stays responsive to metrics, health checks, and
+  shutdown signals.
+- **Peak memory is proportional to `EVENTS_PER_PAGE`**, not to the total number
+  of events in the backfill range. A backfill over a busy range (e.g., 3,000
+  events across 30 pages) keeps heap usage roughly flat — the per-page delta
+  is typically under 1 MB — because only one page (and one chunk within it) is
+  ever fully materialised.
+- **Memory usage is logged per page** (`[backfill] Page memory: heapUsed=… rss=…
+  heapDelta=…`) for observability during large backfills.
+
+Tuning `EVENTS_PER_PAGE` higher (up to the `1000` cap) reduces the number of
+RPC calls and can improve throughput, at the cost of higher peak memory. Lower
+values reduce memory but increase RPC call volume.
 
 ## Recovery Procedures
 

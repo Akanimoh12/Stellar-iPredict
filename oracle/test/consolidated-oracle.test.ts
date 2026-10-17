@@ -64,12 +64,13 @@ describe("Aggregator & Submitter Features (#122, #155, #153, #154)", () => {
         store,
       );
 
-      const res1 = await service.processMarket("m1");
+      const marketId = "M-" + "A".repeat(50);
+      const res1 = await service.processMarket(marketId);
       expect(res1?.outcome).toBe(true);
       expect(res1?.adapterName).toBe("CoinGecko");
 
       // Double submit attempt should return null
-      const res2 = await service.processMarket("m1");
+      const res2 = await service.processMarket(marketId);
       expect(res2).toBeNull();
     });
   });

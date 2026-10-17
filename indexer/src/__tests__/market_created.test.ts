@@ -68,6 +68,6 @@ describe("market_created handler", () => {
       expect.stringContaining("INSERT INTO markets"),
       [7, "Will BTC reach $100k?", null, "Crypto", 1798675200, CREATOR],
     );
-    expect(redis.del).toHaveBeenCalledWith("market:7", "markets:all", "markets:active");
+    expect(redis.del).toHaveBeenCalledWith("ipredict:v1:markets:all", "ipredict:v1:markets:active");
   });
 });

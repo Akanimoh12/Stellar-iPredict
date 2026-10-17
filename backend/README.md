@@ -17,7 +17,7 @@ for the full design.
 
 ## Stack
 
-- **Runtime:** Node.js 20+, TypeScript
+- **Runtime:** Node.js 22+, TypeScript
 - **HTTP:** Fastify
 - **DB:** PostgreSQL 16 (shared with the indexer)
 - **Cache:** Redis 7
@@ -29,18 +29,27 @@ for the full design.
 ```
 backend/
   src/
-    api/         route handlers (markets, leaderboard, stats, oracle)
-    db/          query layer (shared schema lives in ../db migrations)
-    cache/       Redis client + cache helpers
-    config/      env loading & validation
-    lib/         shared utilities
-    server.ts    Fastify bootstrap
+    api/         route handlers and colocated tests (*.test.ts)
+    db/          query layer and colocated tests (*.test.ts)
+    cache/       Redis client, cache helpers and colocated tests (*.test.ts)
+    config/      env loading, validation and colocated tests (*.test.ts)
+    lib/         shared utilities and colocated tests (*.test.ts)
+    server.ts    Fastify bootstrap and colocated test
     index.ts     entrypoint
-  test/
+  test/          shared test setup, helpers (setup.ts, db.ts, contract-helpers.ts) & load testing
   package.json
   tsconfig.json
   .env.example
 ```
+
+## Testing Convention
+
+All backend tests follow a single, unified convention:
+- **Colocation beside sources**: Tests live directly beside the modules they verify in `src/**/*.test.ts` (e.g. `src/api/markets.test.ts`, `src/db/markets.test.ts`, `src/lib/pagination.test.ts`).
+- **No separate `__tests__` directories**: Standalone test folders like `src/__tests__/` and `src/db/__tests__/` are deprecated and consolidated into colocated `*.test.ts` files.
+- **Shared test doubles & harnesses**: Global setup and database/bootstrap fixtures live in `src/test/` (e.g., `fakePool.ts`, `fakeRedis.ts`, `vitest.setup.ts`) and `test/` (e.g., `setup.ts`, `db.ts`).
+- **Vitest configuration**: Vitest is configured to run `include: ["src/**/*.test.ts"]`.
+
 
 ## Getting started
 
@@ -316,3 +325,46 @@ on a machine with no Postgres running (there's no CI wired up yet — see
 2. Comment to claim it.
 3. Branch off `implementation-drips`, implement, open a PR back to
    `implementation-drips`.
+
+## OpenAPI contract snapshot
+
+The generated spec is snapshotted in `src/api/__snapshots__/openapi.spec.json`
+and checked by `src/api/openapi.test.ts`. Keys are sorted and the file is
+pretty-printed, so a changed route schema shows up as an ordinary line diff in
+the pull request — read it: that diff *is* the change to the contract clients
+depend on.
+
+If the test fails and the change is unintended, fix the route schema. If the
+change is intentional:
+
+```bash
+cd backend
+npm run test:openapi:update   # regenerates the snapshot
+git diff src/api/__snapshots__/openapi.spec.json   # review the contract change
+```
+
+Commit the updated snapshot with the schema change, and call out breaking
+changes (removed paths/fields, tightened types) in the PR description.
+
+## OpenAPI response contracts
+
+Run from the repository root after `npm ci` and
+`npm run build --workspace=@ipredict/shared`:
+
+```bash
+npm run test:contract --workspace=ipredict-backend
+```
+
+The suite uses the production `buildServer` and generated OpenAPI 3.1 document.
+All 16 documented operations have a response validated with AJV 2020, including
+oracle authentication failures. Database queries and dependency probes use test
+doubles; route handlers, query modules, serialization, and error handling remain
+real. The route inventory assertion requires a new case whenever an operation is
+added. Existing frontend shape contracts remain in `src/api/frontend-contract.test.ts`.
+
+Every exercised response is compared recursively with its handler payload captured
+before serialization. Mutation tests add an undeclared field to market and bet rows
+and prove the preservation check fails when Fastify strips it. Additional helper
+tests cover nested references, missing fields, invalid types, nulls, and nested arrays.
+Validators are cached per immutable specification. These checks do not replace
+PostgreSQL/Redis integration tests or establish performance/memory guarantees.

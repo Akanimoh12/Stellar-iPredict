@@ -48,6 +48,11 @@ export class Gauge {
   }
 }
 
+/** Operational thresholds mirrored by infra/prometheus/alerts.yml. */
+export const DEFAULT_INDEXER_LAG_WARNING_LEDGERS = 100;
+export const DEFAULT_INDEXER_LAG_CRITICAL_LEDGERS = 500;
+export const DEFAULT_INDEXER_STALL_THRESHOLD_SECONDS = 60;
+
 export interface RpcErrorLabels {
   /** Process making the RPC call (for example `indexer` or `oracle`). */
   service: string;
@@ -101,6 +106,69 @@ export class RpcErrorCounter {
   }
 }
 
+/** Histogram bucket for tracking poll iteration duration. */
+export class Histogram {
+  private buckets: Map<number, number> = new Map();
+  private sum = 0;
+  private count = 0;
+  private readonly bucketBoundaries: number[];
+
+  constructor(bucketBoundaries: number[] = [0.1, 0.5, 1, 2.5, 5, 10, 30, 60]) {
+    this.bucketBoundaries = [...bucketBoundaries].sort((a, b) => a - b);
+    this.bucketBoundaries.forEach((boundary) => this.buckets.set(boundary, 0));
+  }
+
+  observe(value: number): void {
+    if (value < 0) return;
+    this.sum += value;
+    this.count += 1;
+
+    for (const boundary of this.bucketBoundaries) {
+      if (value <= boundary) {
+        this.buckets.set(boundary, (this.buckets.get(boundary) || 0) + 1);
+      }
+    }
+  }
+
+  snapshot(): { buckets: Map<number, number>; sum: number; count: number } {
+    return {
+      buckets: new Map(this.buckets),
+      sum: this.sum,
+      count: this.count,
+    };
+  }
+
+  reset(): void {
+    this.buckets.clear();
+    this.bucketBoundaries.forEach((boundary) => this.buckets.set(boundary, 0));
+    this.sum = 0;
+    this.count = 0;
+  }
+}
+
+/** Labelled counter for tracking events by type. */
+export class EventCounter {
+  private readonly counters = new Map<string, number>();
+
+  inc(eventType: string, delta = 1): void {
+    if (delta <= 0) return;
+    const sanitized = eventType.trim() || "unknown";
+    this.counters.set(sanitized, (this.counters.get(sanitized) || 0) + delta);
+  }
+
+  get(eventType: string): number {
+    return this.counters.get(eventType.trim()) || 0;
+  }
+
+  snapshot(): Map<string, number> {
+    return new Map(this.counters);
+  }
+
+  reset(): void {
+    this.counters.clear();
+  }
+}
+
 /**
  * Indexer metrics registry.
  *
@@ -111,11 +179,28 @@ export class RpcErrorCounter {
  * `indexerLag` corresponds to the `indexer_lag_ledgers` gauge documented in
  * `docs/ORACLE_AND_BACKEND.md`; it represents the difference between the
  * latest ledger from the RPC and the indexer's checkpoint ledger.
+ * `indexerChainTip` and `indexerCursor` make the two sides of that calculation
+ * independently visible. `indexerCursorLastAdvanced` is a Unix timestamp and
+ * is intentionally only updated when the persisted cursor moves.
+ *
+ * `eventsByType`: Counter for events processed, broken down by event type.
+ * `eventsDeadLettered`: Counter for events that failed processing.
+ * `pollDuration`: Histogram tracking poll iteration duration in seconds.
+ * `deadLetterQueueDepth`: Gauge tracking the current count of unresolved
+ *   dead-letter events (issue #496). Updated by refreshDeadLetterQueueDepth.
+ *   Alerts when the value exceeds DEAD_LETTER_ALERT_THRESHOLD.
  */
 export const metrics = {
   eventsProcessed: new Counter(),
   indexerLag: new Gauge(),
+  indexerChainTip: new Gauge(),
+  indexerCursor: new Gauge(),
+  indexerCursorLastAdvanced: new Gauge(),
   rpcErrors: new RpcErrorCounter(),
+  eventsByType: new EventCounter(),
+  eventsDeadLettered: new Counter(),
+  pollDuration: new Histogram([0.1, 0.5, 1, 2.5, 5, 10, 30, 60]),
+  deadLetterQueueDepth: new Gauge(),
 };
 
 function escapeLabel(value: string): string {
@@ -141,6 +226,10 @@ export function serializeRpcErrors(): string {
  * Exports:
  * - indexer_lag_ledgers: gauge of how far behind the indexer is
  * - events_processed_total: counter of successfully processed events
+ * - events_by_type_total: counter of events by type
+ * - events_dead_lettered_total: counter of failed events
+ * - dead_letter_queue_depth: gauge of current unresolved dead-letter rows
+ * - poll_duration_seconds: histogram of poll iteration duration
  * - rpc_errors_total: counter of failed RPC calls (by service + operation)
  */
 export function serializeMetrics(): string {
@@ -151,10 +240,51 @@ export function serializeMetrics(): string {
   lines.push("# TYPE indexer_lag_ledgers gauge");
   lines.push(`indexer_lag_ledgers ${metrics.indexerLag.get()}`);
 
+  lines.push("# HELP indexer_chain_tip_ledger Latest chain ledger observed by the indexer");
+  lines.push("# TYPE indexer_chain_tip_ledger gauge");
+  lines.push(`indexer_chain_tip_ledger ${metrics.indexerChainTip.get()}`);
+  lines.push("# HELP indexer_cursor_ledger Last ledger durably processed by the indexer");
+  lines.push("# TYPE indexer_cursor_ledger gauge");
+  lines.push(`indexer_cursor_ledger ${metrics.indexerCursor.get()}`);
+  lines.push("# HELP indexer_cursor_last_advanced_timestamp_seconds Unix time when the cursor last advanced");
+  lines.push("# TYPE indexer_cursor_last_advanced_timestamp_seconds gauge");
+  lines.push(`indexer_cursor_last_advanced_timestamp_seconds ${metrics.indexerCursorLastAdvanced.get()}`);
+
   // Events processed counter
   lines.push("# HELP events_processed_total Total number of contract events successfully processed");
   lines.push("# TYPE events_processed_total counter");
   lines.push(`events_processed_total ${metrics.eventsProcessed.get()}`);
+
+  // Events by type counter
+  const eventsByType = metrics.eventsByType.snapshot();
+  if (eventsByType.size > 0) {
+    lines.push("# HELP events_by_type_total Total number of events processed, broken down by event type");
+    lines.push("# TYPE events_by_type_total counter");
+    for (const [eventType, count] of eventsByType) {
+      lines.push(`events_by_type_total{event_type="${escapeLabel(eventType)}"} ${count}`);
+    }
+  }
+
+  // Dead lettered events counter
+  lines.push("# HELP events_dead_lettered_total Total number of events that failed processing");
+  lines.push("# TYPE events_dead_lettered_total counter");
+  lines.push(`events_dead_lettered_total ${metrics.eventsDeadLettered.get()}`);
+
+  // Dead-letter queue depth gauge (issue #496)
+  lines.push("# HELP dead_letter_queue_depth Current number of unresolved dead-letter events");
+  lines.push("# TYPE dead_letter_queue_depth gauge");
+  lines.push(`dead_letter_queue_depth ${metrics.deadLetterQueueDepth.get()}`);
+
+  // Poll duration histogram
+  const pollHist = metrics.pollDuration.snapshot();
+  lines.push("# HELP poll_duration_seconds Time spent in each poll iteration");
+  lines.push("# TYPE poll_duration_seconds histogram");
+  for (const [le, count] of pollHist.buckets) {
+    lines.push(`poll_duration_seconds_bucket{le="${le}"} ${count}`);
+  }
+  lines.push(`poll_duration_seconds_bucket{le="+Inf"} ${pollHist.count}`);
+  lines.push(`poll_duration_seconds_sum ${pollHist.sum}`);
+  lines.push(`poll_duration_seconds_count ${pollHist.count}`);
 
   // RPC errors counter
   const rpcSnapshots = metrics.rpcErrors.snapshot();
@@ -175,5 +305,65 @@ export function serializeMetrics(): string {
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
   metrics.indexerLag.reset();
+  metrics.indexerChainTip.reset();
+  metrics.indexerCursor.reset();
+  metrics.indexerCursorLastAdvanced.reset();
   metrics.rpcErrors.reset();
+  metrics.eventsByType.reset();
+  metrics.eventsDeadLettered.reset();
+  metrics.pollDuration.reset();
+  metrics.deadLetterQueueDepth.reset();
+}
+
+/** Record one chain-tip/cursor observation and preserve cursor-advance time. */
+export function recordIndexerPosition(chainTip: number, cursor: number): number {
+  const safeChainTip = Math.max(0, chainTip);
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+
+  metrics.indexerChainTip.set(safeChainTip);
+  metrics.indexerCursor.set(safeCursor);
+  metrics.indexerLag.set(Math.max(0, safeChainTip - safeCursor));
+
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
+  return metrics.indexerLag.get();
+}
+
+/** Record a successful durable cursor advance without replacing the lag sample. */
+export function recordIndexerCursorAdvance(cursor: number): void {
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+  metrics.indexerCursor.set(safeCursor);
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
+}
+
+/**
+ * Query the current unresolved dead-letter queue depth, update the
+ * `dead_letter_queue_depth` gauge, and log a warning when the depth exceeds
+ * `alertThreshold` (default: DEAD_LETTER_ALERT_THRESHOLD from deadLetter.ts).
+ *
+ * Call this from the poll loop or the reprocess runner so the gauge stays
+ * fresh without requiring a live Postgres connection in the metrics module
+ * itself (the module stays dependency-free; callers own the DB reference).
+ *
+ * Returns the current depth so callers can act on it directly.
+ */
+export async function refreshDeadLetterQueueDepth(
+  countFn: () => Promise<number>,
+  alertThreshold: number,
+  logger?: { warn(msg: string, meta?: Record<string, unknown>): void },
+): Promise<number> {
+  const depth = await countFn();
+  metrics.deadLetterQueueDepth.set(depth);
+  if (depth > alertThreshold) {
+    logger?.warn("dead-letter queue depth exceeds alert threshold", {
+      depth,
+      threshold: alertThreshold,
+    });
+  }
+  return depth;
 }

@@ -1,10 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { NegativeCache, NEGATIVE_CACHE_TTL_MS } from "../cache/negativeCache.js";
+import {
+  NegativeCache,
+  NEGATIVE_CACHE_TTL_MS,
+  getNegativeCacheHitRate,
+  getNegativeCacheStats,
+  resetNegativeCacheStats,
+  serializeNegativeCacheMetrics,
+} from "../cache/negativeCache.js";
+import { marketKey } from "../cache/keys.js";
 
 let cache: NegativeCache;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  resetNegativeCacheStats();
   cache = new NegativeCache();
 });
 
@@ -169,5 +178,100 @@ describe("NegativeCache constructor", () => {
     expect(short.isCachedMiss("x")).toBe(false);
 
     short.destroy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Module-level metrics — the series behind negative_cache_hit_rate
+// ---------------------------------------------------------------------------
+
+describe("negative cache metrics (process-wide)", () => {
+  it("starts at NaN rather than 0", () => {
+    // "No not-found lookups yet" is not a 0% hit rate; emitting 0 would make
+    // a freshly deployed backend look like its negative cache had collapsed.
+    expect(getNegativeCacheHitRate()).toBeNaN();
+    expect(getNegativeCacheStats().lookups).toBe(0);
+  });
+
+  it("counts a live entry as a hit and a fall-through as a miss", () => {
+    cache.markMiss("market:999");
+    expect(cache.isCachedMiss("market:999")).toBe(true);
+    expect(cache.isCachedMiss("market:1000")).toBe(false);
+
+    expect(getNegativeCacheStats()).toMatchObject({
+      hits: 1,
+      misses: 1,
+      lookups: 2,
+      hitRate: 0.5,
+    });
+  });
+
+  it("aggregates across every instance in the process", () => {
+    const other = new NegativeCache();
+
+    cache.markMiss("market:1");
+    cache.isCachedMiss("market:1"); // hit
+    other.markMiss("market:2");
+    other.isCachedMiss("market:2"); // hit
+    other.isCachedMiss("market:3"); // miss
+
+    expect(getNegativeCacheStats()).toMatchObject({ hits: 2, misses: 1, lookups: 3 });
+
+    other.destroy();
+  });
+
+  it("breaks the counts down per namespace, keyed by the cache key format", () => {
+    cache.markMiss(marketKey(999));
+    expect(cache.isCachedMiss(marketKey(999))).toBe(true);
+    expect(cache.isCachedMiss(marketKey(1))).toBe(false);
+
+    expect(getNegativeCacheStats().byNamespace).toEqual([
+      { namespace: "market", hits: 1, misses: 1, lookups: 2, hitRate: 0.5 },
+    ]);
+  });
+
+  it("serializes as its own metric family, with NaN before the first lookup", () => {
+    const empty = serializeNegativeCacheMetrics();
+    expect(empty).toContain("negative_cache_hit_rate NaN");
+    expect(empty).toContain("# TYPE negative_cache_hits_total counter");
+    expect(empty.endsWith("\n")).toBe(true);
+
+    cache.markMiss(marketKey(999));
+    cache.isCachedMiss(marketKey(999));
+    cache.isCachedMiss(marketKey(1));
+
+    const body = serializeNegativeCacheMetrics();
+    expect(body).toContain("negative_cache_hit_rate 0.5");
+    expect(body).toContain('negative_cache_namespace_hits_total{namespace="market"} 1');
+    expect(body).toContain('negative_cache_namespace_misses_total{namespace="market"} 1');
+
+    // Labelled and unlabelled samples never share a metric name: Prometheus
+    // rejects the whole scrape for that.
+    for (const line of body.split("\n")) {
+      if (line.startsWith("negative_cache_hit_rate")) expect(line).not.toContain("{");
+      if (line.startsWith("negative_cache_hits_total")) expect(line).not.toContain("{");
+      if (line.startsWith("negative_cache_misses_total")) expect(line).not.toContain("{");
+    }
+  });
+
+  it("resetNegativeCacheStats clears totals and namespaces", () => {
+    cache.markMiss(marketKey(999));
+    cache.isCachedMiss(marketKey(999));
+
+    resetNegativeCacheStats();
+
+    expect(getNegativeCacheStats().lookups).toBe(0);
+    expect(getNegativeCacheStats().byNamespace).toEqual([]);
+    expect(getNegativeCacheHitRate()).toBeNaN();
+  });
+
+  it("leaves the per-instance counters alone when the process counters reset", () => {
+    cache.markMiss("market:999");
+    cache.isCachedMiss("market:999");
+
+    resetNegativeCacheStats();
+
+    expect(cache.getMetrics()).toMatchObject({ hits: 1, misses: 0 });
+    expect(getNegativeCacheStats().lookups).toBe(0);
   });
 });

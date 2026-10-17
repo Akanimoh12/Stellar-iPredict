@@ -1,5 +1,13 @@
 # Council Flow Runbook
 
+> **This file has moved.**
+> The canonical location is [`oracle/docs/COUNCIL_FLOW_RUNBOOK.md`](../../../docs/COUNCIL_FLOW_RUNBOOK.md).
+> This copy is kept so existing bookmarks and editor jumps still resolve, but
+> the authoritative version is in `oracle/docs/`. Please update any links.
+
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](../../../docs/STUCK_MARKET_RUNBOOK.md).
+
 This runbook documents how to exercise the council resolution flow manually when a local/testnet contract environment is available.
 
 ## Prerequisites

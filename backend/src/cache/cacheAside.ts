@@ -19,8 +19,8 @@
  * When N concurrent callers request the same key that isn't cached yet,
  * only the first caller invokes the loader.  Every other caller waits for
  * that same in-flight promise, so the loader runs exactly once per cache
- * miss regardless of concurrency.  This is implemented with a simple
- * `Map<string, Promise>` scoped to each `getOrSet` call.
+ * miss regardless of concurrency. This is process-local; deployments with
+ * several instances need distributed coordination for a global guarantee.
  *
  * ## Serialisation
  *
@@ -33,6 +33,13 @@
  */
 
 import type { Redis } from "ioredis";
+import { recordCacheHit, recordCacheMiss } from "./hitRate.js";
+import {
+  recordNegativeCacheHit,
+  recordNegativeCacheMiss,
+} from "./negativeCache.js";
+import { getCircuitBreaker } from "./circuitBreaker.js";
+import { logCacheFailure } from "./invalidate.js";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -45,6 +52,24 @@ import type { Redis } from "ioredis";
  * Stampede-safe: concurrent callers for the same key share a single loader
  * execution.
  *
+ * ## Accounting
+ *
+ * Every call that actually got an answer out of Redis is recorded exactly
+ * once, in exactly one metric family (see `hitRate.ts` and `negativeCache.ts`):
+ *
+ * | Redis said        | loader answered | counted as                        |
+ * |-------------------|-----------------|-----------------------------------|
+ * | a value           | —               | cache hit                         |
+ * | a stored `null`   | —               | negative-cache hit                |
+ * | absent / corrupt  | value           | cache miss                        |
+ * | absent / corrupt  | `null`          | negative-cache miss               |
+ * | error / skipped   | —               | nothing (not a lookup)            |
+ *
+ * The miss is classified *after* the loader settles, because before it runs
+ * an absent key could turn out to be either a real record or a not-found, and
+ * mixing the two would let a 404 storm move the ordinary hit rate. A loader
+ * that rejects counts as an ordinary miss — the cache did not serve the read.
+ *
  * @param redis   An ioredis client (or compatible).
  * @param key     Cache key — use `cacheKey()` from `cacheKeys.ts` for
  *                versioned, namespaced keys.
@@ -55,7 +80,9 @@ import type { Redis } from "ioredis";
  *
  * @returns The cached or freshly-loaded value (JSON-round-tripped).
  *
- * @throws Any error thrown by `loader` or Redis propagates to the caller.
+  * @throws Any error thrown by `loader` propagates to the caller.
+ *       Redis errors do **not** propagate — they are counted by the circuit
+ *       breaker and the loader is called instead (degrade-to-db).
  */
 export async function getOrSet<T>(
   redis: Redis,
@@ -63,19 +90,48 @@ export async function getOrSet<T>(
   ttlSec: number,
   loader: () => Promise<T>
 ): Promise<T> {
-  // 1. Check Redis.
-  const cached = await redis.get(key);
-  if (cached !== null) {
+  const circuit = getCircuitBreaker();
+
+  // Whether this call got an answer out of Redis. A circuit-open skip or a
+  // rejected Redis command is not a lookup (issue #214): the cache never had
+  // the chance to serve anything, so counting it would turn a Redis outage
+  // into a cache-miss incident on top of the real one.
+  let consultedRedis = false;
+
+  // 1. Check Redis — but only if the circuit is closed or half-open.
+  //    When OPEN, skip straight to the loader to avoid adding latency.
+  if (circuit.canAttempt()) {
     try {
-      return JSON.parse(cached) as T;
-    } catch {
-      // Corrupt cache entry — fall through to refresh.
+      const cached = await redis.get(key);
+      circuit.recordSuccess();
+      consultedRedis = true;
+
+      if (cached !== null) {
+        try {
+          const value = JSON.parse(cached) as T;
+          if (value === null) {
+            // A stored "not found" — the negative cache answered, no loader ran.
+            recordNegativeCacheHit(key);
+          } else {
+            recordCacheHit(key);
+          }
+          return value;
+        } catch {
+          // Corrupt cache entry — fall through to refresh. Classified below,
+          // against the value the loader produces.
+        }
+      }
+    } catch (error) {
+      circuit.recordFailure();
+      logCacheFailure(error);
+      // Redis is unhealthy — fall through to the loader (degrade-to-db).
+      // A Redis error is not counted as a miss (issue #214).
     }
   }
 
-  // 2. Cache miss — single-flight the entire load+store operation so
-  //    concurrent callers share both the loader call and the setex.
-  return withSingleFlight(key, "getOrSet", async () => {
+  // 2. Cache miss (or degraded) — single-flight the entire load+store
+  //    operation so concurrent callers share both the loader call and the setex.
+  const loading = withSingleFlight(key, "getOrSet", async () => {
     const value = await loader();
 
     // 3. Store in Redis.  If the write fails we still return the value —
@@ -84,14 +140,39 @@ export async function getOrSet<T>(
     if (serialised !== undefined) {
       try {
         await redis.setex(key, ttlSec, serialised);
-      } catch {
-        // Logged upstream by the Redis client; swallow here so callers
-        // always receive their data even when the cache is unwriteable.
+        circuit.recordSuccess();
+      } catch (error) {
+        circuit.recordFailure();
+        logCacheFailure(error);
+        // Swallow here so callers always receive their data even when the
+        // cache is unwriteable.
       }
     }
 
     return value;
   });
+
+  if (!consultedRedis) {
+    return loading;
+  }
+
+  // 4. Classify this caller's miss once the answer is known. Every caller
+  //    that consulted Redis gets its own count, including callers that
+  //    coalesced onto one in-flight loader.
+  return loading.then(
+    (value) => {
+      if (value === null) {
+        recordNegativeCacheMiss(key);
+      } else {
+        recordCacheMiss(key);
+      }
+      return value;
+    },
+    (error) => {
+      recordCacheMiss(key);
+      throw error;
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------

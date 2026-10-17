@@ -1,13 +1,13 @@
 import Fastify from "fastify";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  computeEtag,
   createMarketsRoutes,
-  matchesIfNoneMatch,
   parsePositiveInteger
 } from "./markets";
 import { registerErrorHandler } from "../lib/errors.js";
+import { registerCancellationHook } from "../lib/cancellation.js";
+import { getAbandonedQueryCounts, resetAbandonedQueryCounts } from "../metrics.js";
 import type { MarketRow, Queryable } from "../db/markets.js";
 
 function createMarket(overrides: Partial<MarketRow> = {}): MarketRow {
@@ -41,10 +41,14 @@ async function buildTestServer(db: Queryable) {
 function createListDb(markets: MarketRow[]): Queryable {
   return {
     query: vi.fn(async (sql: string) => {
-      if (sql.includes("COUNT")) {
+      if (sql.includes("COUNT(*)::INT AS total ")) {
+        // Fallback path used only when the windowed query's page is empty.
         return { rows: [{ total: markets.length }] };
       }
-      return { rows: markets };
+      // Main query: COUNT(*) OVER () rides along on every row.
+      return {
+        rows: markets.map((market) => ({ ...market, total_count: markets.length }))
+      };
     }) as Queryable["query"]
   };
 }
@@ -60,6 +64,46 @@ describe("parsePositiveInteger", () => {
     expect(parsePositiveInteger("-1")).toBeNull();
     expect(parsePositiveInteger("1.5")).toBeNull();
     expect(parsePositiveInteger("abc")).toBeNull();
+  });
+});
+
+describe("GET /api/markets/resolution-status (issue #645)", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  it("reports on_time when nothing is overdue", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/resolution-status" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.status).toBe("on_time");
+    expect(body.overdueMarkets).toBe(0);
+    expect(body.oldestOverdueSeconds).toBeNull();
+    // static route must not be swallowed by /api/markets/:id
+    expect(queryMock.mock.calls[0][0]).toContain("resolved = false");
+  });
+
+  it("reports delayed with the overdue market ids", async () => {
+    const rows = [{ id: 7, end_time: String(nowSec - 3 * 60 * 60) }];
+    const queryMock = vi.fn().mockResolvedValue({ rows });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/resolution-status" })).json();
+    expect(body.status).toBe("delayed");
+    expect(body.overdueMarkets).toBe(1);
+    expect(body.delayedMarketIds).toEqual([7]);
+    expect(body.oldestOverdueSeconds).toBeGreaterThanOrEqual(3 * 60 * 60 - 5);
+  });
+
+  it("escalates to stalled when the oldest overdue market is very old", async () => {
+    const rows = [{ id: 1, end_time: String(nowSec - 20 * 60 * 60) }];
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows }) as Queryable["query"],
+    });
+    const body = (await server.inject({ method: "GET", url: "/api/markets/resolution-status" })).json();
+    expect(body.status).toBe("stalled");
   });
 });
 
@@ -93,7 +137,7 @@ describe("GET /api/markets/:id", () => {
     });
 
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       error: {
         code: "NOT_FOUND",
         message: "Market not found"
@@ -111,54 +155,13 @@ describe("GET /api/markets/:id", () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
         message: "id must be a positive integer"
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("computeEtag", () => {
-  it("is a quoted hex digest", () => {
-    const etag = computeEtag({ a: 1 });
-    expect(etag).toMatch(/^"[0-9a-f]{40}"$/);
-  });
-
-  it("is stable for the same payload", () => {
-    expect(computeEtag({ a: 1, b: [1, 2, 3] })).toBe(
-      computeEtag({ a: 1, b: [1, 2, 3] })
-    );
-  });
-
-  it("differs when the payload changes", () => {
-    expect(computeEtag({ a: 1 })).not.toBe(computeEtag({ a: 2 }));
-  });
-});
-
-describe("matchesIfNoneMatch", () => {
-  const etag = '"abc123"';
-
-  it("returns false when the header is absent", () => {
-    expect(matchesIfNoneMatch(undefined, etag)).toBe(false);
-  });
-
-  it("matches an exact value", () => {
-    expect(matchesIfNoneMatch(etag, etag)).toBe(true);
-  });
-
-  it("matches one entry in a comma-separated list", () => {
-    expect(matchesIfNoneMatch(`"other", ${etag}`, etag)).toBe(true);
-  });
-
-  it("matches the wildcard", () => {
-    expect(matchesIfNoneMatch("*", etag)).toBe(true);
-  });
-
-  it("returns false when nothing matches", () => {
-    expect(matchesIfNoneMatch('"other"', etag)).toBe(false);
   });
 });
 
@@ -218,8 +221,8 @@ describe("GET /api/markets — ETag / conditional GET", () => {
 describe("GET /api/markets - category parameter", () => {
   it("accepts valid category in TitleCase", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -227,13 +230,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with leading/trailing whitespace", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -241,13 +244,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category from lowercase to TitleCase", async () => {
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -255,13 +258,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category from UPPERCASE to TitleCase", async () => {
     const market = createMarket({ category: "Sports" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -269,13 +272,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with mixed case to TitleCase", async () => {
     const market = createMarket({ category: "Politics" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -283,13 +286,13 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("normalizes category with both whitespace and mixed case", async () => {
     const market = createMarket({ category: "Entertainment" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -297,7 +300,7 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
   });
 
   it("rejects unknown category with 400 error", async () => {
@@ -313,7 +316,7 @@ describe("GET /api/markets - category parameter", () => {
     expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
-        message: "Invalid query parameters"
+        message: expect.stringContaining("Invalid category")
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
@@ -332,7 +335,7 @@ describe("GET /api/markets - category parameter", () => {
     expect(response.json()).toMatchObject({
       error: {
         code: "BAD_REQUEST",
-        message: "Invalid query parameters"
+        message: expect.stringContaining("Invalid category")
       }
     });
     expect(queryMock).not.toHaveBeenCalled();
@@ -341,8 +344,8 @@ describe("GET /api/markets - category parameter", () => {
   it("accepts all valid categories", async () => {
     const validCategories = ["Crypto", "Sports", "Politics", "Entertainment", "Science"];
     const market = createMarket({ category: "Crypto" });
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     for (const category of validCategories) {
       const response = await server.inject({
@@ -355,8 +358,8 @@ describe("GET /api/markets - category parameter", () => {
 
   it("works without category parameter (optional)", async () => {
     const market = createMarket();
-    const queryMock = vi.fn().mockResolvedValue({ rows: [market], total: 1, page: 1, limit: 20 });
-    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+    const db = createListDb([market]);
+    const server = await buildTestServer(db);
 
     const response = await server.inject({
       method: "GET",
@@ -364,6 +367,216 @@ describe("GET /api/markets - category parameter", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(queryMock).toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Client-disconnect cancellation (#475)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `Queryable` that also looks like a real pg `Pool` (has `.connect()`),
+ * which is what makes `withCancellation` in markets.ts treat it as
+ * cancellable. The "connection" it hands out resolves `pg_backend_pid()`
+ * immediately, then hangs on the real query until the test settles it —
+ * mirroring the shape `queryWithCancel` (db/pool.ts) expects.
+ */
+function createCancellablePoolDouble(rows: unknown[]) {
+  let resolveRealQuery!: (value: { rows: unknown[] }) => void;
+  let rejectRealQuery!: (err: unknown) => void;
+
+  const cancelCalls: unknown[][] = [];
+
+  const client = {
+    query: vi.fn(async (text: string) => {
+      if (text === "SELECT pg_backend_pid() AS pid") {
+        return { rows: [{ pid: 4321 }] };
+      }
+      return new Promise((resolve, reject) => {
+        resolveRealQuery = resolve;
+        rejectRealQuery = reject;
+      });
+    }),
+    release: vi.fn(),
+  };
+
+  const pool = {
+    connect: vi.fn(async () => client),
+    query: vi.fn(async (text: string, params?: unknown[]) => {
+      cancelCalls.push([text, params]);
+      return { rows: [] };
+    }),
+  };
+
+  return {
+    pool: pool as unknown as Queryable,
+    cancelCalls,
+    settle: () => resolveRealQuery({ rows }),
+    fail: (err: unknown) => rejectRealQuery(err),
+  };
+}
+
+async function buildCancellableTestServer(db: Queryable) {
+  const server = Fastify({ logger: false });
+  registerCancellationHook(server);
+  registerErrorHandler(server);
+  createMarketsRoutes(server, db);
+  await server.ready();
+  return server;
+}
+
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+describe("GET /api/markets/:id — cancellation on client disconnect (#475)", () => {
+  beforeEach(() => {
+    resetAbandonedQueryCounts();
+  });
+
+  it("completes normally when the client stays connected", async () => {
+    const market = createMarket({ id: 7 });
+    const fake = createCancellablePoolDouble([market]);
+    const server = await buildCancellableTestServer(fake.pool);
+
+    const responsePromise = server.inject({
+      method: "GET",
+      url: "/api/markets/7"
+    });
+
+    await flushMicrotasks();
+    fake.settle();
+
+    const response = await responsePromise;
+    expect(response.statusCode).toBe(200);
+    expect(fake.cancelCalls).toHaveLength(0);
+    expect(getAbandonedQueryCounts()).toEqual([]);
+
+    await server.close();
+  });
+
+  it("cancels the in-flight query via pg_cancel_backend when the client disconnects and records it", async () => {
+    const fake = createCancellablePoolDouble([createMarket({ id: 9 })]);
+
+    const server = Fastify({ logger: false });
+    registerCancellationHook(server);
+
+    let capturedRawResponse: { writableEnded: boolean; emit: (e: string) => void } | undefined;
+    server.addHook("onRequest", async (_request, reply) => {
+      capturedRawResponse = reply.raw as unknown as typeof capturedRawResponse;
+    });
+
+    registerErrorHandler(server);
+    createMarketsRoutes(server, fake.pool);
+    await server.ready();
+
+    const responsePromise = server.inject({
+      method: "GET",
+      url: "/api/markets/9"
+    });
+    responsePromise.catch(() => {});
+
+    // Let the handler start (pid lookup resolves), then simulate the client
+    // going away before the query returns.
+    await flushMicrotasks();
+    await flushMicrotasks();
+    capturedRawResponse?.emit("close");
+    await flushMicrotasks();
+
+    // Postgres reports the statement was cancelled.
+    fake.fail(new Error("canceling statement due to user request"));
+
+    const response = await responsePromise.catch(() => ({ statusCode: 499 }));
+
+    // The handler's query rejected, so the route surfaces an error response
+    // rather than hanging — nobody is left to want the (discarded) data.
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(fake.cancelCalls).toEqual([["SELECT pg_cancel_backend($1)", [4321]]]);
+    expect(getAbandonedQueryCounts()).toEqual([
+      { route: "GET /api/markets/:id", count: 1 }
+    ]);
+
+    await server.close();
+  });
+});
+
+describe("GET /api/markets/unmappable (issue #745)", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  function candidate(overrides: Partial<{ id: string; question: string; category: string; end_time: string }> = {}) {
+    return {
+      id: "1",
+      question: "Will NOPE reach $1?",
+      // Title case, as `markets.category` stores it.
+      category: "Crypto",
+      end_time: String(nowSec + 3600),
+      ...overrides,
+    };
+  }
+
+  it("returns open, un-cancelled markets ordered by soonest expiry", async () => {
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [candidate({ id: "expired-1", end_time: String(nowSec - 7200) }), candidate({ id: "soon" })],
+    });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    // Static route must not be swallowed by /api/markets/:id.
+    expect(queryMock.mock.calls[0][0]).toContain("resolved = false");
+    expect(queryMock.mock.calls[0][0]).toContain("cancelled = false");
+    expect(queryMock.mock.calls[0][0]).toContain("ORDER BY end_time ASC");
+    expect(body.checked).toBe(2);
+    expect(body.candidates[0].id).toBe("expired-1");
+    expect(body.candidates[1].id).toBe("soon");
+    expect(body.windowSeconds).toBeGreaterThan(0);
+    expect(body.checkedAt).toBeTruthy();
+  });
+
+  it("returns the storage-form category the sweep needs, not a normalised one", async () => {
+    // The oracle normalises "Crypto" → "crypto" itself. Doing it here would
+    // hide a mismatch in the two definitions rather than surfacing it.
+    const queryMock = vi.fn().mockResolvedValue({ rows: [candidate()] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/unmappable" })).json();
+
+    expect(body.candidates[0].category).toBe("Crypto");
+  });
+
+  it("returns an empty list, not an error, when everything is resolvable", async () => {
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows: [] }) as Queryable["query"],
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().candidates).toEqual([]);
+    expect(response.json().checked).toBe(0);
+  });
+
+  it("includes past-expiry markets by default, since those hold the most at risk", async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] });
+    const server = await buildTestServer({ query: queryMock as Queryable["query"] });
+
+    const body = (await server.inject({ method: "GET", url: "/api/markets/unmappable" })).json();
+
+    expect(body.includePastExpiry).toBe(true);
+    // $1 is the `includePastExpiry` boolean; the OR must admit past expiries.
+    expect(queryMock.mock.calls[0][1]?.[0]).toBe(true);
+  });
+
+  it("is cached briefly — it drives a sweep, not a user-facing view", async () => {
+    const server = await buildTestServer({
+      query: vi.fn().mockResolvedValue({ rows: [] }) as Queryable["query"],
+    });
+
+    const response = await server.inject({ method: "GET", url: "/api/markets/unmappable" });
+
+    expect(response.headers["cache-control"]).toBe("public, max-age=60");
   });
 });

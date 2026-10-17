@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:20-bookworm-slim AS dependencies
+# node:20-bookworm-slim
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS dependencies
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -11,7 +12,7 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:20-bookworm-slim AS production
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS production
 ENV NODE_ENV=production
 WORKDIR /app
 

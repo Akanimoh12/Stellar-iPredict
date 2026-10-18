@@ -3,7 +3,6 @@ import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import type { TotalsRecomputeOptions } from "./recomputeTotals.js";
 import { createLogger, parseLogLevel } from "./log.js";
-import type { Logger } from "./log.js";
 
 export type MaintenanceCommand = "bet-counts" | "totals" | "backfill";
 
@@ -78,11 +77,12 @@ export async function executeReconciliation(
       ? await recomputeMarketBetCountsFromBets(db)
       : await recomputeMarketTotalsFromBets(db, options);
     await db.query(args.dryRun ? "ROLLBACK" : "COMMIT");
+    const totals = args.command === "totals" ? result as Awaited<ReturnType<typeof recomputeMarketTotalsFromBets>> : null;
     return {
       checked: result.checked,
       corrected: result.corrected,
-      ...("onChainChecked" in result ? { onChainChecked: result.onChainChecked } : {}),
-      ...("drift" in result ? { driftCount: result.drift?.length } : {}),
+      ...(totals?.onChainChecked !== undefined ? { onChainChecked: totals.onChainChecked } : {}),
+      ...(totals?.drift !== undefined ? { driftCount: totals.drift.length } : {}),
     };
   } catch (error) {
     await db.query("ROLLBACK").catch(() => undefined);
@@ -135,7 +135,9 @@ export async function runMaintenanceCli(argv: string[] = process.argv.slice(2)):
         marketContractId: MARKET_CONTRACT_ID,
         simulationSource: process.env.SIMULATION_SOURCE_ACCOUNT,
       });
-      options.onDrift = (drift) => logger.warn("market totals drift detected", drift);
+      options.onDrift = (drift) => logger.warn("market totals drift detected", {
+        marketId: drift.marketId, database: drift.database, onChain: drift.onChain,
+      });
     }
     logger.info("reconciliation started", { dryRun: args.dryRun, verifyOnChain: args.verifyOnChain });
     const result = await executeReconciliation(client, args, options);

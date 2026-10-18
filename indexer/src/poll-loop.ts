@@ -1,6 +1,7 @@
 import type { Logger } from "./log.js";
 import { metrics, recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
 import { recordPollLoopProgress } from "./health.js";
+import { LedgerGapError } from "./rpc/getEvents.js";
 
 export interface RpcEvent {
   contractId: string;
@@ -35,6 +36,11 @@ export interface PollOnceConfig {
   contractIds: string[];
   defaultStartLedger?: number;
   logger?: Logger;
+  /**
+   * Replays a detected gap or ledger regression and durably checkpoints the
+   * recovered range. Return the resulting checkpoint ledger.
+   */
+  recoverLedgerGap?: (error: LedgerGapError) => Promise<number>;
 }
 
 export interface PollOnceResult {
@@ -51,7 +57,50 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
 
   logger?.debug("polling events", { startLedger, contractCount: contractIds.length });
 
-  const { events, latestLedger } = await rpc.getEvents({ startLedger, contractIds });
+  let response: { events: RpcEvent[]; latestLedger: number };
+  try {
+    response = await rpc.getEvents({ startLedger, contractIds });
+  } catch (error) {
+    if (!(error instanceof LedgerGapError)) throw error;
+    return recoverLedgerGap(config, error, startLedger, checkpoint);
+  }
+
+  const earlyLedger = response.events.reduce<number | null>(
+    (earliest, event) => event.ledger < startLedger && (earliest === null || event.ledger < earliest)
+      ? event.ledger
+      : earliest,
+    null,
+  );
+  if (earlyLedger !== null) {
+    return recoverLedgerGap(
+      config,
+      new LedgerGapError(
+        startLedger,
+        `RPC returned event ledger ${earlyLedger} before requested ledger ${startLedger}`,
+        earlyLedger,
+        { fromLedger: earlyLedger, toLedger: startLedger - 1 },
+      ),
+      startLedger,
+      checkpoint,
+    );
+  }
+
+  const lastKnownLedger = checkpoint ?? startLedger - 1;
+  if (response.latestLedger < lastKnownLedger) {
+    return recoverLedgerGap(
+      config,
+      new LedgerGapError(
+        startLedger,
+        `RPC latest ledger ${response.latestLedger} is behind known ledger ${lastKnownLedger}; possible chain reorganization`,
+        response.latestLedger,
+        { fromLedger: response.latestLedger + 1, toLedger: lastKnownLedger },
+      ),
+      startLedger,
+      checkpoint,
+    );
+  }
+
+  const { events, latestLedger } = response;
 
   if (typeof db.processEventsWithCheckpoint === "function") {
     // Atomic commit: cursor advances in the same transaction as the event effects
@@ -87,6 +136,34 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
   return { eventsWritten: events.length, latestLedger };
 }
 
+async function recoverLedgerGap(
+  config: PollOnceConfig,
+  error: LedgerGapError,
+  requestedStartLedger: number,
+  checkpoint: number | null,
+): Promise<PollOnceResult> {
+  config.logger?.error("ledger gap or reorganization detected; backfill required", {
+    requestedStartLedger,
+    checkpoint,
+    oldestLedger: error.oldestLedger,
+    unavailableRange: error.unavailableRange,
+    error: error.message,
+  });
+
+  if (!config.recoverLedgerGap) throw error;
+
+  const recoveredLedger = await config.recoverLedgerGap(error);
+  const persistedCheckpoint = await config.db.getCheckpointLedger();
+  if (persistedCheckpoint !== recoveredLedger) {
+    throw new Error(
+      `ledger-gap recovery returned checkpoint ${recoveredLedger}, ` +
+      `but database checkpoint is ${persistedCheckpoint}`,
+    );
+  }
+
+  return { eventsWritten: 0, latestLedger: recoveredLedger };
+}
+
 export interface PollLoopConfig extends PollOnceConfig {
   pollIntervalMs?: number;
 }
@@ -107,11 +184,14 @@ export async function runPollLoop(
     if (signal.aborted) break;
 
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, pollIntervalMs);
-      signal.addEventListener("abort", () => {
+      const finish = () => {
         clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
         resolve();
-      }, { once: true });
+      };
+      const timer = setTimeout(finish, pollIntervalMs);
+      signal.addEventListener("abort", finish, { once: true });
+      if (signal.aborted) finish();
     });
   }
 }

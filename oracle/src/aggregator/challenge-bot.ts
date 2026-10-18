@@ -20,6 +20,10 @@ export interface ChallengeBotOptions {
   challengeBondStroops?: bigint;
   /** Polling interval in milliseconds. Defaults to 30_000 (30 seconds). */
   pollIntervalMs?: number;
+  /** Whether automatic challenges start enabled. Defaults to true. */
+  enabled?: boolean;
+  /** Required guard checked immediately before every on-chain challenge. */
+  bondSpendGuard: (bondAmount: bigint) => Promise<void>;
   /** Logger instance */
   logger?: Logger;
 }
@@ -66,6 +70,7 @@ export class ChallengeBot {
   private readonly pollInterval: number;
   private readonly processedSubmissions = new Set<string>();
   private abortController = new AbortController();
+  private enabled: boolean;
 
   constructor(private readonly options: ChallengeBotOptions) {
     this.server = new rpc.Server(options.rpcUrl);
@@ -73,6 +78,7 @@ export class ChallengeBot {
     this.minConfidence = options.minConfidenceToChallenge ?? 0.8;
     this.challengeBond = options.challengeBondStroops ?? 200_0000000n; // 200 XLM
     this.pollInterval = options.pollIntervalMs ?? 30_000;
+    this.enabled = options.enabled ?? true;
   }
 
   /**
@@ -84,6 +90,7 @@ export class ChallengeBot {
       challenger: this.options.challengerKeypair.publicKey(),
       minConfidence: this.minConfidence,
       challengeBond: this.challengeBond.toString(),
+      enabled: this.enabled,
     });
 
     while (!this.abortController.signal.aborted) {
@@ -108,6 +115,21 @@ export class ChallengeBot {
     this.abortController.abort();
   }
 
+  /**
+   * Pause or resume automatic challenges without restarting the bot.
+   * Polling remains active while paused so new submissions can be handled
+   * after the operator re-enables challenges.
+   */
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return;
+    this.enabled = enabled;
+    this.logger.warn(enabled ? "Automatic challenges enabled" : "Automatic challenges disabled");
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
   private async pollAndChallenge(): Promise<void> {
     const latestLedger = await this.server.getLatestLedger();
     const events = await this.server.getEvents({
@@ -122,11 +144,13 @@ export class ChallengeBot {
     });
 
     for (const event of events.events) {
+      if (this.abortController.signal.aborted) break;
+      if (!this.enabled) continue;
       try {
         const submission = this.parseSubmissionEvent(event);
         if (submission && !this.processedSubmissions.has(submission.marketId)) {
           await this.processSubmission(submission);
-          this.processedSubmissions.add(submission.marketId);
+          if (this.enabled) this.processedSubmissions.add(submission.marketId);
         }
       } catch (error) {
         this.logger.warn("Failed to process event", { 
@@ -188,11 +212,20 @@ export class ChallengeBot {
       return { marketId: submission.marketId, challenged: false, reason: decision.reason };
     }
 
+    if (!this.enabled) {
+      return { marketId: submission.marketId, challenged: false, reason: "Automatic challenges disabled" };
+    }
+
     this.logger.warn("Challenging submission", {
       marketId: submission.marketId,
       reason: decision.reason,
       expectedOutcome: decision.expectedOutcome,
     });
+
+    await this.options.bondSpendGuard(this.challengeBond);
+    if (!this.enabled) {
+      return { marketId: submission.marketId, challenged: false, reason: "Automatic challenges disabled" };
+    }
 
     return this.challengeSubmission(submission, decision.expectedOutcome ?? !submission.outcome);
   }
@@ -255,7 +288,10 @@ export class ChallengeBot {
   ): Promise<ChallengeResult> {
     try {
       const txHash = await this.submitChallengeOnChain(submission.marketId, correctOutcome);
-      
+      if (txHash === null) {
+        return { marketId: submission.marketId, challenged: false, reason: "Automatic challenges disabled" };
+      }
+
       this.logger.info("Challenge submitted successfully", {
         marketId: submission.marketId,
         txHash,
@@ -282,7 +318,7 @@ export class ChallengeBot {
     }
   }
 
-  private async submitChallengeOnChain(marketId: string, outcome: boolean): Promise<string> {
+  private async submitChallengeOnChain(marketId: string, outcome: boolean): Promise<string | null> {
     const { challengerKeypair, contractId, networkPassphrase } = this.options;
     const caller = challengerKeypair.publicKey();
     const sourceAccount = await this.server.getAccount(caller);
@@ -307,6 +343,10 @@ export class ChallengeBot {
 
     const prepared = await this.server.prepareTransaction(tx);
     prepared.sign(challengerKeypair);
+
+    if (!this.enabled || this.abortController.signal.aborted) {
+      return null;
+    }
 
     const response = await this.server.sendTransaction(prepared);
     if (response.status === "ERROR" || response.status === "TRY_AGAIN_LATER") {
@@ -336,8 +376,17 @@ export class ChallengeBot {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      return () => clearTimeout(timer);
+      const signal = this.abortController.signal;
+      const finish = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        finish();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
     });
   }
 }

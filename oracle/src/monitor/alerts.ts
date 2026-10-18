@@ -10,6 +10,7 @@ export type AlertType =
   | "oracle.monitor.submission_new"
   | "oracle.monitor.dispute_escalated"
   | "oracle.monitor.bond_below_minimum"
+  | "oracle.monitor.bond_spend_approaching"
   | "oracle.monitor.council_inactive"
   | "oracle.monitor.council_window_exceeded"
   | "oracle.monitor.council_deadline_approaching"
@@ -35,6 +36,7 @@ export const ALERT_RUNBOOK_URLS: Record<AlertType, string> = {
   "oracle.monitor.submission_new": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-1--submit-operation`,
   "oracle.monitor.dispute_escalated": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-2--challenge-operation`,
   "oracle.monitor.bond_below_minimum": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-4--monitoring`,
+  "oracle.monitor.bond_spend_approaching": `${RUNBOOK_BASE}/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#bond-spend-limit`,
   "oracle.monitor.council_inactive": `${RUNBOOK_BASE}/oracle/docs/COUNCIL_RUNBOOK.md#monitoring--alerts`,
   "oracle.monitor.council_window_exceeded": `${RUNBOOK_BASE}/oracle/docs/COUNCIL_FLOW_RUNBOOK.md#handling-escalated-disputes-exceeding-the-council-window`,
 };

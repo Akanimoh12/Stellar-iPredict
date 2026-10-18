@@ -32,6 +32,9 @@ function fakePool(tables: Partial<Record<string, Row[]>> = {}): QueryablePool & 
     calls,
     async query<T extends Row = Row>(text: string): Promise<{ rows: T[] }> {
       calls.push(text);
+      if (/AS hourly_spend/.test(text)) {
+        return { rows: (tables.hourlySpend ?? [{ hourly_spend: "0" }]) as T[] };
+      }
       if (/FROM markets/.test(text)) return { rows: (tables.markets ?? []) as T[] };
       if (/MAX\(id\) AS max_id/.test(text)) return { rows: (tables.submissionWatermark ?? [{ max_id: null }]) as T[] };
       if (/MAX\(escalated_at\)/.test(text)) return { rows: (tables.disputeWatermark ?? [{ max_escalated_at: null }]) as T[] };
@@ -57,6 +60,8 @@ function deps(
 }
 
 const baseConfig = loadMonitorConfig({
+  HOURLY_BOND_SPEND_LIMIT_XLM: "1000",
+  BOND_SPEND_ALERT_THRESHOLD_PERCENT: "80",
   DATABASE_URL: "postgres://ipredict:ipredict@localhost:5432/ipredict",
 });
 
@@ -65,24 +70,37 @@ describe("loadMonitorConfig", () => {
     expect(() => loadMonitorConfig({})).toThrow();
   });
 
-  it("applies documented defaults", () => {
+  it("requires operators to configure the rolling spend ceiling and alert threshold", () => {
+    expect(() => loadMonitorConfig({ DATABASE_URL: "postgres://localhost/ipredict" })).toThrow();
+  });
+
+  it("applies documented defaults while requiring spend policy values", () => {
     expect(baseConfig.MONITOR_INTERVAL_MS).toBe(60_000);
     expect(baseConfig.STUCK_MARKET_HOURS).toBe(6);
     expect(baseConfig.COUNCIL_INACTIVITY_HOURS).toBe(48);
     expect(baseConfig.SUBMITTER_BOND_XLM).toBe(100);
     expect(baseConfig.ALERT_WEBHOOK_URL).toBeUndefined();
+    expect(baseConfig.HOURLY_BOND_SPEND_LIMIT_XLM).toBe(1000);
+    expect(baseConfig.BOND_SPEND_ALERT_THRESHOLD_PERCENT).toBe(80);
   });
 
   it("coerces numeric env strings and rejects a non-URL webhook", () => {
     const config = loadMonitorConfig({
       DATABASE_URL: "postgres://localhost/ipredict",
+      HOURLY_BOND_SPEND_LIMIT_XLM: "500",
+      BOND_SPEND_ALERT_THRESHOLD_PERCENT: "75",
       MONITOR_INTERVAL_MS: "15000",
       STUCK_MARKET_HOURS: "2.5",
     });
     expect(config.MONITOR_INTERVAL_MS).toBe(15_000);
     expect(config.STUCK_MARKET_HOURS).toBe(2.5);
     expect(() =>
-      loadMonitorConfig({ DATABASE_URL: "postgres://localhost/ipredict", ALERT_WEBHOOK_URL: "nope" }),
+      loadMonitorConfig({
+        DATABASE_URL: "postgres://localhost/ipredict",
+        HOURLY_BOND_SPEND_LIMIT_XLM: "500",
+        BOND_SPEND_ALERT_THRESHOLD_PERCENT: "75",
+        ALERT_WEBHOOK_URL: "nope",
+      }),
     ).toThrow();
   });
 });
@@ -240,6 +258,29 @@ describe("runMonitorCycle", () => {
     expect(emit).toHaveBeenCalledWith({
       type: "oracle.monitor.bond_below_minimum",
       payload: expect.objectContaining({ marketId: "5", currentBond: 999_999_999n }),
+    });
+  });
+
+  it("alerts when rolling challenger bond spend reaches the configured threshold", async () => {
+    const emit = vi.fn(async () => {});
+    const pool = fakePool();
+    vi.spyOn(pool, "query").mockImplementation(async (text: string) => {
+      pool.calls.push(text);
+      if (/AS hourly_spend/.test(text)) return { rows: [{ hourly_spend: "8000000000" }] };
+      return { rows: [] };
+    });
+
+    const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
+
+    expect(result.bondSpend).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.bond_spend_approaching",
+      payload: expect.objectContaining({
+        hourlySpend: 8_000_000_000n,
+        hourlySpendLimit: 10_000_000_000n,
+        limitApproached: true,
+        limitExceeded: false,
+      }),
     });
   });
 

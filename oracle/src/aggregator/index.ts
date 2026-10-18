@@ -60,13 +60,18 @@ export {
 
 // ── Bonds & Reconciliation ──────────────────────────────────────────────────
 export {
+  assertBondSpendWithinHourlyLimit,
+  checkBondSpendFromDb,
   checkBondMinimum,
   checkBondMinimumFromDb,
+  BondSpendLimitExceededError,
   getBondDashboardData,
   reconcileBonds,
   runBondReconciliation,
   recordSettlement,
   type BondAlert,
+  type BondSpendLimitOptions,
+  type BondSpendStatus,
   type BondMonitorOptions,
   type OracleSubmissionRecord,
   type BondDashboardData,

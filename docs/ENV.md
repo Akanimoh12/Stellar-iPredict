@@ -116,6 +116,8 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `SHUTDOWN_GRACE_MS` | Optional | `20000` (20s) | Grace period to drain in-flight resolutions during SIGTERM before shutdown. |
 | `HEALTH_PORT` | Optional | `9103` | Port for liveness and readiness probes (`/healthz`, `/readyz`). |
 | `METRICS_PORT` | Optional | `9102` | Port for Prometheus metrics scraper. |
+| `HOURLY_BOND_SPEND_LIMIT_XLM` | **Yes** | — | Required rolling one-hour ceiling for challenger bond spend. Set to the operator's approved risk limit. |
+| `BOND_SPEND_ALERT_THRESHOLD_PERCENT` | **Yes** | — | Percentage of the hourly ceiling at which the monitor alerts (integer `1`–`100`). |
 
 ### Webhook Notifications
 | Variable | Required (Prod) | Default | Description |

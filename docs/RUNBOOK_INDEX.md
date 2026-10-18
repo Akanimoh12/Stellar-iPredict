@@ -21,6 +21,7 @@ in the alert payload.
 | `oracle.monitor.submission_new` | Informational | Verify the new submission looks correct; no action needed unless outcome looks wrong | [Optimistic Oracle Runbook § Part 1](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-1--submit-operation) |
 | `oracle.monitor.dispute_escalated` | SEV2 | Confirm council members are aware and voting | [Optimistic Oracle Runbook § Part 2](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-2--challenge-operation) |
 | `oracle.monitor.bond_below_minimum` | SEV1 | Bond discrepancy touches escrowed funds — open incident immediately | [Optimistic Oracle Runbook § Part 4 — Monitoring](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-4--monitoring) |
+| `oracle.monitor.bond_spend_approaching` | SEV2 | Check the rolling spend and hourly ceiling; pause the challenge bot if required | [Optimistic Oracle Runbook — Bond Spend Limit](../oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#bond-spend-limit) |
 | `oracle.monitor.council_inactive` | SEV2 | Contact inactive council members; check aggregator logs | [Council Resolution Runbook — Monitoring & Alerts](../oracle/docs/COUNCIL_RUNBOOK.md#monitoring--alerts) |
 | `oracle.monitor.council_window_exceeded` | SEV1 | 72-hour council window has passed with no ruling; funds may be locked | [Council Flow Runbook — Handling Escalated Disputes](../oracle/docs/COUNCIL_FLOW_RUNBOOK.md#handling-escalated-disputes-exceeding-the-council-window) |
 

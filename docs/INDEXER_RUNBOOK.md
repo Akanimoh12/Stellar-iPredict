@@ -220,6 +220,24 @@ when the node returns.
 reports `startLedger` older than its oldest retained ledger), that is a
 permanent, non-retried failure — see [Cursor reset](#cursor-reset).
 
+### Ledger gap, stale event, or chain-tip regression
+
+The poll loop reports `ledger gap or reorganization detected; backfill
+required` when the RPC rejects the requested range, returns an event before
+the requested cursor, or reports a latest ledger behind the saved checkpoint.
+It does not advance the checkpoint for that response. Configure
+`recoverLedgerGap` with the deployment's archival/snapshot backfill procedure;
+the handler must persist the recovered events and checkpoint before returning
+the resulting checkpoint ledger. Without a recovery handler, the poll fails
+explicitly and the existing checkpoint remains unchanged.
+
+The indexer also holds a PostgreSQL session advisory lock on a dedicated
+connection. A 10-second heartbeat verifies that the lock is still held. If
+verification fails, the live poll is aborted and the lock connection is
+destroyed so PostgreSQL releases the session lock. PostgreSQL also enforces a
+30-second idle-session timeout on that lock connection, so an event-loop stall
+cannot leave a live session lock held indefinitely.
+
 ### Database connectivity lost
 
 **Behaviour:** writes fail and the event is routed to the dead-letter table

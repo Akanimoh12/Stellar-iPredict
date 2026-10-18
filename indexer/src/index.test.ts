@@ -7,6 +7,17 @@ vi.mock("./metrics-server.js", () => ({
   })),
 }));
 
+vi.mock("./db.js", () => ({
+  pool: { end: vi.fn().mockResolvedValue(undefined) },
+}));
+
+vi.mock("./lock.js", () => ({
+  acquireIndexerLock: vi.fn().mockResolvedValue({
+    isHeld: () => true,
+    release: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+
 // Mock config
 vi.mock("./config/index.js", () => {
   return {

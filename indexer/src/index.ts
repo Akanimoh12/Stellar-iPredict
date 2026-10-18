@@ -158,7 +158,7 @@ export function installGracefulShutdown(indexer: Indexer): void {
  * Under test (NODE_ENV === "test") the loop performs a single pass and
  * returns, so unit tests can exercise it without an infinite timer.
  */
-export async function startLivePolling(fromLedger: number): Promise<void> {
+export async function startLivePolling(fromLedger: number, signal?: AbortSignal): Promise<void> {
   const [{ config }, { writeEventToDb: writeBackfillEvent, processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE }, stellar] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
@@ -170,7 +170,7 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
   let currentLedger = fromLedger;
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
-  while (true) {
+  while (!signal?.aborted) {
     try {
       const latest = await server.getLatestLedger();
       if (latest.sequence > currentLedger) {
@@ -198,7 +198,19 @@ export async function startLivePolling(fromLedger: number): Promise<void> {
     if (process.env.NODE_ENV === "test") {
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, config.POLL_INTERVAL_MS));
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, config.POLL_INTERVAL_MS);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
   }
 }
 
@@ -224,19 +236,47 @@ export async function main(): Promise<void> {
   const secrets = await loadSecrets();
   console.info(`[ipredict-indexer] secrets: ${summariseSecretsLoad(secrets)}`);
 
-  // Initialize metrics server
+  const [{ pool }, { acquireIndexerLock }] = await Promise.all([
+    import("./db.js"),
+    import("./lock.js"),
+  ]);
+  const shutdown = new AbortController();
+  let lockLost: Error | undefined;
+  const lock = await acquireIndexerLock(pool, undefined, {
+    onLost: (error) => {
+      lockLost = error;
+      shutdown.abort(error);
+    },
+  });
   const metricsServer = new MetricsServer();
-  await metricsServer.start();
 
-  const isBackfill = process.argv.includes("--backfill");
+  try {
+    await metricsServer.start();
+    const isBackfill = process.argv.includes("--backfill");
 
-  if (isBackfill) {
-    console.log("[ipredict-indexer] Backfill mode enabled via CLI flag.");
-    const lastLedger = await runBackfill();
-    await startLivePolling(lastLedger);
-  } else {
-    console.log("[ipredict-indexer] Live polling mode enabled (no backfill).");
-    await startLivePolling(config.START_LEDGER);
+    if (isBackfill) {
+      console.log("[ipredict-indexer] Backfill mode enabled via CLI flag.");
+      const lastLedger = await runBackfill(shutdown.signal);
+      if (!shutdown.signal.aborted) {
+        await startLivePolling(lastLedger, shutdown.signal);
+      }
+    } else {
+      console.log("[ipredict-indexer] Live polling mode enabled (no backfill).");
+      await startLivePolling(config.START_LEDGER, shutdown.signal);
+    }
+
+    if (lockLost) throw lockLost;
+  } finally {
+    shutdown.abort();
+    try {
+      await lock.release();
+    } finally {
+      try {
+        await metricsServer.stop();
+      } finally {
+        await pool.end();
+      }
+    }
   }
 }
 

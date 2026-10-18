@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { pollOnce, runPollLoop, type RpcClient, type PollDb, type RpcEvent } from "../poll-loop.js";
+import { LedgerGapError } from "../rpc/getEvents.js";
+import { createLogger } from "../log.js";
 
 function makeRpcEvent(overrides: Partial<RpcEvent> = {}): RpcEvent {
   return {
@@ -89,6 +91,79 @@ describe("pollOnce", () => {
     const result = await pollOnce({ rpc, db, contractIds: [CONTRACT_A, CONTRACT_B] });
 
     expect(result.eventsWritten).toBe(3);
+  });
+
+  it("alerts and delegates RPC retention gaps to the configured backfill handler", async () => {
+    const gap = new LedgerGapError(101, "retention gap", 500, { fromLedger: 101, toLedger: 499 });
+    const rpc: RpcClient = { getEvents: vi.fn().mockRejectedValue(gap) };
+    const db = makeMockDb(100);
+    vi.mocked(db.getCheckpointLedger)
+      .mockResolvedValueOnce(100)
+      .mockResolvedValueOnce(500);
+    const backfill = vi.fn(async () => {
+      await db.saveCheckpointLedger(500);
+      return 500;
+    });
+    const logger = createLogger({ level: "error", sink: () => {} });
+    const logError = vi.spyOn(logger, "error");
+
+    await expect(
+      pollOnce({ rpc, db, contractIds: [CONTRACT_A], logger, recoverLedgerGap: backfill }),
+    ).resolves.toEqual({ eventsWritten: 0, latestLedger: 500 });
+    expect(backfill).toHaveBeenCalledWith(gap);
+    expect(logError).toHaveBeenCalledWith(
+      "ledger gap or reorganization detected; backfill required",
+      expect.objectContaining({ requestedStartLedger: 101, unavailableRange: gap.unavailableRange }),
+    );
+  });
+
+  it("detects an event before the requested cursor and invokes backfill instead of advancing", async () => {
+    const earlyEvent = makeRpcEvent({ ledger: 98 });
+    const rpc = makeMockRpc({ events: [earlyEvent], latestLedger: 110 });
+    const db = makeMockDb(100);
+    vi.mocked(db.getCheckpointLedger)
+      .mockResolvedValueOnce(100)
+      .mockResolvedValueOnce(110);
+    const backfill = vi.fn(async () => {
+      await db.saveCheckpointLedger(110);
+      return 110;
+    });
+
+    await expect(
+      pollOnce({ rpc, db, contractIds: [CONTRACT_A], recoverLedgerGap: backfill }),
+    ).resolves.toEqual({ eventsWritten: 0, latestLedger: 110 });
+    expect(backfill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startLedger: 101,
+        oldestLedger: 98,
+        unavailableRange: { fromLedger: 98, toLedger: 100 },
+      }),
+    );
+    expect(db.insertEvents).not.toHaveBeenCalled();
+  });
+
+  it("detects a chain tip behind the durable checkpoint", async () => {
+    const rpc = makeMockRpc({ events: [], latestLedger: 95 });
+    const db = makeMockDb(100);
+    vi.mocked(db.getCheckpointLedger)
+      .mockResolvedValueOnce(100)
+      .mockResolvedValueOnce(100);
+
+    await expect(
+      pollOnce({
+        rpc,
+        db,
+        contractIds: [CONTRACT_A],
+        recoverLedgerGap: vi.fn().mockResolvedValue(100),
+      }),
+    ).resolves.toEqual({ eventsWritten: 0, latestLedger: 100 });
+  });
+
+  it("does not silently swallow a ledger gap when no recovery handler is configured", async () => {
+    const gap = new LedgerGapError(101, "retention gap");
+    const rpc: RpcClient = { getEvents: vi.fn().mockRejectedValue(gap) };
+
+    await expect(pollOnce({ rpc, db: makeMockDb(100), contractIds: [CONTRACT_A] })).rejects.toBe(gap);
   });
 });
 
@@ -312,4 +387,3 @@ describe("Atomicity & Crash-Recovery Guarantees", () => {
     expect(replayResult.latestLedger).toBe(103);
   });
 });
-

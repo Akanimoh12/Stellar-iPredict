@@ -3,9 +3,14 @@
  */
 
 export {
+  assertBondSpendWithinHourlyLimit,
+  checkBondSpendFromDb,
   checkBondMinimum,
   checkBondMinimumFromDb,
+  BondSpendLimitExceededError,
   type BondAlert,
+  type BondSpendLimitOptions,
+  type BondSpendStatus,
   type BondMonitorOptions,
   type OracleSubmissionRecord,
 } from "./bond-monitor.js";

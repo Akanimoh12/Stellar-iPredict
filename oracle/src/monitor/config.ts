@@ -30,6 +30,12 @@ const schema = z.object({
   /** Minimum submitter bond, in XLM. Submissions below it are flagged. */
   SUBMITTER_BOND_XLM: positiveNumber.default(100),
 
+  /** Required rolling one-hour maximum for challenger bonds, in XLM. */
+  HOURLY_BOND_SPEND_LIMIT_XLM: positiveNumber,
+
+  /** Required percentage of the hourly limit at which to alert (1-100). */
+  BOND_SPEND_ALERT_THRESHOLD_PERCENT: positiveInteger.max(100),
+
   /** Webhook that receives every alert as JSON. When unset, alerts are only logged. */
   ALERT_WEBHOOK_URL: optionalEnv(z.string().url()),
 });

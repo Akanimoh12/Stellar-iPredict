@@ -18,7 +18,7 @@
  */
 
 import { Pool } from "pg";
-import { checkBondMinimumFromDb } from "../aggregator/bond-monitor.js";
+import { checkBondMinimumFromDb, checkBondSpendFromDb } from "../aggregator/bond-monitor.js";
 import {
   checkCouncilDeadlineApproachingFromDb,
   checkCouncilInactivityFromDb,
@@ -40,6 +40,7 @@ export interface MonitorCycleResult {
   newSubmissions: number;
   disputeEscalations: number;
   lowBonds: number;
+  bondSpend: number;
   councilInactive: number;
   councilWindowExceeded: number;
   councilDeadlineApproaching: number;
@@ -51,6 +52,7 @@ export function totalAlerts(result: MonitorCycleResult): number {
     result.newSubmissions +
     result.disputeEscalations +
     result.lowBonds +
+    result.bondSpend +
     result.councilInactive +
     result.councilWindowExceeded +
     result.councilDeadlineApproaching
@@ -162,12 +164,16 @@ export async function runMonitorCycle(
   const markets = await listExpiredUnresolvedMarkets(pool, nowSeconds);
   const stuck = detectStuckMarkets(markets, nowSeconds, config.STUCK_MARKET_HOURS);
 
-  const [newSubmissions, escalations, lowBonds, inactive, windowExceeded, deadlineApproaching] = await Promise.all([
+  const [newSubmissions, escalations, lowBonds, bondSpend, inactive, windowExceeded, deadlineApproaching] = await Promise.all([
     submissionWatcher.poll(),
     disputeWatcher.poll(),
     checkBondMinimumFromDb(pool, {
       requiredMinimumBond: xlmToStroops(config.SUBMITTER_BOND_XLM),
     }),
+    checkBondSpendFromDb(pool, {
+      hourlySpendLimit: xlmToStroops(config.HOURLY_BOND_SPEND_LIMIT_XLM),
+      alertThresholdPercent: config.BOND_SPEND_ALERT_THRESHOLD_PERCENT,
+    }, now),
     checkCouncilInactivityFromDb(pool, now, {
       inactivityThresholdHours: config.COUNCIL_INACTIVITY_HOURS,
     }),
@@ -180,6 +186,10 @@ export async function runMonitorCycle(
     newSubmissions: await emitAll("oracle.monitor.submission_new", newSubmissions),
     disputeEscalations: await emitAll("oracle.monitor.dispute_escalated", escalations),
     lowBonds: await emitAll("oracle.monitor.bond_below_minimum", lowBonds),
+    bondSpend: await emitAll(
+      "oracle.monitor.bond_spend_approaching",
+      bondSpend.limitApproached ? [bondSpend] : [],
+    ),
     councilInactive: await emitAll("oracle.monitor.council_inactive", inactive),
     councilWindowExceeded: await emitAll("oracle.monitor.council_window_exceeded", windowExceeded),
     councilDeadlineApproaching: await emitAll("oracle.monitor.council_deadline_approaching", deadlineApproaching),

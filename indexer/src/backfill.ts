@@ -278,9 +278,10 @@ export async function writeEventToDb(
 }
 
 // Historical backfill main entry point
-export async function runBackfill(): Promise<number> {
+export async function runBackfill(signal?: AbortSignal): Promise<number> {
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
 
+  if (signal?.aborted) throw signal.reason ?? new Error("backfill aborted");
   console.log(`[backfill] Fetching current network head ledger...`);
   const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
     return await server.getLatestLedger();
@@ -313,6 +314,7 @@ export async function runBackfill(): Promise<number> {
   let cursor: string | undefined = undefined;
 
   while (currentLedger <= headLedger) {
+    if (signal?.aborted) throw signal.reason ?? new Error("backfill aborted");
     const request: rpc.Api.GetEventsRequest = cursor
       ? {
           filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
@@ -350,6 +352,7 @@ export async function runBackfill(): Promise<number> {
       }
       throw err;
     }
+    if (signal?.aborted) throw signal.reason ?? new Error("backfill aborted");
     const events = response.events || [];
 
     if (events.length === 0) {
@@ -366,6 +369,7 @@ export async function runBackfill(): Promise<number> {
     console.log(`[backfill] Processing ${events.length} events...`);
     const pageStartMem = sampleMemoryUsage();
     await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
+      if (signal?.aborted) throw signal.reason ?? new Error("backfill aborted");
       let topics: any[];
       let data: any;
       try {

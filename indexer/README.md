@@ -55,6 +55,32 @@ npm install
 npm run dev
 ```
 
+## Indexer maintenance CLI
+
+Historical backfills and database aggregate reconciliation share one command:
+
+```bash
+cd indexer
+npm run maintenance -- backfill
+npm run maintenance -- bet-counts --dry-run
+npm run maintenance -- totals
+npm run maintenance -- totals --verify-onchain
+npm run maintenance -- totals --verify-onchain --fail-on-drift
+```
+
+- `backfill` replays retained Soroban RPC events using the existing checkpoint/retention logic.
+- `bet-counts` restores `markets.bet_count` from the `bets` table.
+- `totals` restores `markets.total_yes` and `total_no` from net bet amounts, including resetting markets with no bets to zero.
+- `--dry-run` calculates corrections in a transaction and rolls them back; it is available for the two recompute commands, not event backfill.
+- `--verify-onchain` makes read-only `get_market` simulations for every market after DB reconciliation and logs per-market drift using exact bigint stroop values; requires `SOROBAN_RPC_URL`, `NETWORK_PASSPHRASE`, and `MARKET_CONTRACT_ID`. An optional `SIMULATION_SOURCE_ACCOUNT` can override the read-only simulation fee source. Simulation does not sign or submit a transaction.
+- `--fail-on-drift` sets an unsuccessful process exit status when a verified market differs; RPC errors also fail the job. Drift is reported but not overwritten with chain data.
+- The legacy `npm run backfill:bet-count -- --dry-run` continues to work.
+
+For skipped events set `LOG_LEVEL=debug`. The contract allowlist reports
+`unconfigured_contract` and the event router reports
+`unrecognized_topic` / `invalid_payload` with ledger, transaction hash,
+and a reason; existing security warnings and dead-letter persistence remain.
+
 ## Metrics & observability
 
 The indexer maintains lightweight, dependency-free in-process counters in

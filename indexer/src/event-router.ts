@@ -16,6 +16,8 @@ import {
   decodeOracleFinalizedEvent,
 } from "./handlers/oracle_finalized.js";
 import { metrics } from "./metrics.js";
+import { createLogger, parseLogLevel } from "./log.js";
+import type { Logger } from "./log.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
 
 /**
@@ -109,6 +111,11 @@ const ROUTES: EventRoute[] = [
   },
 ];
 
+const skipLogger = createLogger({
+  level: parseLogLevel(process.env.LOG_LEVEL),
+  bindings: { component: "indexer", module: "event-router" },
+});
+
 function findRoute(topics: readonly unknown[]): EventRoute | undefined {
   return ROUTES.find((route) => route.matches(topics));
 }
@@ -158,11 +165,18 @@ export async function writeEventToDb(
   event: DecodedContractEvent,
   db: DbClient,
   redis: RedisClient,
+  logger: Pick<Logger, "debug"> = skipLogger,
 ): Promise<void> {
   const [domain, action] = event.topics;
   const route = findRoute(event.topics);
 
   if (!route) {
+    logger.debug("skipped event: unrecognized topic", {
+      reason: "unrecognized_topic",
+      ledger: event.ledger,
+      txHash: event.txHash,
+      topics: event.topics.map(String),
+    });
     await deadLetterEvent(db, event, `unrecognized event type: ${String(domain)}:${String(action)}`);
     return;
   }
@@ -172,6 +186,13 @@ export async function writeEventToDb(
     route.validate(event);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    logger.debug("skipped event: payload validation failed", {
+      reason: "invalid_payload",
+      route: route.name,
+      ledger: event.ledger,
+      txHash: event.txHash,
+      detail,
+    });
     await deadLetterEvent(db, event, `${route.name} payload failed validation: ${detail}`);
     return;
   }

@@ -148,7 +148,7 @@ export class SorobanRpcClient implements RpcClient {
 
   constructor(rpcUrl: string, allowedContractIds: string[] = [], logger?: Logger) {
     this.server = new rpc.Server(rpcUrl, { allowHttp: true });
-    this.contractFilter = makeContractFilter(allowedContractIds);
+    this.contractFilter = makeContractFilter(allowedContractIds, logger);
     this.logger = logger;
   }
 

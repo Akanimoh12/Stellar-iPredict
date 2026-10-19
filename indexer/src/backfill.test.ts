@@ -22,6 +22,7 @@ import {
   jitteredBackoffDelay,
   writeEventToDb,
   runBackfill,
+  runFullReindex,
   processEventsInChunks,
   EVENTS_PROCESSING_CHUNK_SIZE,
   sampleMemoryUsage,
@@ -517,6 +518,98 @@ describe("Backfill & Poll Module", () => {
       expect(mem.heapUsed).toBeGreaterThan(0);
       expect(mem.heapTotal).toBeGreaterThan(0);
       expect(mem.external).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe("runFullReindex", () => {
+    it("runs full reindex with progress reporting and derived state reconciliation", async () => {
+      const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 105 });
+      const mockGetEvents = vi.fn().mockResolvedValue({
+        events: [
+          {
+            ledger: 102,
+            txHash: "0x123",
+            topic: ["mkt", "created"],
+            value: { id: 1, question: "Will BTC hit 100k?", category: "Crypto", end_time: 1700000000, creator: "G123" },
+          },
+        ],
+        latestLedger: 105,
+      });
+
+      const serverInstance = {
+        getLatestLedger: mockGetLatestLedger,
+        getEvents: mockGetEvents,
+      };
+      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+
+      const progressSnapshots: any[] = [];
+      const result = await runFullReindex({
+        startLedger: 100,
+        endLedger: 105,
+        resume: false,
+        rebuildLeaderboard: false,
+        recomputeTotals: false,
+        recomputeBetCounts: false,
+        onProgress: (p) => progressSnapshots.push(p),
+      });
+
+      expect(result.startLedger).toBe(100);
+      expect(result.latestLedger).toBe(105);
+      expect(result.totalEvents).toBe(1);
+      expect(progressSnapshots.length).toBeGreaterThan(0);
+
+      const lastProgress = progressSnapshots[progressSnapshots.length - 1];
+      expect(lastProgress.phase).toBe("completed");
+      expect(lastProgress.targetLedger).toBe(105);
+    });
+
+    it("resumes from checkpoint when available in database", async () => {
+      const mockDb = {
+        query: vi.fn().mockImplementation(async (sql: string) => {
+          if (sql.includes("SELECT last_ledger_seq FROM checkpoints")) {
+            return { rows: [{ last_ledger_seq: "150" }] };
+          }
+          return { rows: [] };
+        }),
+      };
+
+      const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 155 });
+      const mockGetEvents = vi.fn().mockResolvedValue({
+        events: [],
+        latestLedger: 155,
+      });
+
+      const serverInstance = {
+        getLatestLedger: mockGetLatestLedger,
+        getEvents: mockGetEvents,
+      };
+      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+
+      const result = await runFullReindex({
+        db: mockDb as any,
+        startLedger: 100,
+        endLedger: 155,
+        resume: true,
+        rebuildLeaderboard: false,
+        recomputeTotals: false,
+        recomputeBetCounts: false,
+      });
+
+      expect(result.resumedFromCheckpoint).toBe(150);
+      expect(result.startLedger).toBe(151);
+      expect(result.latestLedger).toBe(155);
+    });
+
+    it("aborts when signal is aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        runFullReindex({
+          signal: controller.signal,
+          startLedger: 100,
+        }),
+      ).rejects.toThrow("reindex aborted");
     });
   });
 });

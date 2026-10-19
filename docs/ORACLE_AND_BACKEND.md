@@ -642,12 +642,12 @@ services:
 #### Indexer Image Runbook
 
 Build the production indexer image from the `indexer/` directory. The Dockerfile
-lives under `indexer/src/` so the build context can still include
+lives under `indexer/` so the build context can still include
 `package-lock.json`, `tsconfig.json`, and the full source tree.
 
 ```bash
 cd indexer
-docker build -f src/Dockerfile -t ipredict-indexer:local .
+docker build -t ipredict-indexer:local .
 ```
 
 Run the image with the same environment variables documented in

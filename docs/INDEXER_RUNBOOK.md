@@ -113,12 +113,12 @@ npm run dev                 # tsx watch src/index.ts
 ### Production
 
 Build and start the production image (the Dockerfile lives under
-`indexer/src/` so the build context includes `package-lock.json` and the full
+`indexer/` so the build context includes `package-lock.json` and the full
 source):
 
 ```bash
 cd indexer
-docker build -f src/Dockerfile -t ipredict-indexer:local .
+docker build -t ipredict-indexer:local .
 docker run --rm --env-file .env ipredict-indexer:local
 ```
 

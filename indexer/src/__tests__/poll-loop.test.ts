@@ -374,6 +374,7 @@ describe("Atomicity & Crash-Recovery Guarantees", () => {
     expect(recoveryResult.latestLedger).toBe(103);
 
     // Step 3: Reprocessing the exact same range (e.g. redundant replay) produces no duplicate effects
+    persistedCheckpoint = 100;
     const replayResult = await pollOnce({
       rpc: {
         getEvents: vi.fn().mockResolvedValue({ events: batchEvents, latestLedger: 103 }),

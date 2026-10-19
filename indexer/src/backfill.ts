@@ -1,6 +1,6 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "./config/index.js";
-import { pool } from "./db.js";
+import { pool, ensureCheckpointTable, getCheckpointLedger, saveCheckpointLedger } from "./db.js";
 import { insertProcessedEvent } from "./handlers/idempotency.js";
 import {
   isRetentionExceededError,
@@ -12,6 +12,7 @@ import {
 } from "./rpc/getEvents.js";
 import { jitteredDelayMs } from "./rpc/retry.js";
 import { refreshDeadLetterQueueDepthFromDb } from "./metrics.js";
+import type { Logger } from "./log.js";
 
 /**
  * Backfill as a recovery path.
@@ -425,3 +426,295 @@ export async function runBackfill(signal?: AbortSignal): Promise<number> {
   console.log(`[backfill] Completed backfill up to ledger ${currentLedger}`);
   return currentLedger;
 }
+
+export interface ReindexProgress {
+  phase: "backfill" | "bet-counts" | "totals" | "leaderboard" | "completed";
+  currentLedger: number;
+  startLedger: number;
+  targetLedger: number;
+  processedLedgers: number;
+  totalLedgers: number;
+  percentComplete: number;
+  eventsProcessed: number;
+  rateLedgersPerSec: number;
+  estimatedRemainingSec: number;
+}
+
+export interface ReindexOptions {
+  startLedger?: number;
+  endLedger?: number;
+  resume?: boolean;
+  rebuildLeaderboard?: boolean;
+  recomputeTotals?: boolean;
+  recomputeBetCounts?: boolean;
+  onProgress?: (progress: ReindexProgress) => void;
+  logger?: Logger;
+  signal?: AbortSignal;
+  db?: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: any[] }> };
+}
+
+export interface ReindexResult {
+  startLedger: number;
+  latestLedger: number;
+  totalEvents: number;
+  durationMs: number;
+  resumedFromCheckpoint: number | null;
+  betCountsRecomputed: boolean;
+  totalsRecomputed: boolean;
+  leaderboardRebuilt: boolean;
+}
+
+/**
+ * Unified, resumable reindex command with real-time progress logging.
+ *
+ * Coordinates:
+ * 1. Event backfill from chain/RPC starting from last saved checkpoint (or START_LEDGER)
+ * 2. Incremental checkpoint persistence so interrupted runs resume safely
+ * 3. Derived state reconciliation:
+ *    - Market bet counts (`recomputeMarketBetCountsFromBets`)
+ *    - Market totals (`recomputeMarketTotalsFromBets`)
+ *    - Leaderboard points table (`rebuildLeaderboardTable`)
+ */
+export async function runFullReindex(options: ReindexOptions = {}): Promise<ReindexResult> {
+  const signal = options.signal;
+  const db = options.db ?? pool;
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+
+  if (signal?.aborted) throw new Error("reindex aborted");
+
+  await ensureCheckpointTable(db);
+  await ensureDeadLetterTable();
+
+  const persistedCheckpoint = options.resume !== false ? await getCheckpointLedger(db) : null;
+  const defaultStart = options.startLedger ?? config.START_LEDGER;
+  let effectiveStartLedger = defaultStart;
+  let resumedFromCheckpoint: number | null = null;
+
+  if (persistedCheckpoint !== null && persistedCheckpoint >= defaultStart) {
+    effectiveStartLedger = persistedCheckpoint + 1;
+    resumedFromCheckpoint = persistedCheckpoint;
+    console.log(
+      `[reindex] Resuming reindex from persisted checkpoint at ledger ${persistedCheckpoint} (starting at ${effectiveStartLedger})...`,
+    );
+  } else {
+    console.log(`[reindex] Starting full reindex from ledger ${effectiveStartLedger}...`);
+  }
+
+  console.log(`[reindex] Fetching current network head ledger...`);
+  const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {
+    return await server.getLatestLedger();
+  });
+  const headLedger = options.endLedger ?? latestLedgerResponse.sequence;
+
+  console.log(
+    `[reindex] Target network head ledger is ${headLedger}. Range: [${effectiveStartLedger}..${headLedger}] (${Math.max(0, headLedger - effectiveStartLedger + 1)} ledgers)...`,
+  );
+
+  // Proactively check retention boundary if getHealth is supported
+  if (typeof (server as any).getHealth === "function") {
+    try {
+      const health = await (server as any).getHealth();
+      const oldestLedger = Number(health?.oldestLedger);
+      if (!isNaN(oldestLedger)) {
+        if (effectiveStartLedger < oldestLedger) {
+          const { message, unavailableRange } = formatRetentionExceededMessage(effectiveStartLedger, oldestLedger);
+          console.error(message);
+          throw new RetentionExceededError(effectiveStartLedger, oldestLedger, message, unavailableRange);
+        }
+        await checkRetentionBoundary(server, effectiveStartLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
+      }
+    } catch (err) {
+      if (err instanceof RetentionExceededError) throw err;
+    }
+  }
+
+  let currentLedger = effectiveStartLedger;
+  let cursor: string | undefined = undefined;
+  let totalEvents = 0;
+  const startTime = Date.now();
+  const totalLedgersToProcess = Math.max(1, headLedger - effectiveStartLedger + 1);
+
+  const reportProgress = (phase: ReindexProgress["phase"]) => {
+    const processedLedgers = Math.max(0, currentLedger - effectiveStartLedger);
+    const percentComplete = Math.min(100, Math.round((processedLedgers / totalLedgersToProcess) * 100));
+    const elapsedSec = Math.max(0.1, (Date.now() - startTime) / 1000);
+    const rateLedgersPerSec = Number((processedLedgers / elapsedSec).toFixed(1));
+    const remainingLedgers = Math.max(0, headLedger - currentLedger);
+    const estimatedRemainingSec = rateLedgersPerSec > 0 ? Math.round(remainingLedgers / rateLedgersPerSec) : 0;
+
+    const progress: ReindexProgress = {
+      phase,
+      currentLedger,
+      startLedger: effectiveStartLedger,
+      targetLedger: headLedger,
+      processedLedgers,
+      totalLedgers: totalLedgersToProcess,
+      percentComplete,
+      eventsProcessed: totalEvents,
+      rateLedgersPerSec,
+      estimatedRemainingSec,
+    };
+
+    console.log(
+      `[reindex] [${phase}] Progress: ${percentComplete}% | Ledger ${currentLedger}/${headLedger} (+${processedLedgers}/${totalLedgersToProcess}) | Events: ${totalEvents} | Rate: ${rateLedgersPerSec} ledgers/s | ETA: ${estimatedRemainingSec}s`,
+    );
+
+    options.onProgress?.(progress);
+  };
+
+  while (currentLedger <= headLedger) {
+    if (signal?.aborted) throw signal.reason ?? new Error("reindex aborted");
+    const backfillWindowLedgers = config.BACKFILL_WINDOW_LEDGERS ?? 10_000;
+    const windowEndLedger = Math.min(
+      currentLedger + backfillWindowLedgers - 1,
+      headLedger,
+    );
+    const request: rpc.Api.GetEventsRequest = cursor
+      ? {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          cursor,
+          limit: config.EVENTS_PER_PAGE,
+        }
+      : {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          startLedger: currentLedger,
+          endLedger: windowEndLedger,
+          limit: config.EVENTS_PER_PAGE,
+        };
+
+    let response: rpc.Api.GetEventsResponse;
+    try {
+      response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async (): Promise<rpc.Api.GetEventsResponse> => {
+        return await server.getEvents(request);
+      });
+    } catch (err: any) {
+      if (isRetentionExceededError(err)) {
+        const msg = err instanceof Error ? err.message : String(err);
+        let oldestLedger = extractOldestLedger(msg);
+        if (oldestLedger === null && typeof (server as any).getHealth === "function") {
+          try {
+            const health = await (server as any).getHealth();
+            oldestLedger = Number(health?.oldestLedger);
+          } catch {}
+        }
+        const { message, unavailableRange } = formatRetentionExceededMessage(currentLedger, oldestLedger);
+        console.error(message);
+        throw new RetentionExceededError(currentLedger, oldestLedger, message, unavailableRange);
+      }
+      throw err;
+    }
+    if (signal?.aborted) throw new Error("reindex aborted");
+    const events = response.events || [];
+
+    if (events.length === 0) {
+      if (response.latestLedger >= headLedger) {
+        currentLedger = response.latestLedger;
+        await saveCheckpointLedger(db, currentLedger);
+        reportProgress("backfill");
+        break;
+      }
+      const nextLedger = Math.min(response.latestLedger, windowEndLedger) + 1;
+      currentLedger = Math.max(currentLedger + 1, nextLedger);
+      await saveCheckpointLedger(db, currentLedger - 1);
+      cursor = undefined;
+      reportProgress("backfill");
+      continue;
+    }
+
+    await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
+      if (signal?.aborted) throw new Error("reindex aborted");
+      let topics: any[];
+      let data: any;
+      try {
+        topics = event.topic.map((t: any) => scValToNative(t));
+        data = scValToNative(event.value);
+      } catch (err) {
+        console.error(`[reindex] Failed to decode event: `, err);
+        await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
+        return;
+      }
+      await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
+    });
+
+    totalEvents += events.length;
+    const lastEventLedger = events[events.length - 1].ledger;
+
+    if (response.cursor && response.cursor !== cursor) {
+      cursor = response.cursor;
+    } else {
+      currentLedger = Math.max(
+        lastEventLedger + 1,
+        Math.min(response.latestLedger, windowEndLedger) + 1,
+      );
+      cursor = undefined;
+    }
+
+    await saveCheckpointLedger(db, Math.min(headLedger, lastEventLedger));
+    await checkRetentionBoundary(server, currentLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
+    reportProgress("backfill");
+
+    if (lastEventLedger >= headLedger) {
+      currentLedger = headLedger;
+      break;
+    }
+  }
+
+  // Derived state reconciliation phases
+  let betCountsDone = false;
+  let totalsDone = false;
+  let leaderboardDone = false;
+
+  if (options.recomputeBetCounts !== false) {
+    reportProgress("bet-counts");
+    console.log("[reindex] Recomputing market bet counts from bets table...");
+    const { recomputeMarketBetCountsFromBets } = await import("./recomputeBetCounts.js");
+    await recomputeMarketBetCountsFromBets(db);
+    betCountsDone = true;
+  }
+
+  if (options.recomputeTotals !== false) {
+    reportProgress("totals");
+    console.log("[reindex] Recomputing market totals from bets table...");
+    const { recomputeMarketTotalsFromBets } = await import("./recomputeTotals.js");
+    await recomputeMarketTotalsFromBets(db);
+    totalsDone = true;
+  }
+
+  if (options.rebuildLeaderboard !== false) {
+    reportProgress("leaderboard");
+    console.log("[reindex] Rebuilding leaderboard points snapshot from events table...");
+    const { rebuildLeaderboardTable } = await import("./leaderboard-rebuild.js");
+    await rebuildLeaderboardTable(db, { sinceLedger: effectiveStartLedger });
+    leaderboardDone = true;
+  }
+
+  reportProgress("completed");
+  const durationMs = Date.now() - startTime;
+  console.log(
+    `[reindex] Reindex finished successfully in ${(durationMs / 1000).toFixed(1)}s! Checked ledgers up to ${currentLedger}, total events processed: ${totalEvents}.`,
+  );
+
+  return {
+    startLedger: effectiveStartLedger,
+    latestLedger: Math.min(headLedger, currentLedger),
+    totalEvents,
+    durationMs,
+    resumedFromCheckpoint,
+    betCountsRecomputed: betCountsDone,
+    totalsRecomputed: totalsDone,
+    leaderboardRebuilt: leaderboardDone,
+  };
+}
+
+// Direct CLI entry point if executed directly
+if (process.argv[1]?.endsWith("backfill.ts") || process.argv.includes("--reindex")) {
+  runFullReindex()
+    .then(() => pool.end())
+    .catch((err) => {
+      console.error("[reindex] Fatal error:", err);
+      pool.end().finally(() => {
+        process.exitCode = 1;
+      });
+    });
+}
+

@@ -161,10 +161,17 @@ describe("indexer_lag metric", () => {
     expect(metrics.indexerLag.get()).toBe(50);
   });
 
+  it("can track lag in seconds", () => {
+    metrics.indexerLagSeconds.set(500);
+    expect(metrics.indexerLagSeconds.get()).toBe(500);
+  });
+
   it("is reset by resetMetrics", () => {
     metrics.indexerLag.set(42);
+    metrics.indexerLagSeconds.set(210);
     resetMetrics();
     expect(metrics.indexerLag.get()).toBe(0);
+    expect(metrics.indexerLagSeconds.get()).toBe(0);
   });
 });
 

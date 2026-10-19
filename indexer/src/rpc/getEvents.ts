@@ -141,15 +141,86 @@ export async function checkRetentionBoundary(
   }
 }
 
+export const DEFAULT_RPC_FAILOVER_COOLDOWN_MS = 30_000;
+
+export interface RpcEndpointStatus {
+  url: string;
+  healthy: boolean;
+  consecutiveFailures: number;
+  lastFailureTime: number | null;
+  lastSuccessTime: number | null;
+}
+
+export interface SorobanRpcClientOptions {
+  cooldownMs?: number;
+}
+
+interface EndpointInternal extends RpcEndpointStatus {
+  server: rpc.Server;
+}
+
 export class SorobanRpcClient implements RpcClient {
-  private readonly server: rpc.Server;
+  public server: rpc.Server;
+  private readonly endpoints: EndpointInternal[];
   private readonly contractFilter: (contractId: string) => boolean;
   private readonly logger?: Logger;
+  private readonly cooldownMs: number;
+  private activeEndpointIndex = 0;
 
-  constructor(rpcUrl: string, allowedContractIds: string[] = [], logger?: Logger) {
-    this.server = new rpc.Server(rpcUrl, { allowHttp: true });
+  constructor(
+    rpcUrls: string | string[],
+    allowedContractIds: string[] = [],
+    logger?: Logger,
+    options?: SorobanRpcClientOptions,
+  ) {
+    const rawList = Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls];
+    const parsed = rawList
+      .flatMap((u) => (typeof u === "string" ? u.split(",") : []))
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+
+    const urls = parsed.length > 0 ? parsed : ["http://localhost:8000"];
+
+    this.cooldownMs =
+      options?.cooldownMs ?? Number(process.env.RPC_FAILOVER_COOLDOWN_MS ?? DEFAULT_RPC_FAILOVER_COOLDOWN_MS);
+    this.endpoints = urls.map((url) => ({
+      url,
+      server: new rpc.Server(url, { allowHttp: true }),
+      healthy: true,
+      consecutiveFailures: 0,
+      lastFailureTime: null,
+      lastSuccessTime: null,
+    }));
+    this.server = this.endpoints[0].server;
     this.contractFilter = makeContractFilter(allowedContractIds, logger);
     this.logger = logger;
+  }
+
+  getEndpoints(): string[] {
+    return this.endpoints.map((ep) => ep.url);
+  }
+
+  getActiveEndpoint(): string {
+    return this.endpoints[this.activeEndpointIndex]?.url ?? this.endpoints[0]?.url ?? "";
+  }
+
+  getEndpointHealth(): RpcEndpointStatus[] {
+    return this.endpoints.map(({ url, healthy, consecutiveFailures, lastFailureTime, lastSuccessTime }) => ({
+      url,
+      healthy,
+      consecutiveFailures,
+      lastFailureTime,
+      lastSuccessTime,
+    }));
+  }
+
+  resetEndpointHealth(): void {
+    for (const ep of this.endpoints) {
+      ep.healthy = true;
+      ep.consecutiveFailures = 0;
+      ep.lastFailureTime = null;
+    }
+    this.activeEndpointIndex = 0;
   }
 
   async getEvents(opts: {
@@ -166,66 +237,120 @@ export class SorobanRpcClient implements RpcClient {
       },
     ];
 
-    try {
-      const allEvents: RpcEvent[] = [];
-      let latestLedger = 0;
-      let cursor: string | undefined;
+    // Priority order:
+    // 1. Healthy endpoints in list order
+    // 2. Unhealthy endpoints whose cooldown has elapsed
+    // 3. Fallback to all endpoints in list order
+    const now = Date.now();
+    let eligible = this.endpoints.filter(
+      (ep) => ep.healthy || (ep.lastFailureTime !== null && now - ep.lastFailureTime >= this.cooldownMs),
+    );
+    if (eligible.length === 0) {
+      eligible = [...this.endpoints];
+    }
 
-      do {
-        const request = cursor
-          ? { filters, cursor, limit }
-          : { filters, startLedger, limit };
+    let lastError: unknown;
+    let lastRetentionError: RetentionExceededError | null = null;
 
-        const response = await this.server.getEvents(request as any);
+    for (let i = 0; i < eligible.length; i++) {
+      const endpoint = eligible[i];
+      const activeServer =
+        this.server && this.server !== this.endpoints[0]?.server && i === 0 ? this.server : endpoint.server;
 
-        latestLedger = response.latestLedger;
+      try {
+        const allEvents: RpcEvent[] = [];
+        let latestLedger = 0;
+        let cursor: string | undefined;
 
-        // Filter events BEFORE decoding to prevent processing unknown contracts
-        for (const ev of response.events as any[]) {
-          const contractId = ev.contractId?.toString() ?? "";
-          
-          // Reject events from unknown contracts
-          if (!this.contractFilter(contractId)) {
-            this.logger?.warn("rejected event from unconfigured contract", {
+        do {
+          const request = cursor
+            ? { filters, cursor, limit }
+            : { filters, startLedger, limit };
+
+          const response = await activeServer.getEvents(request as any);
+
+          latestLedger = response.latestLedger;
+
+          // Filter events BEFORE decoding to prevent processing unknown contracts
+          for (const ev of response.events as any[]) {
+            const contractId = ev.contractId?.toString() ?? "";
+
+            // Reject events from unknown contracts
+            if (!this.contractFilter(contractId)) {
+              this.logger?.warn("rejected event from unconfigured contract", {
+                contractId,
+                ledger: Number(ev.ledger),
+                type: ev.type,
+              });
+              continue;
+            }
+
+            allEvents.push({
               contractId,
               ledger: Number(ev.ledger),
               type: ev.type,
+              body: ev,
             });
-            continue;
           }
 
-          allEvents.push({
-            contractId,
-            ledger: Number(ev.ledger),
-            type: ev.type,
-            body: ev,
-          });
+          cursor = response.cursor;
+        } while (cursor);
+
+        // Success: mark endpoint healthy
+        endpoint.healthy = true;
+        endpoint.consecutiveFailures = 0;
+        endpoint.lastSuccessTime = Date.now();
+        this.activeEndpointIndex = this.endpoints.indexOf(endpoint);
+
+        return {
+          events: allEvents,
+          latestLedger,
+        };
+      } catch (error: any) {
+        metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" });
+        endpoint.consecutiveFailures++;
+        endpoint.lastFailureTime = Date.now();
+        endpoint.healthy = false;
+        lastError = error;
+
+        const message = error instanceof Error ? error.message : String(error);
+
+        if (isRetentionExceededError(error)) {
+          const oldestLedger = extractOldestLedger(message);
+          const { message: remediationMessage, unavailableRange } = formatRetentionExceededMessage(
+            startLedger,
+            oldestLedger,
+          );
+          lastRetentionError = new RetentionExceededError(
+            startLedger,
+            oldestLedger,
+            remediationMessage,
+            unavailableRange,
+          );
         }
 
-        cursor = response.cursor;
-      } while (cursor);
-
-      return {
-        events: allEvents,
-        latestLedger,
-      };
-    } catch (error: any) {
-      metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" });
-      const message = error instanceof Error ? error.message : String(error);
-
-      if (isRetentionExceededError(error)) {
-        const oldestLedger = extractOldestLedger(message);
-        const { message: remediationMessage, unavailableRange } = formatRetentionExceededMessage(
-          startLedger,
-          oldestLedger,
-        );
-
-        this.logger?.error(remediationMessage, { startLedger, oldestLedger, unavailableRange });
-        console.error(remediationMessage);
-        throw new RetentionExceededError(startLedger, oldestLedger, remediationMessage, unavailableRange);
+        const nextEndpoint = eligible[i + 1];
+        if (nextEndpoint) {
+          this.logger?.warn("RPC endpoint failed, failing over to next endpoint", {
+            failedUrl: endpoint.url,
+            nextUrl: nextEndpoint.url,
+            error: message,
+          });
+        }
       }
-
-      throw error;
     }
+
+    // All eligible endpoints failed
+    if (lastRetentionError) {
+      this.logger?.error(lastRetentionError.message, {
+        startLedger,
+        oldestLedger: lastRetentionError.oldestLedger,
+        unavailableRange: lastRetentionError.unavailableRange,
+      });
+      console.error(lastRetentionError.message);
+      throw lastRetentionError;
+    }
+
+    throw lastError;
   }
 }

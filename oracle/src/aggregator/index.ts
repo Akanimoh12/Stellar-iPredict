@@ -47,6 +47,8 @@ export {
   checkCouncilInactivityFromDb,
   checkCouncilWindowExceeded,
   checkCouncilWindowExceededFromDb,
+  checkCouncilNoVotesBeforeDeadline,
+  checkCouncilNoVotesBeforeDeadlineFromDb,
   type CouncilConfig,
   type CouncilResolverReport,
   type AuditFormat,
@@ -54,6 +56,8 @@ export {
   type CouncilAuditRecord,
   type CouncilInactivityAlert,
   type CouncilWindowExceededAlert,
+  type CouncilNoVotesPageAlert,
+  type CouncilNoVotesPageOptions,
   type CouncilInactivityMonitorOptions,
   type EscalatedMarketRecord,
 } from "./governance.js";

@@ -352,6 +352,53 @@ describe("runMonitorCycle", () => {
   });
 });
 
+describe("runMonitorCycle — council no-vote page (#917)", () => {
+  function noVotePool() {
+    return fakePool({
+      escalated: [
+        {
+          market_id: "10",
+          escalated_at: new Date(NOW.getTime() - 68 * HOUR).toISOString(),
+          council_deadline: new Date(NOW.getTime() + 4 * HOUR).toISOString(),
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
+    });
+  }
+
+  it("defaults COUNCIL_NO_VOTE_PAGE_HOURS to 6", () => {
+    expect(baseConfig.COUNCIL_NO_VOTE_PAGE_HOURS).toBe(6);
+  });
+
+  it("pages SEV1 when no council member has voted close to the deadline", async () => {
+    const emit = vi.fn(async () => {});
+    const result = await runMonitorCycle(deps(noVotePool(), emit), baseConfig, NOW);
+
+    expect(result.councilNoVotesPage).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.council_no_votes_page",
+      payload: expect.objectContaining({ marketId: "10", severity: "SEV1", hoursRemaining: 4 }),
+    });
+  });
+
+  it("pages once per dispute across cycles when a paged set is supplied", async () => {
+    const emit = vi.fn(async () => {});
+    const pool = noVotePool();
+    const dependencies = { ...deps(pool, emit), councilNoVotePaged: new Set<string>() };
+
+    expect((await runMonitorCycle(dependencies, baseConfig, NOW)).councilNoVotesPage).toBe(1);
+    expect((await runMonitorCycle(dependencies, baseConfig, NOW)).councilNoVotesPage).toBe(0);
+  });
+
+  it("includes a runbook link in the serialized page", () => {
+    const body = JSON.parse(
+      serializeAlert({ type: "oracle.monitor.council_no_votes_page", payload: { marketId: "10" } }),
+    );
+    expect(body.runbook_url).toContain("COUNCIL_RUNBOOK.md");
+  });
+});
+
 describe("runMonitor", () => {
   it("stops when the signal aborts", async () => {
     const controller = new AbortController();

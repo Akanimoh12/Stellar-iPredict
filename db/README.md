@@ -62,7 +62,23 @@ Primary key:
 - `(market_id, bettor)`
 
 Index:
-- `idx_bets_bettor` on `bettor`
+- `idx_bets_bettor_created_at` on `(bettor, created_at DESC)` for bettor history
+- `idx_bets_market_created_at` on `(market_id, created_at DESC)` for market bet pages
+- `idx_bets_claimed_created_at` on `(claimed, created_at DESC)` for claimed-status lookups
+
+The query plans for all three patterns are exercised by the Postgres migration
+regression suite after loading and analyzing representative bet data.
+
+### Migration naming
+
+New migrations use one format: `NNNN_lowercase_description.sql`, with a
+matching `NNNN_lowercase_description.down.sql` rollback and the next unused
+four-digit number in sequence. The migration runner and CI reject malformed
+names, numbering gaps, and new prefix collisions. Existing prefix collisions
+are explicitly frozen in `migration-names.ts`: applied migrations are tracked
+by filename, so renaming a historical file could replay its DDL on an existing
+deployment. Do not rename or renumber an applied migration; add the next
+sequential migration instead.
 
 ### `leaderboard`
 
@@ -105,6 +121,12 @@ Indexes:
 ## Event archival and retention policy
 
 The `events` table is retained only for the replay window the indexer needs. The default hot retention is `30 days` and older rows are moved to `events_archive` in small batches so regular writes are not stalled by a huge delete.
+
+The current policy uses bounded archival rather than table partitioning:
+`enforce_data_retention()` archives events older than 30 days, then purges
+archive rows older than 400 days. Audit-class oracle records are not part of
+this purge and remain subject to manual legal review. Partitioning can be
+revisited if measured volume or purge duration exceeds the database SLO.
 
 - Hot rows stay in `events` when `created_at >= NOW() - INTERVAL '30 days'`
 - Older rows are archived using `archive_old_events(retention_days => 30, batch_size => 10000)`

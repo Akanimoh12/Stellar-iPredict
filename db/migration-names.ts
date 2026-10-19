@@ -1,5 +1,5 @@
-// Applied migrations are identified by full filename. Freeze historical collisions
-// exactly; renaming them would replay DDL on deployed databases. New collisions fail.
+// Applied migrations are keyed by filename. Historical collisions are frozen:
+// renaming them could cause deployed databases to replay their DDL.
 export const LEGACY_MIGRATION_GROUPS: Record<string, readonly string[]> = {
   "0015": [
     "0015_idempotency_keys.sql",
@@ -22,5 +22,13 @@ export const LEGACY_MIGRATION_GROUPS: Record<string, readonly string[]> = {
   "0022": [
     "0022_oracle_resolution_lag.sql",
     "0022_oracle_submissions_request_id.sql"
+  ],
+  "0028": [
+    "0028_adapter_raw_payloads.sql",
+    "0028_markets_sort_indexes.sql"
+  ],
+  "0029": [
+    "0029_dead_letter_retry_cap.sql",
+    "0029_markets_sort_indexes.sql"
   ]
 };

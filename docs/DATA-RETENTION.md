@@ -64,6 +64,23 @@ usable).
 
 ## Enforcement
 
+### Indexed event archival
+
+Events are retained in two stages rather than partitioned today. The indexer
+keeps the most recent 30 days in `events`; `archive_old_events()` copies older
+rows to `events_archive` in bounded batches, preserving the transaction hash,
+event index, payload, and timestamp. Its unique `(tx_hash, event_index)` index
+makes retries safe. `enforce_data_retention()` runs this archive step before
+purging archive rows older than 400 days, so each daily invocation advances
+the hot-table boundary without allowing the archive to grow forever.
+
+Partitioning is deferred: current retention needs are met by the bounded archive
+workflow, while partitions would require coordinated partition-key decisions
+for event identifiers, foreign keys, and indexer replay. Reconsider partitioning
+if measured archive volume or purge duration exceeds the database SLO. Before
+changing the 30/400-day windows, verify the RPC replay window and backup
+recovery procedures together.
+
 ### Operational — automatic
 
 A single SQL entry point applies every operational policy in bounded batches:

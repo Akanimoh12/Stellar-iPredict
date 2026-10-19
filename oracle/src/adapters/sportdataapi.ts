@@ -101,6 +101,24 @@ export class SportDataApiAdapter implements DataAdapter {
       throw new Error(`SportDataApiAdapter: match ${homeTeam} vs ${awayTeam} is not finished (status: ${status})`);
     }
 
+    // Issue #915: Sports market resolution mapping from match results to Yes/No outcomes
+    // Maps match results (win/loss/draw) to market outcomes based on selectedTeam parameter:
+    // 
+    // Market types supported:
+    // 1. Team win prediction: "Will [Team A] win?" 
+    //    - Yes if Team A score > opponent score
+    //    - No otherwise
+    // 
+    // 2. Draw/tie prediction: "Will match end in draw?"
+    //    - Yes if home_score == away_score
+    //    - No otherwise
+    // 
+    // Resolution logic:
+    // - Extract final scores from match.stats (home_score, away_score)
+    // - Determine winner: home team if home_score > away_score, away team if away_score > home_score, draw if equal
+    // - Compare winner with selectedTeam parameter (normalized to lowercase)
+    // - Return outcome=true if selectedTeam matches winner, false otherwise
+    // - Confidence always 1.0 for finished matches (deterministic score-based resolution)
     const homeScore = match.stats?.home_score ?? 0;
     const awayScore = match.stats?.away_score ?? 0;
 

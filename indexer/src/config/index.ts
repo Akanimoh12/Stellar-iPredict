@@ -11,6 +11,7 @@ import { z } from "zod";
  * being replayed. Values above this are rejected at startup.
  */
 export const MAX_EVENTS_PER_PAGE = 1000;
+export const DEFAULT_BACKFILL_WINDOW_LEDGERS = 10_000;
 
 const configSchema = z.object({
   DATABASE_URL: z.string().url("DATABASE_URL must be a valid URL"),
@@ -36,6 +37,11 @@ const configSchema = z.object({
     .number()
     .int("START_LEDGER must be an integer")
     .nonnegative("START_LEDGER must be non-negative"),
+  BACKFILL_WINDOW_LEDGERS: z.coerce
+    .number()
+    .int("BACKFILL_WINDOW_LEDGERS must be an integer")
+    .positive("BACKFILL_WINDOW_LEDGERS must be positive")
+    .default(DEFAULT_BACKFILL_WINDOW_LEDGERS),
 });
 
 let parsed;

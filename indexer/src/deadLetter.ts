@@ -52,6 +52,7 @@ export interface ReprocessBatchSummary {
  * this constant keeps the indexer's own sweep in sync with it.
  */
 export const DEAD_LETTER_RETENTION_DAYS = 90;
+export const DEAD_LETTER_MAX_ATTEMPTS = 10;
 
 /**
  * Queue depth above which monitoring should alert (issue #496).
@@ -75,15 +76,16 @@ export async function persistDeadLetterEvent(db: Queryable, input: DeadLetterInp
 export async function listUnresolvedDeadLetterEvents(
   db: Queryable,
   limit = 500,
+  maxAttempts = DEAD_LETTER_MAX_ATTEMPTS,
 ): Promise<DeadLetterRow[]> {
   const result = await db.query<DeadLetterRow>(
     `SELECT id, ledger_seq, tx_hash, raw_event, error_message,
             attempt_count, last_error, resolved_at, created_at
      FROM dead_letter_events
-     WHERE resolved_at IS NULL
+    WHERE resolved_at IS NULL AND attempt_count < $2
      ORDER BY created_at ASC
      LIMIT $1`,
-    [limit],
+      [limit, maxAttempts],
   );
   return result.rows;
 }
@@ -91,9 +93,14 @@ export async function listUnresolvedDeadLetterEvents(
 /**
  * Count unresolved dead-letter events. Used to drive the queue-depth gauge.
  */
-export async function countUnresolvedDeadLetterEvents(db: Queryable): Promise<number> {
+export async function countUnresolvedDeadLetterEvents(
+  db: Queryable,
+  maxAttempts = DEAD_LETTER_MAX_ATTEMPTS,
+): Promise<number> {
   const result = await db.query<{ count: string }>(
-    `SELECT COUNT(*) AS count FROM dead_letter_events WHERE resolved_at IS NULL`,
+    `SELECT COUNT(*) AS count FROM dead_letter_events
+      WHERE resolved_at IS NULL AND attempt_count < $1`,
+    [maxAttempts],
   );
   return parseInt(result.rows[0]?.count ?? "0", 10);
 }
@@ -222,10 +229,11 @@ export async function reprocessDeadLetterEvent(
 export async function reprocessDeadLetterBatch(
   db: DbClient,
   redis: RedisClient,
-  opts: { batchSize?: number } = {},
+  opts: { batchSize?: number; maxAttempts?: number } = {},
 ): Promise<ReprocessBatchSummary> {
   const batchSize = opts.batchSize ?? 500;
-  const rows = await listUnresolvedDeadLetterEvents(db as unknown as Queryable, batchSize);
+  const maxAttempts = opts.maxAttempts ?? DEAD_LETTER_MAX_ATTEMPTS;
+  const rows = await listUnresolvedDeadLetterEvents(db as unknown as Queryable, batchSize, maxAttempts);
 
   let resolved = 0;
   let failed = 0;

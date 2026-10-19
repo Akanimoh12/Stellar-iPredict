@@ -15,6 +15,7 @@
     "dev:monitor": "tsx watch src/monitor/run.ts",
     "submit": "tsx src/aggregator/submit-cli.ts",
     "audit:export": "tsx src/aggregator/audit-cli.ts",
+    "audit:replay": "tsx src/aggregator/audit-cli.ts --replay",
     "sweep:unmappable": "tsx src/adapters/unmappableSweep.ts",
     "test": "vitest run",
     "test:watch": "vitest",

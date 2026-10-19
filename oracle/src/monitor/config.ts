@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { optionalEnv } from "../config/env.js";
+import { normalizeEnvironment, optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
@@ -43,5 +43,5 @@ const schema = z.object({
 export type MonitorConfig = z.infer<typeof schema>;
 
 export function loadMonitorConfig(env: NodeJS.ProcessEnv = process.env): MonitorConfig {
-  return schema.parse(env);
+  return schema.parse(normalizeEnvironment(env));
 }

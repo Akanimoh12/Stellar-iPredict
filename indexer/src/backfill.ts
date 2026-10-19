@@ -315,15 +315,22 @@ export async function runBackfill(signal?: AbortSignal): Promise<number> {
 
   while (currentLedger <= headLedger) {
     if (signal?.aborted) throw signal.reason ?? new Error("backfill aborted");
+    const backfillWindowLedgers = config.BACKFILL_WINDOW_LEDGERS ?? 10_000;
+    const windowEndLedger = Math.min(
+      currentLedger + backfillWindowLedgers - 1,
+      headLedger,
+    );
     const request: rpc.Api.GetEventsRequest = cursor
       ? {
           filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
           cursor,
+          endLedger: windowEndLedger,
           limit: config.EVENTS_PER_PAGE,
         }
       : {
           filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
           startLedger: currentLedger,
+          endLedger: windowEndLedger,
           limit: config.EVENTS_PER_PAGE,
         };
 
@@ -361,7 +368,8 @@ export async function runBackfill(signal?: AbortSignal): Promise<number> {
         currentLedger = response.latestLedger;
         break;
       }
-      currentLedger = response.latestLedger + 1;
+      const nextLedger = Math.min(response.latestLedger, windowEndLedger) + 1;
+      currentLedger = Math.max(currentLedger + 1, nextLedger);
       cursor = undefined; // reset cursor as we are advancing startLedger
       continue;
     }
@@ -390,8 +398,17 @@ export async function runBackfill(signal?: AbortSignal): Promise<number> {
     );
 
     const lastEventLedger = events[events.length - 1].ledger;
-    currentLedger = lastEventLedger;
-    cursor = response.cursor;
+    if (response.cursor && response.cursor !== cursor) {
+      cursor = response.cursor;
+    } else {
+      // A provider may omit a cursor on the final page. Advance past the
+      // bounded window so a repeated final page cannot loop forever.
+      currentLedger = Math.max(
+        lastEventLedger + 1,
+        Math.min(response.latestLedger, windowEndLedger) + 1,
+      );
+      cursor = undefined;
+    }
 
     await checkRetentionBoundary(server, currentLedger, DEFAULT_RETENTION_ALERT_THRESHOLD);
 

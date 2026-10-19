@@ -4,8 +4,13 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { DataAdapter, Market } from "../src/adapters/index.js";
-import { FileProvenanceStore, InMemoryProvenanceStore } from "../src/adapters/provenance.js";
-import { resolveMarket } from "../src/adapters/resolve.js";
+import {
+  FileProvenanceStore,
+  InMemoryProvenanceStore,
+  computePayloadHash,
+  createProvenanceRecord,
+} from "../src/adapters/provenance.js";
+import { resolveMarket, type ResolutionResult } from "../src/adapters/resolve.js";
 
 const market: Market = { id: "42", category: "crypto", params: {} };
 
@@ -51,5 +56,45 @@ describe("resolution provenance", () => {
       sourceUrl: "https://example.test/result?api_key=[REDACTED]",
     });
     expect(await readFile(path.join(directory, "42.json"), "utf8")).not.toContain("secret");
+  });
+
+  describe("Provenance Payload Hashes (Issue #913)", () => {
+    it("computes deterministic sha256 hash for raw payloads", () => {
+      const payload = { price: 42000, provider: "coingecko" };
+      const hash1 = computePayloadHash(payload);
+      const hash2 = computePayloadHash(payload);
+      expect(hash1).toBe(hash2);
+      expect(hash1).toHaveLength(64);
+    });
+
+    it("handles string, buffer, and object payloads", () => {
+      expect(computePayloadHash("hello")).toBe(computePayloadHash(Buffer.from("hello")));
+      expect(computePayloadHash(null)).toBe("");
+      expect(computePayloadHash(undefined)).toBe("");
+    });
+
+    it("attaches payloadHash to sources and aggregates into payloadHashes dictionary", () => {
+      const rawPayload = { symbol: "BTC", price: 50000 };
+      const mockResult: ResolutionResult = {
+        status: "resolved",
+        outcome: true,
+        confidence: 0.95,
+        sources: [
+          {
+            adapterId: "crypto-binance",
+            provider: "binance",
+            outcome: true,
+            confidence: 0.95,
+            raw: rawPayload,
+          },
+        ],
+      };
+
+      const record = createProvenanceRecord("market-123", mockResult);
+      expect(record.payloadHashes).toBeDefined();
+      const expectedHash = computePayloadHash(rawPayload);
+      expect(record.payloadHashes?.["binance"]).toBe(expectedHash);
+      expect(record.sources[0].payloadHash).toBe(expectedHash);
+    });
   });
 });

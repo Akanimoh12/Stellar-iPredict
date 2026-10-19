@@ -1,10 +1,39 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig, RawPayloadSink } from "./resolve.js";
-export { FileProvenanceStore, InMemoryProvenanceStore } from "./provenance.js";
+export { FileProvenanceStore, InMemoryProvenanceStore, computePayloadHash } from "./provenance.js";
 export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
-export { NormalizationError } from "./normalize.js";
+export {
+  NormalizationError,
+  normalizeOutcome,
+  validateProviderSchema,
+  CryptoRawPayloadSchema,
+  SportsRawPayloadSchema,
+  PoliticsRawPayloadSchema,
+  ScienceRawPayloadSchema,
+} from "./normalize.js";
 export type { NormalizedOutcome, RawPayloadByCategory } from "./normalize.js";
-export { normalizeOutcome } from "./normalize.js";
+export {
+  compareDecimal,
+  exceedsThreshold,
+  belowThreshold,
+  validatePriceString,
+  validateThreshold,
+  InvalidPriceError,
+} from "./decimalCompare.js";
+export {
+  recordAdapterHealthEntry,
+  getAdapterHealthHistory,
+  getAdapterHealthTrend,
+  clearAdapterHealthHistory,
+  checkAdapterHealth,
+  checkAdaptersHealth,
+} from "./health.js";
+export type {
+  HealthScoreEntry,
+  AdapterHealthTrend,
+  AdapterHealthReport,
+  AdapterHealthCheckOptions,
+} from "./health.js";
 export {
   ADAPTER_API_KEY_ENV,
   loadAdapterApiKeys,
@@ -227,8 +256,6 @@ export class AdapterRegistry {
   }
 }
 
-export { checkAdapterHealth, checkAdaptersHealth } from "./health.js";
-export type { AdapterHealthCheckOptions, AdapterHealthReport } from "./health.js";
 export { InMemoryReviewQueue } from "./reviewQueue.js";
 export type { ManualReviewItem, ManualReviewQueue, ReviewReason } from "./reviewQueue.js";
 export { FixtureReplayAdapter, RecordingAdapter } from "./fixtures.js";

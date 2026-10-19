@@ -635,7 +635,13 @@ The monitor tracks the council voting window and raises alerts at two stages:
    - Only fires if the market has no council votes yet
    - Purpose: Give operators time to contact inactive council members
 
-2. **Deadline Exceeded** (`oracle.monitor.council_window_exceeded`):
+2. **No Votes — Page** (`oracle.monitor.council_no_votes_page`, SEV1):
+   - Triggered when an escalated market still has **zero** council votes and less than `COUNCIL_NO_VOTE_PAGE_HOURS` (default: 6) remain before its `council_deadline`
+   - Pages once per dispute; it re-arms if the market leaves escalation, receives a vote, or its window closes
+   - Payload includes `hoursRemaining` and `windowElapsedPercent`
+   - Purpose: Wake on-call before the window expires with the dispute unresolved and user funds locked
+
+3. **Deadline Exceeded** (`oracle.monitor.council_window_exceeded`):
    - Triggered when an escalated market has passed its `council_deadline` without reaching quorum
    - Indicates a governance decision is needed (see troubleshooting section)
    - Purpose: Force action to prevent indefinite limbo
@@ -652,6 +658,7 @@ The deadline is populated when a dispute escalates (via the `OracleEscalatedEven
 | **Aggregator uptime** | < 99% | Investigate crashes |
 | **Submission rate** | < 4 per expired market | Contact inactive members |
 | **Council deadline approaching** | < 12 hours remaining | Alert council members |
+| **Council no votes (page)** | 0 votes, < 6 hours remaining | Page on-call (SEV1) |
 | **Council deadline exceeded** | Deadline passed | Initiate fallback procedure |
 
 ### Prometheus Metrics

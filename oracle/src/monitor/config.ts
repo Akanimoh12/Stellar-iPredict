@@ -27,6 +27,13 @@ const schema = z.object({
   /** Hours before council deadline to alert that deadline is approaching. */
   COUNCIL_DEADLINE_WARNING_HOURS: positiveNumber.default(12),
 
+  /**
+   * Hours before the council deadline at which an escalated dispute with zero
+   * council votes pages on-call (SEV1). Should be smaller than
+   * COUNCIL_DEADLINE_WARNING_HOURS so the page follows the warning.
+   */
+  COUNCIL_NO_VOTE_PAGE_HOURS: positiveNumber.default(6),
+
   /** Minimum submitter bond, in XLM. Submissions below it are flagged. */
   SUBMITTER_BOND_XLM: positiveNumber.default(100),
 

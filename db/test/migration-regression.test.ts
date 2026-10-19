@@ -1,10 +1,11 @@
 import fs from "node:fs";
-import { LEGACY_MIGRATION_GROUPS } from "./migration-names.js";
+import { LEGACY_MIGRATION_GROUPS } from "../migration-names.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_TEST_DATABASE_URL } from "./schema-drift.js";
+import { DEFAULT_TEST_DATABASE_URL, normalizeSchemaDump } from "./schema-drift.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "..", "migrations");
@@ -38,6 +39,18 @@ function claimsIdempotency(file: string): boolean {
     .split("\n")
     .filter((line) => line.trim().startsWith("--"))
     .some((line) => /\bidempotent\b/i.test(line) && !/\bnot\s+idempotent\b/i.test(line));
+}
+
+function dumpSchema(url: string, schema: string): string {
+  const result = spawnSync(
+    "pg_dump",
+    ["-d", url, "--schema-only", `--schema=${schema}`, "--no-owner", "--no-acl"],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`pg_dump failed: ${result.stderr || result.error?.message || "unknown error"}`);
+  }
+  return normalizeSchemaDump(result.stdout);
 }
 
 describe("migration numbering (static)", () => {
@@ -135,12 +148,27 @@ describe("migrations executed against real Postgres", () => {
   it("applies every migration in order without SQL errors", async (ctx) => {
     if (!client) return ctx.skip();
     const failures: string[] = [];
+    const url = dbUrl();
     for (const file of upMigrations()) {
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
       try {
+        const downFile = `${file.replace(/\.sql$/, "")}.down.sql`;
+        const downPath = path.join(MIGRATIONS_DIR, downFile);
+        const before = fs.existsSync(downPath) ? dumpSchema(url, SCRATCH_SCHEMA) : null;
         await client.query("BEGIN");
         await client.query(sql);
         await client.query("COMMIT");
+
+        if (before !== null) {
+          await client.query("BEGIN");
+          await client.query(fs.readFileSync(downPath, "utf8"));
+          await client.query("COMMIT");
+          expect(dumpSchema(url, SCRATCH_SCHEMA), `${downFile} must restore the schema from before ${file}`).toBe(before);
+
+          await client.query("BEGIN");
+          await client.query(sql);
+          await client.query("COMMIT");
+        }
       } catch (err) {
         await client.query("ROLLBACK");
         failures.push(`${file}: ${(err as Error).message}`);
@@ -167,5 +195,44 @@ describe("migrations executed against real Postgres", () => {
       }
     }
     expect(failures, `Claimed-idempotent migrations failed on re-run:\n${failures.join("\n")}`).toEqual([]);
+  });
+
+  it("uses the bettor, market, and claimed indexes for realistic selective lookups", async (ctx) => {
+    if (!client) return ctx.skip();
+
+    await client.query(`
+      INSERT INTO markets (id, question, category, end_time, creator)
+      SELECT 900000 + market_no, 'index-plan fixture', 'other', 2000000000,
+             rpad('G' || market_no::text, 56, 'A')
+      FROM generate_series(1, 100) AS market_no
+    `);
+    await client.query(`
+      INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at)
+      SELECT 900000 + market_no,
+             rpad('G' || lpad(bettor_no::text, 55, 'A'), 56, 'A'),
+             1, 1, TRUE, bettor_no % 100 = 0,
+             NOW() - (market_no * 500 + bettor_no) * INTERVAL '1 second'
+      FROM generate_series(1, 100) AS market_no
+      CROSS JOIN generate_series(1, 500) AS bettor_no
+    `);
+    await client.query("ANALYZE bets");
+
+    const plans = await Promise.all([
+      client.query<{ "QUERY PLAN": string }>(
+        "EXPLAIN SELECT created_at FROM bets WHERE bettor = $1 ORDER BY created_at DESC",
+        ["G" + "A".repeat(54) + "1"],
+      ),
+      client.query<{ "QUERY PLAN": string }>(
+        "EXPLAIN SELECT created_at FROM bets WHERE market_id = $1 ORDER BY created_at DESC",
+        [900001],
+      ),
+      client.query<{ "QUERY PLAN": string }>(
+        "EXPLAIN SELECT created_at FROM bets WHERE claimed = TRUE ORDER BY created_at DESC",
+      ),
+    ]);
+
+    expect(plans[0].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_bettor_created_at");
+    expect(plans[1].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_market_created_at");
+    expect(plans[2].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_claimed_created_at");
   });
 });

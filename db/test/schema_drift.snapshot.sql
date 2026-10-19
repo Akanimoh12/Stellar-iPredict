@@ -1002,10 +1002,24 @@ CREATE INDEX idx_adapter_raw_payloads_provider ON schema_drift_check.adapter_raw
 
 
 --
--- Name: idx_bets_bettor; Type: INDEX; Schema: schema_drift_check; Owner: -
+-- Name: idx_bets_bettor_created_at; Type: INDEX; Schema: schema_drift_check; Owner: -
 --
 
-CREATE INDEX idx_bets_bettor ON schema_drift_check.bets USING btree (bettor);
+CREATE INDEX idx_bets_bettor_created_at ON schema_drift_check.bets USING btree (bettor, created_at DESC);
+
+
+--
+-- Name: idx_bets_claimed_created_at; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_bets_claimed_created_at ON schema_drift_check.bets USING btree (claimed, created_at DESC);
+
+
+--
+-- Name: idx_bets_market_created_at; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_bets_market_created_at ON schema_drift_check.bets USING btree (market_id, created_at DESC);
 
 
 --

@@ -197,6 +197,46 @@ describe("migrations executed against real Postgres", () => {
     expect(failures, `Claimed-idempotent migrations failed on re-run:\n${failures.join("\n")}`).toEqual([]);
   });
 
+  it("rejects invalid bet amounts and oracle submission values", async (ctx) => {
+    if (!client) return ctx.skip();
+
+    await client.query(`
+      INSERT INTO markets (id, question, category, end_time, creator)
+      VALUES (899999, 'constraint fixture', 'other', 2000000000, rpad('G', 56, 'A'))
+    `);
+
+    const invalidBets = [
+      [899999, "G" + "A".repeat(54) + "1", -1, 1],
+      [899999, "G" + "A".repeat(54) + "2", 2, 1],
+      [899999, "G" + "A".repeat(54) + "3", 1, -1],
+    ] as const;
+    for (const [marketId, bettor, netAmount, grossAmount] of invalidBets) {
+      await expect(
+        client.query(
+          `INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)
+           VALUES ($1, $2, $3, $4, TRUE)`,
+          [marketId, bettor, netAmount, grossAmount],
+        ),
+      ).rejects.toThrow();
+    }
+
+    const validAddress = "G" + "A".repeat(55);
+    await expect(
+      client.query(
+        `INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount)
+         VALUES (899999, $1, 'YES', -1)`,
+        [validAddress],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO oracle_submissions (market_id, submitter, outcome, bond_amount, submitted_at)
+         VALUES (899999, $1, 'YES', 0, NULL)`,
+        [validAddress],
+      ),
+    ).rejects.toThrow();
+  });
+
   it("uses the bettor, market, and claimed indexes for realistic selective lookups", async (ctx) => {
     if (!client) return ctx.skip();
 

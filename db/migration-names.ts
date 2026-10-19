@@ -32,3 +32,10 @@ export const LEGACY_MIGRATION_GROUPS: Record<string, readonly string[]> = {
     "0029_markets_sort_indexes.sql"
   ]
 };
+
+// This historical migration duplicates the indexes created by 0028. Existing
+// deployments keep checksum verification and rollback support for the file;
+// fresh installs skip its redundant DDL.
+export const REDUNDANT_MIGRATIONS: Readonly<Record<string, string>> = {
+  "0029_markets_sort_indexes.sql": "0028_markets_sort_indexes.sql"
+};

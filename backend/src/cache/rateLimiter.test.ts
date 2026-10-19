@@ -573,4 +573,99 @@ describe("RedisSlidingWindowStore", () => {
     expect(blocked.allowed).toBe(false);
     expect(blocked.remaining).toBe(0);
   });
+
+  // ---------------------------------------------------------------------------
+  // Issue #546: Concurrency tests for atomic limit enforcement
+  // ---------------------------------------------------------------------------
+
+  it("enforces limit exactly under concurrent load (issue #546)", async () => {
+    // Test that the atomic Lua script prevents more than `limit` requests from
+    // being admitted when N > limit concurrent requests arrive simultaneously.
+    // A non-atomic GET/SET implementation would allow > limit through.
+    const limit = 10;
+    const concurrency = 50;
+
+    const results = await Promise.all(
+      Array.from({ length: concurrency }, () =>
+        store.increment("concurrent-key", limit, 60)
+      )
+    );
+
+    const allowed = results.filter((r) => r.allowed).length;
+    const blocked = results.filter((r) => !r.allowed).length;
+
+    // CRITICAL: exactly `limit` allowed, not approximate
+    expect(allowed).toBe(limit);
+    expect(blocked).toBe(concurrency - limit);
+  });
+
+  it("handles window-boundary burst correctly (issue #546)", async () => {
+    // Test that the sliding window resets correctly at the window boundary and
+    // does not allow carryover from the previous window. Fill the first window,
+    // advance time, fill the new window, verify the (limit+1)th request is blocked.
+    vi.useFakeTimers();
+
+    const limit = 10;
+    const windowSec = 10;
+    const now = Date.now();
+
+    // Fill the first window completely
+    const firstWindow = await Promise.all(
+      Array.from({ length: limit }, () =>
+        store.increment("boundary-key", limit, windowSec)
+      )
+    );
+    expect(firstWindow.every((r) => r.allowed)).toBe(true);
+
+    // One more in the first window — blocked
+    const blocked1 = await store.increment("boundary-key", limit, windowSec);
+    expect(blocked1.allowed).toBe(false);
+
+    // Advance time past the window expiry
+    vi.advanceTimersByTime(windowSec * 1_000 + 1);
+
+    // Fill the new window completely — all should be allowed
+    const secondWindow = await Promise.all(
+      Array.from({ length: limit }, () =>
+        store.increment("boundary-key", limit, windowSec)
+      )
+    );
+    expect(secondWindow.every((r) => r.allowed)).toBe(true);
+
+    // One more in the new window — blocked
+    const blocked2 = await store.increment("boundary-key", limit, windowSec);
+    expect(blocked2.allowed).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it("enforces global limit across multiple instances (issue #546)", async () => {
+    // Test that two RedisSlidingWindowStore instances sharing the same Redis
+    // client enforce a single global limit, not per-instance limits. The atomic
+    // Lua script coordinates via Redis state — a non-atomic in-memory counter
+    // would allow 2 × limit total requests.
+    const limit = 10;
+    const concurrency = 50;
+
+    // Create two store instances sharing the same mock Redis
+    const store1 = new RedisSlidingWindowStore(mockRedis as any);
+    const store2 = new RedisSlidingWindowStore(mockRedis as any);
+
+    // Fire concurrent requests from both instances against the same key
+    const results = await Promise.all([
+      ...Array.from({ length: concurrency / 2 }, () =>
+        store1.increment("shared-key", limit, 60)
+      ),
+      ...Array.from({ length: concurrency / 2 }, () =>
+        store2.increment("shared-key", limit, 60)
+      ),
+    ]);
+
+    const allowed = results.filter((r) => r.allowed).length;
+    const blocked = results.filter((r) => !r.allowed).length;
+
+    // The global limit is enforced across both instances
+    expect(allowed).toBe(limit);
+    expect(blocked).toBe(concurrency - limit);
+  });
 });

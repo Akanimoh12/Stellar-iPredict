@@ -34,6 +34,21 @@ export interface RedisSlidingWindowStoreOptions {
 /**
  * Atomic sliding-window check-and-increment.
  *
+ * ## Atomicity Requirement (Issue #546)
+ *
+ * This Lua script runs atomically on the Redis server. All operations —
+ * pruning expired entries, counting the window, checking the limit, and
+ * conditionally adding the new request — execute as a single indivisible unit.
+ * This is **required** to enforce the rate limit exactly under concurrent load.
+ *
+ * Without atomicity (e.g., separate `GET`, `ZCARD`, `ZADD` calls), two
+ * concurrent requests could both read `count = 9` when the limit is 10, both
+ * believe they are the 10th request, and both increment — allowing 11 total.
+ *
+ * The concurrency tests in `rateLimiter.test.ts` fire 50 simultaneous requests
+ * against a limit of 10 and assert exactly 10 are admitted. A non-atomic
+ * implementation fails this test; this Lua-based implementation passes.
+ *
  * KEYS[1] — Redis key for the sorted set
  * ARGV[1] — current timestamp (ms)
  * ARGV[2] — window size (ms)

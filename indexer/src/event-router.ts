@@ -34,6 +34,10 @@ import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
  * must never crash the poll loop. Handler/database errors after a successful
  * validation ARE rethrown, preserving the at-least-once semantics that
  * `Indexer.indexOnce` and `reprocessDeadLetterEvent` rely on.
+ * 
+ * Issue #927: Routes match topics the contracts actually emit. Legacy matchers
+ * (e.g., "bet_placed" with three historical shapes) are preserved for backwards
+ * compatibility. A contract-to-indexer topic test should verify alignment.
  */
 
 interface EventRoute {

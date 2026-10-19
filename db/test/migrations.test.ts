@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LEGACY_MIGRATION_GROUPS } from './migration-names.js';
+import { LEGACY_MIGRATION_GROUPS } from '../migration-names.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';

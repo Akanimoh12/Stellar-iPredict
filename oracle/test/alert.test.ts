@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { 
+  createAlertRouter,
+  createWebhookAlertChannel,
   alertBondDiscrepancy,
   alertBondReconciliationFailure,
   alertStuckMarket,
@@ -152,5 +154,52 @@ describe("alertCircuitBreakerOpen", () => {
         failureRate: 0.75,
       }),
     );
+  });
+});
+
+describe("alert delivery retries and per-channel deduplication", () => {
+  it("retries failed webhook requests and suppresses the successful delivery during cooldown", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValue({ ok: true, status: 204 });
+    const sender = createAlertRouter({
+      channels: [
+        createWebhookAlertChannel({
+          webhookUrl: "https://alerts.example.test",
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        }),
+      ],
+      cooldownMs: 60_000,
+      maxRetries: 1,
+      retryDelayMs: 0,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    });
+    const alert = { marketId: "market-1", attempts: 2, error: new Error("temporary failure") };
+
+    await sender(alert);
+    await sender(alert);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries only failed channels and retains successful channels in the cooldown", async () => {
+    const successfulChannel = { name: "primary", minSeverity: "SEV3" as const, send: vi.fn() };
+    const recoveringChannel = {
+      name: "secondary",
+      minSeverity: "SEV3" as const,
+      send: vi.fn().mockRejectedValueOnce(new Error("unavailable")).mockResolvedValue(undefined),
+    };
+    const sender = createAlertRouter({
+      channels: [successfulChannel, recoveringChannel],
+      cooldownMs: 60_000,
+      maxRetries: 0,
+    });
+    const alert = { marketId: "market-2", attempts: 2, error: new Error("temporary failure") };
+
+    await sender(alert);
+    await sender(alert);
+
+    expect(successfulChannel.send).toHaveBeenCalledOnce();
+    expect(recoveringChannel.send).toHaveBeenCalledTimes(2);
   });
 });

@@ -27,7 +27,7 @@ export interface AlertChannel {
    * "SEV2" will receive SEV1 and SEV2 alerts but not SEV3.
    */
   minSeverity: Severity;
-  /** Deliver the alert. Must never throw — errors are caught by the router. */
+  /** Deliver the alert. Rejections are retried and logged by the router. */
   send(payload: AlertPayload): Promise<void>;
 }
 
@@ -53,6 +53,50 @@ export type AmbiguousTallyAlertSender = (alert: AmbiguousTallyAlert) => Promise<
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 250;
+
+async function deliverWebhookWithRetry(
+  webhookUrl: string,
+  payload: Record<string, unknown>,
+  logger: Logger | undefined,
+  userAgent: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= DEFAULT_MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await fetchImpl(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent": userAgent,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(`webhook returned HTTP ${response.status}`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < DEFAULT_MAX_RETRIES) {
+        logger?.warn("webhook delivery failed; retrying", {
+          attempt: attempt + 1,
+          maxRetries: DEFAULT_MAX_RETRIES,
+          error: errorMessage(error),
+        });
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, DEFAULT_RETRY_DELAY_MS * 2 ** attempt),
+        );
+      }
+    }
+  }
+
+  logger?.error("webhook delivery failed after retries", { error: errorMessage(lastError) });
+  throw lastError;
 }
 
 const SEVERITY_RANK: Record<Severity, number> = { SEV1: 1, SEV2: 2, SEV3: 3 };
@@ -158,8 +202,8 @@ interface DedupeEntry {
 /** Default cooldown: do not re-fire the same (marketId, severity) within 15 minutes. */
 const DEFAULT_COOLDOWN_MS = 15 * 60 * 1_000;
 
-function makeDedupeKey(marketId: string, severity: Severity): DedupeKey {
-  return `${severity}:${marketId}`;
+function makeDedupeKey(marketId: string, severity: Severity, channelIndex: number): DedupeKey {
+  return `${severity}:${marketId}:${channelIndex}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,20 +219,36 @@ export interface AlertRouterOptions {
    * Set to `0` to disable deduplication.
    */
   cooldownMs?: number;
+  /** Number of retries after the initial channel delivery attempt. */
+  maxRetries?: number;
+  /** Base delay for exponential channel retry backoff. */
+  retryDelayMs?: number;
+  /** Injectable delay for deterministic tests. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
  * Creates an `AlertSender` that:
  *  1. Classifies the alert severity.
- *  2. Deduplicates by (severity, marketId) with a configurable cooldown.
+ *  2. Deduplicates successful deliveries by (severity, marketId, channel).
  *  3. Routes to every channel whose `minSeverity` is met.
- *  4. Delivers each channel in parallel; a channel failure is logged and
- *     swallowed — an alerting outage must never block the aggregator.
+ *  4. Retries failed channel deliveries; an alerting outage must never block
+ *     the aggregator, and failed channels remain eligible on the next call.
  */
 export function createAlertRouter(options: AlertRouterOptions): AlertSender {
   const { channels, logger } = options;
   const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new Error("maxRetries must be a non-negative integer");
+  }
+  if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("retryDelayMs must be a non-negative finite number");
+  }
   const dedupeMap = new Map<DedupeKey, DedupeEntry>();
+  const inFlight = new Map<DedupeKey, Promise<void>>();
 
   return async (alert) => {
     const severity = classifyAlertSeverity(alert);
@@ -199,23 +259,6 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
       attempts: alert.attempts,
       error: errorMessage(alert.error),
     };
-
-    // ── Deduplication ──────────────────────────────────────────────────────
-    if (cooldownMs > 0) {
-      const key = makeDedupeKey(alert.marketId, severity);
-      const entry = dedupeMap.get(key);
-      const now = Date.now();
-      if (entry && now - entry.lastFiredAt < cooldownMs) {
-        logger?.info("alert suppressed by cooldown", {
-          marketId: alert.marketId,
-          severity,
-          cooldownMs,
-          msSinceLast: now - entry.lastFiredAt,
-        });
-        return;
-      }
-      dedupeMap.set(key, { lastFiredAt: now });
-    }
 
     // ── Channel routing ────────────────────────────────────────────────────
     const eligible = channels.filter((ch) => meetsMinSeverity(severity, ch.minSeverity));
@@ -228,18 +271,66 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
       return;
     }
 
-    // Deliver all eligible channels in parallel; failures are non-fatal.
-    await Promise.allSettled(
+    await Promise.all(
       eligible.map(async (ch) => {
-        try {
-          await ch.send(payload);
-        } catch (err) {
-          logger?.error("alert channel failed to deliver", {
+        const channelIndex = channels.indexOf(ch);
+        const key = makeDedupeKey(alert.marketId, severity, channelIndex);
+        const now = Date.now();
+        const entry = dedupeMap.get(key);
+        if (cooldownMs > 0 && entry && now - entry.lastFiredAt < cooldownMs) {
+          logger?.info("alert suppressed by cooldown", {
             channel: ch.name,
             marketId: alert.marketId,
             severity,
-            error: err instanceof Error ? err.message : String(err),
+            cooldownMs,
+            msSinceLast: now - entry.lastFiredAt,
           });
+          return;
+        }
+
+        const existingDelivery = inFlight.get(key);
+        if (existingDelivery) {
+          await existingDelivery;
+          return;
+        }
+
+        const delivery = (async () => {
+          for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+            try {
+              await ch.send(payload);
+              if (cooldownMs > 0) {
+                dedupeMap.set(key, { lastFiredAt: Date.now() });
+              }
+              return;
+            } catch (err) {
+              const error = err instanceof Error ? err.message : String(err);
+              if (attempt < maxRetries) {
+                logger?.warn("alert channel delivery failed; retrying", {
+                  channel: ch.name,
+                  marketId: alert.marketId,
+                  severity,
+                  attempt: attempt + 1,
+                  maxRetries,
+                  error,
+                });
+                await sleep(retryDelayMs * 2 ** attempt);
+                continue;
+              }
+              logger?.error("alert channel failed to deliver after retries", {
+                channel: ch.name,
+                marketId: alert.marketId,
+                severity,
+                attempts: attempt + 1,
+                error,
+              });
+            }
+          }
+        })();
+        inFlight.set(key, delivery);
+        try {
+          await delivery;
+        } finally {
+          if (inFlight.get(key) === delivery) inFlight.delete(key);
         }
       }),
     );
@@ -253,8 +344,8 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
 /**
  * Creates a webhook-backed `AlertChannel`.
  *
- * Failures to deliver the webhook are logged and swallowed — an alerting
- * outage must never block the aggregator's poll loop.
+ * Failed sends reject so the alert router can retry them; the router logs and
+ * contains final failures so an alerting outage cannot block polling.
  */
 export function createWebhookAlertChannel(options: {
   name?: string;
@@ -281,6 +372,7 @@ export function createWebhookAlertChannel(options: {
           severity: payload.severity,
           status: response.status,
         });
+        throw new Error(`alert webhook returned HTTP ${response.status}`);
       }
     },
   };
@@ -334,17 +426,13 @@ export function createAmbiguousTallyAlertSender(
       return;
     }
     try {
-      const response = await fetchImpl(webhookUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        logger?.error("ambiguous tally alert webhook returned non-2xx", {
-          marketId: alert.marketId,
-          status: response.status,
-        });
-      }
+      await deliverWebhookWithRetry(
+        webhookUrl,
+        payload,
+        logger,
+        "ipredict-oracle-ambiguous-alerts/1.0",
+        fetchImpl,
+      );
     } catch (error) {
       logger?.error("failed to deliver ambiguous tally alert webhook", {
         marketId: alert.marketId,
@@ -444,21 +532,7 @@ async function deliverBondAlertWebhook(
   payload: Record<string, unknown>,
   logger?: Logger,
 ): Promise<void> {
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "user-agent": "ipredict-oracle-bond-alerts/1.0",
-    },
-    body: JSON.stringify(payload),
-  });
-  
-  if (!response.ok) {
-    logger?.error("bond alert webhook returned non-2xx", {
-      status: response.status,
-      payload,
-    });
-  }
+  await deliverWebhookWithRetry(webhookUrl, payload, logger, "ipredict-oracle-bond-alerts/1.0");
 }
 
 // ---------------------------------------------------------------------------
@@ -541,19 +615,5 @@ async function deliverMonitoringAlertWebhook(
   payload: Record<string, unknown>,
   logger?: Logger,
 ): Promise<void> {
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "user-agent": "ipredict-oracle-monitoring-alerts/1.0",
-    },
-    body: JSON.stringify(payload),
-  });
-  
-  if (!response.ok) {
-    logger?.error("monitoring alert webhook returned non-2xx", {
-      status: response.status,
-      payload,
-    });
-  }
+  await deliverWebhookWithRetry(webhookUrl, payload, logger, "ipredict-oracle-monitoring-alerts/1.0");
 }

@@ -22,7 +22,10 @@ export interface MarketQueryMapping {
   asset?: string;
   threshold?: number;
   comparator?: MarketQueryComparator;
-  /** ISO-8601 date or date-time used as the observation date. */
+  /**
+   * Observation date. Date-only inputs mean UTC midnight; date-times require
+   * an explicit timezone and are normalized to UTC.
+   */
   date?: string;
   source?: string;
   query?: MarketQuery;
@@ -48,8 +51,37 @@ function cloneMapping(mapping: MarketQueryMapping): MarketQueryMapping {
   };
 }
 
-function isValidDate(value: string): boolean {
-  return value.length > 0 && !Number.isNaN(Date.parse(value));
+function normalizeDate(value: string): string {
+  const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(value);
+  const dateTime =
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/i.exec(value);
+  const calendarDate = dateOnly?.[1] ?? dateTime?.[1];
+  const calendarDateValue = calendarDate ? new Date(`${calendarDate}T00:00:00.000Z`) : undefined;
+
+  if (
+    !calendarDate ||
+    !calendarDateValue ||
+    !Number.isFinite(calendarDateValue.getTime()) ||
+    calendarDateValue.toISOString().slice(0, 10) !== calendarDate
+  ) {
+    throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
+  }
+
+  if (dateOnly) {
+    return `${calendarDate}T00:00:00.000Z`;
+  }
+
+  if (
+    !dateTime ||
+    Number(dateTime[2]) > 23 ||
+    Number(dateTime[3]) > 59 ||
+    Number(dateTime[4]) > 59 ||
+    !Number.isFinite(Date.parse(value))
+  ) {
+    throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
+  }
+
+  return new Date(value).toISOString();
 }
 
 /**
@@ -85,8 +117,12 @@ export function validateMarketQueryMapping(input: MarketQueryMappingInput): Mark
     throw new Error("Market query mapping comparator must be gte, lte, or eq");
   }
 
-  if (input.date !== undefined && (typeof input.date !== "string" || !isValidDate(input.date))) {
-    throw new Error("Market query mapping date must be a valid ISO-8601 date or date-time");
+  let date: string | undefined;
+  if (input.date !== undefined) {
+    if (typeof input.date !== "string") {
+      throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
+    }
+    date = normalizeDate(input.date);
   }
 
   if (input.source !== undefined && (typeof input.source !== "string" || input.source.trim().length === 0)) {
@@ -119,6 +155,7 @@ export function validateMarketQueryMapping(input: MarketQueryMappingInput): Mark
     ...input,
     marketId: input.marketId.trim(),
     asset: input.asset?.trim(),
+    date,
     source: input.source?.trim(),
   });
 }

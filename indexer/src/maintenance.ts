@@ -4,7 +4,7 @@ import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import type { TotalsRecomputeOptions } from "./recomputeTotals.js";
 import { createLogger, parseLogLevel } from "./log.js";
 
-export type MaintenanceCommand = "bet-counts" | "totals" | "backfill";
+export type MaintenanceCommand = "bet-counts" | "totals" | "backfill" | "reindex";
 
 export interface MaintenanceArgs {
   command: MaintenanceCommand;
@@ -19,6 +19,7 @@ Commands:
   backfill      Replay retained Soroban contract events from START_LEDGER
   bet-counts    Recompute markets.bet_count using the bets table
   totals        Recompute markets.total_yes/total_no using the bets table
+  reindex       Full resumable reindex (events backfill + reconciliation)
 
 Options:
   --dry-run          Roll back reconciliation writes (bet-counts/totals only)
@@ -30,11 +31,12 @@ Examples:
   npm run maintenance -- bet-counts --dry-run
   npm run maintenance -- totals --verify-onchain --fail-on-drift
   npm run maintenance -- backfill
+  npm run maintenance -- reindex
 `;
 
 export function parseMaintenanceArgs(args: string[]): MaintenanceArgs {
   const [command, ...flags] = args;
-  if (command !== "backfill" && command !== "bet-counts" && command !== "totals") {
+  if (command !== "backfill" && command !== "bet-counts" && command !== "totals" && command !== "reindex") {
     throw new Error(`Unknown maintenance command: ${command ?? "(missing)"}`);
   }
   for (const flag of flags) {
@@ -45,8 +47,8 @@ export function parseMaintenanceArgs(args: string[]): MaintenanceArgs {
   const dryRun = flags.includes("--dry-run");
   const verifyOnChain = flags.includes("--verify-onchain");
   const failOnDrift = flags.includes("--fail-on-drift");
-  if (command === "backfill" && (dryRun || verifyOnChain || failOnDrift)) {
-    throw new Error("Backfill does not support reconciliation flags");
+  if ((command === "backfill" || command === "reindex") && (dryRun || verifyOnChain || failOnDrift)) {
+    throw new Error(`${command === "reindex" ? "Reindex" : "Backfill"} does not support reconciliation flags`);
   }
   if (command !== "totals" && (verifyOnChain || failOnDrift)) {
     throw new Error("On-chain verification is only supported for totals");
@@ -70,7 +72,9 @@ export async function executeReconciliation(
   args: MaintenanceArgs,
   options: TotalsRecomputeOptions = {},
 ): Promise<MaintenanceResult> {
-  if (args.command === "backfill") throw new Error("Backfill uses the RPC replay runner");
+  if (args.command === "backfill" || args.command === "reindex") {
+    throw new Error(`${args.command === "reindex" ? "Reindex" : "Backfill"} uses the RPC replay runner`);
+  }
   await db.query("BEGIN");
   try {
     const result = args.command === "bet-counts"
@@ -110,6 +114,19 @@ export async function runMaintenanceCli(argv: string[] = process.argv.slice(2)):
       logger.info("backfill started");
       const latestLedger = await runBackfill();
       logger.info("backfill completed", { latestLedger, durationMs: Date.now() - startedAt });
+    } finally {
+      await pool.end();
+    }
+    return;
+  }
+
+  if (args.command === "reindex") {
+    const { runFullReindex } = await import("./backfill.js");
+    const { pool } = await import("./db.js");
+    try {
+      logger.info("reindex started");
+      const summary = await runFullReindex({ logger });
+      logger.info("reindex completed", { ...summary, durationMs: Date.now() - startedAt });
     } finally {
       await pool.end();
     }

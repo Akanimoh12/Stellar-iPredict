@@ -197,6 +197,7 @@ export class EventCounter {
 export const metrics = {
   eventsProcessed: new Counter(),
   indexerLag: new Gauge(),
+  indexerLagSeconds: new Gauge(),
   indexerChainTip: new Gauge(),
   indexerCursor: new Gauge(),
   indexerCursorLastAdvanced: new Gauge(),
@@ -244,6 +245,10 @@ export function serializeMetrics(): string {
   lines.push("# HELP indexer_lag_ledgers The difference between the latest ledger and the indexer checkpoint");
   lines.push("# TYPE indexer_lag_ledgers gauge");
   lines.push(`indexer_lag_ledgers ${metrics.indexerLag.get()}`);
+
+  lines.push("# HELP indexer_lag_seconds Estimated time lag in seconds based on ledger difference");
+  lines.push("# TYPE indexer_lag_seconds gauge");
+  lines.push(`indexer_lag_seconds ${metrics.indexerLagSeconds.get()}`);
 
   lines.push("# HELP indexer_chain_tip_ledger Latest chain ledger observed by the indexer");
   lines.push("# TYPE indexer_chain_tip_ledger gauge");
@@ -314,6 +319,7 @@ export function serializeMetrics(): string {
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
   metrics.indexerLag.reset();
+  metrics.indexerLagSeconds.reset();
   metrics.indexerChainTip.reset();
   metrics.indexerCursor.reset();
   metrics.indexerCursorLastAdvanced.reset();
@@ -330,10 +336,12 @@ export function recordIndexerPosition(chainTip: number, cursor: number): number 
   const safeChainTip = Math.max(0, chainTip);
   const safeCursor = Math.max(0, cursor);
   const previousCursor = metrics.indexerCursor.get();
+  const lag = Math.max(0, safeChainTip - safeCursor);
 
   metrics.indexerChainTip.set(safeChainTip);
   metrics.indexerCursor.set(safeCursor);
-  metrics.indexerLag.set(Math.max(0, safeChainTip - safeCursor));
+  metrics.indexerLag.set(lag);
+  metrics.indexerLagSeconds.set(lag * 5);
 
   if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
     metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);

@@ -22,7 +22,9 @@
     "maintenance": "tsx src/maintenance-cli.ts",
     "recompute:totals": "tsx src/maintenance-cli.ts totals",
     "recompute:bet-counts": "tsx src/maintenance-cli.ts bet-counts",
-    "backfill:events": "tsx src/maintenance-cli.ts backfill"
+    "backfill:events": "tsx src/maintenance-cli.ts backfill",
+    "reindex": "tsx src/backfill.ts --reindex",
+    "reindex:full": "tsx src/maintenance-cli.ts reindex"
   },
   "dependencies": {
     "@ipredict/shared": "*",

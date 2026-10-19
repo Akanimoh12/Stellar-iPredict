@@ -11,6 +11,7 @@ import {
   DEFAULT_RETENTION_ALERT_THRESHOLD,
 } from "./rpc/getEvents.js";
 import { jitteredDelayMs } from "./rpc/retry.js";
+import { refreshDeadLetterQueueDepthFromDb } from "./metrics.js";
 
 /**
  * Backfill as a recovery path.
@@ -155,6 +156,9 @@ async function insertDeadLetterEvent(
         (err as Error).message,
       ]
     );
+    await refreshDeadLetterQueueDepthFromDb(pool, {
+      warn: (message, meta) => console.warn(`[backfill] ${message}`, meta),
+    });
   } catch (error) {
     console.error(`[backfill] Failed to insert dead-letter event: ${(error as Error).message}`);
   }
@@ -324,7 +328,6 @@ export async function runBackfill(signal?: AbortSignal): Promise<number> {
       ? {
           filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
           cursor,
-          endLedger: windowEndLedger,
           limit: config.EVENTS_PER_PAGE,
         }
       : {

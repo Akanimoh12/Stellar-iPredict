@@ -7,8 +7,24 @@ vi.mock("./metrics-server.js", () => ({
   })),
 }));
 
-vi.mock("./db.js", () => ({
-  pool: { end: vi.fn().mockResolvedValue(undefined) },
+vi.mock("./db.js", () => {
+  const pool = {
+    query: vi.fn().mockResolvedValue({ rows: [{ count: "0" }] }),
+    end: vi.fn().mockResolvedValue(undefined),
+  };
+  return {
+    pool,
+    processLedgerBatchWithCheckpoint: vi.fn(
+      async (_db: unknown, events: unknown[], _ledger: number, processBatch: Function) => {
+        await processBatch(events, pool);
+      },
+    ),
+  };
+});
+
+vi.mock("./event-router.js", () => ({
+  writeEventToDb: vi.fn(),
+  writeEventsToDb: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("./lock.js", () => ({
@@ -39,8 +55,8 @@ vi.mock("./backfill.js", () => {
     runBackfill: vi.fn().mockResolvedValue(125),
     writeEventToDb: vi.fn(),
     processEventsInChunks: vi.fn(async (events: any[], _chunkSize: number, processor: any) => {
-      for (const event of events) {
-        await processor(event);
+      for (const [eventIndex, event] of events.entries()) {
+        await processor(event, eventIndex);
       }
     }),
     EVENTS_PROCESSING_CHUNK_SIZE: 50,
@@ -117,6 +133,11 @@ describe("Entrypoint Routing & Polling", () => {
 
     expect(mockGetLatestLedger).toHaveBeenCalled();
     expect(mockGetEvents).toHaveBeenCalled();
+    expect(indexModule.writeEventsToDb).toHaveBeenCalledWith(
+      [expect.objectContaining({ ledger: 101, txHash: "hash123", eventIndex: 0 })],
+      expect.anything(),
+      expect.objectContaining({ del: expect.any(Function) }),
+    );
   });
 
   it("18. Polling: Handles errors gracefully in startLivePolling", async () => {

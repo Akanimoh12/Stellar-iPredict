@@ -1,6 +1,11 @@
 import type { Queryable } from "./db.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
 import { writeEventToDb } from "./event-router.js";
+import {
+  DEFAULT_DEAD_LETTER_ALERT_THRESHOLD,
+  DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
+  refreshDeadLetterQueueDepthFromDb,
+} from "./metrics.js";
 
 export interface DeadLetterInput {
   ledger: number;
@@ -52,13 +57,15 @@ export interface ReprocessBatchSummary {
  * this constant keeps the indexer's own sweep in sync with it.
  */
 export const DEAD_LETTER_RETENTION_DAYS = 90;
-export const DEAD_LETTER_MAX_ATTEMPTS = 10;
 
 /**
  * Queue depth above which monitoring should alert (issue #496).
  * Evaluated by refreshDeadLetterQueueDepth and exposed via metrics.
  */
-export const DEAD_LETTER_ALERT_THRESHOLD = 100;
+export const DEAD_LETTER_ALERT_THRESHOLD = DEFAULT_DEAD_LETTER_ALERT_THRESHOLD;
+
+/** Maximum retry attempts before an unresolved row leaves the pending queue. */
+export const DEAD_LETTER_MAX_ATTEMPTS = DEFAULT_DEAD_LETTER_MAX_ATTEMPTS;
 
 export async function persistDeadLetterEvent(db: Queryable, input: DeadLetterInput): Promise<void> {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
@@ -67,6 +74,7 @@ export async function persistDeadLetterEvent(db: Queryable, input: DeadLetterInp
      VALUES ($1, $2, $3::jsonb, $4, NOW())`,
     [input.ledger, input.txHash, JSON.stringify(input.rawEvent), message]
   );
+  await refreshDeadLetterQueueDepthFromDb(db);
 }
 
 /**
@@ -185,6 +193,7 @@ export async function reprocessDeadLetterEvent(
   db: DbClient,
   redis: RedisClient,
   row: DeadLetterRow,
+  maxAttempts = DEAD_LETTER_MAX_ATTEMPTS,
 ): Promise<ReprocessResult> {
   let event: DecodedContractEvent;
   try {
@@ -204,6 +213,12 @@ export async function reprocessDeadLetterEvent(
   try {
     await writeEventToDb(event, db, redis);
     await markResolved(db as unknown as Queryable, row.id);
+    await refreshDeadLetterQueueDepthFromDb(
+      db as unknown as Queryable,
+      undefined,
+      DEAD_LETTER_ALERT_THRESHOLD,
+      maxAttempts,
+    );
     return { id: row.id, resolved: true, attempt };
   } catch (replayErr) {
     const msg = replayErr instanceof Error ? replayErr.message : String(replayErr);
@@ -211,6 +226,12 @@ export async function reprocessDeadLetterEvent(
     await (db as unknown as Queryable).query(
       `UPDATE dead_letter_events SET last_error = $2 WHERE id = $1`,
       [row.id, msg],
+    );
+    await refreshDeadLetterQueueDepthFromDb(
+      db as unknown as Queryable,
+      undefined,
+      DEAD_LETTER_ALERT_THRESHOLD,
+      maxAttempts,
     );
     return { id: row.id, resolved: false, attempt, error: msg };
   }
@@ -239,7 +260,7 @@ export async function reprocessDeadLetterBatch(
   let failed = 0;
 
   for (const row of rows) {
-    const result = await reprocessDeadLetterEvent(db, redis, row);
+    const result = await reprocessDeadLetterEvent(db, redis, row, maxAttempts);
     if (result.resolved) {
       resolved++;
     } else {

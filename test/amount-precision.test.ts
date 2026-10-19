@@ -233,14 +233,18 @@ describe("boundary 2 — indexer to database (the value handed to Postgres)", ()
       );
 
       const [sql, params] = query.mock.calls[0] as [string, unknown[]];
+      const [input] = JSON.parse(params[0] as string) as Array<{
+        net_amount: string;
+        gross_amount: string;
+      }>;
 
-      // The statement declares the parameters NUMERIC, and they arrive as
-      // strings — never as numbers, which is where the loss would happen.
-      expect(sql).toContain("$8::NUMERIC AS net_amount");
-      expect(sql).toContain("$9::NUMERIC AS gross_amount");
+      // The batch recordset declares NUMERIC columns, while JSON carries the
+      // exact decimal text — never a JS number, where precision would be lost.
+      expect(sql).toContain("net_amount NUMERIC");
+      expect(sql).toContain("gross_amount NUMERIC");
 
-      const net = params[7];
-      const gross = params[8];
+      const net = input.net_amount;
+      const gross = input.gross_amount;
       expect(typeof net).toBe("string");
       expect(net).toBe(stroops.toString());
       expect(gross).toBe(stroops.toString());
@@ -273,8 +277,10 @@ describe("boundary 2 — indexer to database (the value handed to Postgres)", ()
       );
 
       const [, params] = query.mock.calls[0] as [string, unknown[]];
-      const payloadJson = params[4] as string;
-      const parsed = JSON.parse(payloadJson) as { amount: string; net_amount: string };
+      const [input] = JSON.parse(params[0] as string) as Array<{
+        payload: { amount: string; net_amount: string };
+      }>;
+      const parsed = input.payload;
 
       // `JSON.stringify` throws on a bigint, so the payload must be strings —
       // and re-parsing must give back the identical characters.

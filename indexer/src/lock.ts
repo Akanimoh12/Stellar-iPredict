@@ -121,7 +121,6 @@ export async function acquireIndexerLock(
         heartbeatTask = undefined;
         scheduleHeartbeat();
       });
-      heartbeatTimer.unref?.();
     }, heartbeatIntervalMs);
     heartbeatTimer.unref?.();
   };

@@ -9,7 +9,12 @@ import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
 import { MetricsServer } from "./metrics-server.js";
-import { recordIndexerCursorAdvance, recordIndexerPosition } from "./metrics.js";
+import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
+import {
+  recordIndexerCursorAdvance,
+  recordIndexerPosition,
+  refreshDeadLetterQueueDepthFromDb,
+} from "./metrics.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -159,12 +164,24 @@ export function installGracefulShutdown(indexer: Indexer): void {
  * returns, so unit tests can exercise it without an infinite timer.
  */
 export async function startLivePolling(fromLedger: number, signal?: AbortSignal): Promise<void> {
-  const [{ config }, { writeEventToDb: writeBackfillEvent, processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE }, stellar] = await Promise.all([
+  const [
+    { config },
+    { processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE },
+    stellar,
+    { pool: dbPool, processLedgerBatchWithCheckpoint },
+    { writeEventsToDb },
+  ] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
     import("@stellar/stellar-sdk"),
+    import("./db.js"),
+    import("./event-router.js"),
   ]);
   const { rpc, scValToNative } = stellar;
+  // Live indexing has historically run without a Redis dependency. Keep cache
+  // invalidation best-effort here while routing all database writes through
+  // the canonical handlers.
+  const redis: RedisClient = { del: async () => 0 };
 
   console.log(`[ipredict-indexer] Starting live polling loop from ledger ${fromLedger}...`);
   let currentLedger = fromLedger;
@@ -181,16 +198,30 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
           limit: config.EVENTS_PER_PAGE,
         });
 
-        await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event) => {
+        const decodedEvents: DecodedContractEvent[] = [];
+        await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
           const topics = event.topic.map((t: any) => scValToNative(t));
           const data = scValToNative(event.value);
-          await writeBackfillEvent(event.ledger, event.txHash, topics, data);
+          decodedEvents.push({
+            ledger: event.ledger,
+            txHash: event.txHash,
+            eventIndex: Number((event as any).eventIndex ?? eventIndex),
+            topics,
+            data,
+          });
         });
+
+        // Event effects and the page checkpoint commit together. The router
+        // preserves event order and batches only adjacent compatible bets from
+        // the same ledger, so a failed batch cannot advance the cursor.
+        await processLedgerBatchWithCheckpoint(
+          dbPool,
+          decodedEvents,
+          response.latestLedger,
+          (events, client) =>
+            writeEventsToDb(events, client as DbClient, redis),
+        );
         currentLedger = response.latestLedger;
-        try {
-          const { saveCheckpointLedger, pool: dbPool } = await import("./db.js");
-          await saveCheckpointLedger(dbPool, currentLedger);
-        } catch {}
       }
     } catch (err) {
       console.error("[live-poll] Error in polling loop:", err);
@@ -221,7 +252,7 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
  * every entry point validates payloads and dead-letters malformed events
  * identically.
  */
-export { writeEventToDb } from "./event-router.js";
+export { writeEventToDb, writeEventsToDb } from "./event-router.js";
 
 /**
  * Main entry point for the indexer service.
@@ -251,6 +282,9 @@ export async function main(): Promise<void> {
   const metricsServer = new MetricsServer();
 
   try {
+    await refreshDeadLetterQueueDepthFromDb(pool, {
+      warn: (message, meta) => console.warn(`[ipredict-indexer] ${message}`, meta),
+    });
     await metricsServer.start();
     const isBackfill = process.argv.includes("--backfill");
 

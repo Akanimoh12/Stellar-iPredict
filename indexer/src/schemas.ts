@@ -430,3 +430,33 @@ export const referralRegisteredPayloadSchema = schema((value: unknown) => {
 });
 
 export type ReferralRegisteredPayload = Infer<typeof referralRegisteredPayloadSchema>;
+
+/**
+ * Authoritative registry for event payload validation.
+ *
+ * Named schema exports remain available for compatibility, while new callers
+ * can use this registry (or parseEventPayload) so event names and validators
+ * cannot drift across dispatch paths.
+ */
+export const eventPayloadSchemas = Object.freeze({
+  market_cancelled: marketCancelledPayloadSchema,
+  market_created: marketCreatedPayloadSchema,
+  market_resolved: marketResolvedPayloadSchema,
+  bet_placed: betPlacedPayloadSchema,
+  referral_reward: referralRewardPayloadSchema,
+  referral_registered: referralRegisteredPayloadSchema,
+});
+
+export type EventPayloadSchemaName = keyof typeof eventPayloadSchemas;
+export type EventPayloadFor<Name extends EventPayloadSchemaName> =
+  Infer<(typeof eventPayloadSchemas)[Name]>;
+
+export function parseEventPayload<Name extends EventPayloadSchemaName>(
+  eventName: Name,
+  value: unknown,
+): EventPayloadFor<Name> {
+  return eventPayloadSchemas[eventName].parse(value) as EventPayloadFor<Name>;
+}
+
+export { ZodValidationError } from "./zod.js";
+export type { Schema } from "./zod.js";

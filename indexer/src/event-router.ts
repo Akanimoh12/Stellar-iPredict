@@ -2,7 +2,12 @@ import { EVENT_TOPICS } from "@ipredict/shared";
 import { handleMarketCreatedEvent, decodeMarketCreatedEvent } from "./handlers/market_created.js";
 import { handleMarketResolvedEvent, decodeMarketResolvedEvent } from "./handlers/market_resolved.js";
 import { handleMarketCancelledEvent, decodeMarketCancelledEvent } from "./handlers/market_cancelled.js";
-import { handleBetPlacedEvent, isBetPlacedTopic, decodeBetPlacedEvent } from "./handlers/bet_placed.js";
+import {
+  handleBetPlacedEvent,
+  handleBetPlacedEvents,
+  isBetPlacedTopic,
+  decodeBetPlacedEvent,
+} from "./handlers/bet_placed.js";
 import { handleReferralRewardEvent, decodeReferralRewardEvent } from "./handlers/referral_reward.js";
 import { handleReferralRegisteredEvent, decodeReferralRegisteredEvent } from "./handlers/referral_registered.js";
 import {
@@ -15,7 +20,7 @@ import {
   handleOracleFinalizedEvent,
   decodeOracleFinalizedEvent,
 } from "./handlers/oracle_finalized.js";
-import { metrics } from "./metrics.js";
+import { metrics, refreshDeadLetterQueueDepthFromDb } from "./metrics.js";
 import { createLogger, parseLogLevel } from "./log.js";
 import type { Logger } from "./log.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
@@ -149,6 +154,7 @@ async function deadLetterEvent(
       // the same representation the schemas parse back on replay.
       [event.ledger, event.txHash, JSON.stringify(event, (_, v) => (typeof v === "bigint" ? v.toString() : v)), reason],
     );
+    await refreshDeadLetterQueueDepthFromDb(db);
   } catch (error) {
     console.error("Failed to persist dead-letter event", error);
   }
@@ -205,4 +211,58 @@ export async function writeEventToDb(
 
   metrics.eventsProcessed.inc();
   metrics.eventsByType.inc(route.name);
+}
+
+/**
+ * Route an ordered event page while batching adjacent bet placements from the
+ * same ledger. Other event types remain strictly sequenced, so a market
+ * lifecycle event can never be reordered around a bet. Callers that combine
+ * this with a transaction-scoped client and checkpoint write get an atomic
+ * ledger commit without an event-per-query bet write path.
+ */
+export async function writeEventsToDb(
+  events: readonly DecodedContractEvent[],
+  db: DbClient,
+  redis: RedisClient,
+  logger: Pick<Logger, "debug"> = skipLogger,
+): Promise<void> {
+  let index = 0;
+
+  while (index < events.length) {
+    const event = events[index];
+    if (!isBetPlacedTopic(event.topics)) {
+      await writeEventToDb(event, db, redis, logger);
+      index++;
+      continue;
+    }
+
+    const ledger = event.ledger;
+    const batch: DecodedContractEvent[] = [];
+    while (
+      index < events.length &&
+      events[index].ledger === ledger &&
+      isBetPlacedTopic(events[index].topics)
+    ) {
+      const candidate = events[index];
+      try {
+        decodeBetPlacedEvent(candidate);
+      } catch {
+        break;
+      }
+      batch.push(candidate);
+      index++;
+    }
+
+    if (batch.length > 0) {
+      await handleBetPlacedEvents(batch, db, redis);
+      metrics.eventsProcessed.inc(batch.length);
+      metrics.eventsByType.inc("bet_placed", batch.length);
+      continue;
+    }
+
+    // Preserve the standard schema-boundary behavior for malformed bets:
+    // writeEventToDb records the dead letter and does not abort later events.
+    await writeEventToDb(events[index], db, redis, logger);
+    index++;
+  }
 }

@@ -28,6 +28,7 @@ import {
   metrics,
   resetMetrics,
   refreshDeadLetterQueueDepth,
+  refreshDeadLetterQueueDepthFromDb,
   serializeMetrics,
 } from "../metrics.js";
 
@@ -87,6 +88,8 @@ function makeRedis() {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("reprocessDeadLetterEvent", () => {
+  beforeEach(() => resetMetrics());
+
   it("marks the row resolved when writeEventToDb succeeds", async () => {
     const db = makeDb({
       // recordAttempt returns the new attempt_count
@@ -201,6 +204,52 @@ describe("reprocessDeadLetterEvent", () => {
     // The first argument to the UPDATE must be the row id
     expect(capturedAttemptArgs[0]).toBe(row.id);
   });
+
+  it("refreshes queue depth after resolving a row", async () => {
+    let pending = 1;
+    const db = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("attempt_count + 1")) {
+          return { rows: [{ attempt_count: 1 }], rowCount: 1 };
+        }
+        if (sql.includes("INSERT INTO events")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes("resolved_at = NOW()")) {
+          pending = 0;
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: String(pending) }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+
+    await reprocessDeadLetterEvent(db as never, makeRedis(), makeRow());
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(0);
+  });
+
+  it("refreshes but does not decrement queue depth after a failed retry", async () => {
+    const db = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("attempt_count + 1")) {
+          return { rows: [{ attempt_count: 1 }], rowCount: 1 };
+        }
+        if (sql.includes("INSERT INTO events")) throw new Error("write failed");
+        if (sql.includes("SET last_error")) return { rows: [], rowCount: 1 };
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: "1" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+
+    await reprocessDeadLetterEvent(db as never, makeRedis(), makeRow());
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(1);
+  });
 });
 
 describe("idempotency — replaying an already-processed event", () => {
@@ -244,6 +293,22 @@ describe("idempotency — replaying an already-processed event", () => {
     expect(summary.total).toBe(0);
     expect(summary.resolved).toBe(0);
     expect(summary.failed).toBe(0);
+  });
+
+  it("uses the configured retry cap when refreshing depth after a replay", async () => {
+    const db = makeDb({
+      "attempt_count + 1": { rows: [{ attempt_count: 1 }], rowCount: 1 },
+      "INSERT INTO events": { rows: [], rowCount: 0 },
+      "resolved_at = NOW()": { rows: [], rowCount: 1 },
+      "COUNT(*)": { rows: [{ count: "2" }], rowCount: 1 },
+    });
+
+    await reprocessDeadLetterEvent(db as never, makeRedis(), makeRow(), 4);
+
+    const refreshCall = db.query.mock.calls.find(
+      ([sql]: [string]) => sql.includes("COUNT(*)"),
+    );
+    expect(refreshCall?.[1]).toEqual([4]);
   });
 });
 
@@ -391,6 +456,47 @@ describe("refreshDeadLetterQueueDepth (queue-depth alerting)", () => {
     resetMetrics();
     expect(metrics.deadLetterQueueDepth.get()).toBe(0);
   });
+
+  it("retains the last known depth and counts a refresh failure when Postgres is unavailable", async () => {
+    metrics.deadLetterQueueDepth.set(12);
+    const logger = { warn: vi.fn() };
+
+    await expect(
+      refreshDeadLetterQueueDepth(async () => {
+        throw new Error("database unavailable");
+      }, DEAD_LETTER_ALERT_THRESHOLD, logger),
+    ).resolves.toBeNull();
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(12);
+    expect(metrics.deadLetterQueueRefreshFailures.get()).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("retaining last known value"),
+      expect.objectContaining({ lastKnownDepth: 12 }),
+    );
+  });
+
+  it("queries the authoritative pending-row count below the retry cap", async () => {
+    const db = makeDb({ "COUNT(*)": { rows: [{ count: "8" }] } });
+
+    await expect(refreshDeadLetterQueueDepthFromDb(db)).resolves.toBe(8);
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(8);
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining("attempt_count < $1"),
+      [10],
+    );
+  });
+
+  it("supports the configured retry cap when refreshing pending depth", async () => {
+    const db = makeDb({ "COUNT(*)": { rows: [{ count: "3" }] } });
+
+    await expect(refreshDeadLetterQueueDepthFromDb(db, undefined, 100, 4)).resolves.toBe(3);
+
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining("attempt_count < $1"),
+      [4],
+    );
+  });
 });
 
 describe("serializeMetrics — dead_letter_queue_depth in Prometheus output", () => {
@@ -401,6 +507,7 @@ describe("serializeMetrics — dead_letter_queue_depth in Prometheus output", ()
     const output = serializeMetrics();
     expect(output).toContain("# TYPE dead_letter_queue_depth gauge");
     expect(output).toContain("dead_letter_queue_depth 55");
+    expect(output).toContain("dead_letter_queue_refresh_failures_total 0");
   });
 
   it("outputs 0 when no events are queued", () => {

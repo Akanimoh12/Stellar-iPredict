@@ -1,4 +1,4 @@
-import { marketCancelledPayloadSchema, type MarketCancelledPayload } from "../schemas.js";
+import { parseEventPayload, type MarketCancelledPayload } from "../schemas.js";
 import { invalidateOnMarketCancelled } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
@@ -11,7 +11,7 @@ export function decodeMarketCancelledEvent(event: Pick<DecodedContractEvent, "to
     throw new Error(`Unexpected event topic: ${String(domain)}:${String(action)}`);
   }
 
-  return marketCancelledPayloadSchema.parse(event.data);
+  return parseEventPayload("market_cancelled", event.data);
 }
 
 export async function handleMarketCancelledEvent(

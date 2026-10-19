@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeEventToDb } from "../event-router.js";
-import { metrics, resetMetrics, Counter, Gauge, RpcErrorCounter, serializeRpcErrors } from "../metrics.js";
+import {
+  metrics,
+  resetMetrics,
+  Counter,
+  Gauge,
+  RpcErrorCounter,
+  serializeMetrics,
+  serializeRpcErrors,
+} from "../metrics.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 
 function makeDb(): DbClient {
@@ -119,6 +127,24 @@ describe("events_processed metric", () => {
     await writeEventToDb(makeEvent(["unknown", "event"], {}), db, redis);
 
     expect(metrics.eventsProcessed.get()).toBe(0);
+  });
+
+  it("refreshes dead-letter depth from the database after adding a queue entry", async () => {
+    let pending = 0;
+    const db: DbClient = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("INSERT INTO dead_letter_events")) pending++;
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: String(pending) }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+
+    await writeEventToDb(makeEvent(["unknown", "event"], {}), db, makeRedis());
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(1);
+    expect(serializeMetrics()).toContain("dead_letter_queue_depth 1");
   });
 });
 

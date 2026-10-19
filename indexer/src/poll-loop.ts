@@ -102,6 +102,11 @@ export async function pollOnce(config: PollOnceConfig): Promise<PollOnceResult> 
 
   const { events, latestLedger } = response;
 
+  // Issue #928: Atomic checkpoint advance with event processing
+  // Use processEventsWithCheckpoint() when available to ensure cursor
+  // and handler writes share a transaction so a crash cannot skip or
+  // double-apply events. Falls back to at-least-once (effects first,
+  // then cursor) when atomic commit is not available.
   if (typeof db.processEventsWithCheckpoint === "function") {
     // Atomic commit: cursor advances in the same transaction as the event effects
     await db.processEventsWithCheckpoint(events, latestLedger);

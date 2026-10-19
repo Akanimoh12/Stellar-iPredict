@@ -357,6 +357,7 @@ describe("Backfill & Poll Module", () => {
           cursor: "cursor-page-1",
         })
       );
+      expect(mockGetEvents.mock.calls[1]?.[0]).not.toHaveProperty("endLedger");
     });
 
     it("fails fast with RetentionExceededError naming unavailable range when startLedger is beyond retention", async () => {

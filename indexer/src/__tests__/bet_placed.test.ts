@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   decodeBetPlacedEvent,
   handleBetPlacedEvent,
+  handleBetPlacedEvents,
 } from "../handlers/bet_placed.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 
@@ -120,33 +121,28 @@ describe("bet_placed handler", () => {
 
     expect(db.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("INSERT INTO events"),
-      [
-        event.ledger,
-        event.txHash,
-        event.eventIndex,
-        "bet_placed",
-        JSON.stringify({
-          market_id: 7,
-          bettor: BETTOR,
-          is_yes: true,
-          amount: "1000000000",
-          net_amount: "980000000",
-          fee: "20000000",
-          is_increase: false,
-        }),
-        7,
-        BETTOR,
-        "980000000",
-        "1000000000",
-        true,
-      ],
+      expect.stringContaining("jsonb_to_recordset"),
+      [expect.any(String)],
     );
+    expect(JSON.parse(vi.mocked(db.query).mock.calls[0][1]?.[0] as string)).toEqual([
+      expect.objectContaining({
+        ordinal: 0,
+        ledger_seq: event.ledger,
+        tx_hash: event.txHash,
+        event_index: "2",
+        market_id: 7,
+        bettor: BETTOR,
+        net_amount: "980000000",
+        gross_amount: "1000000000",
+        is_yes: true,
+      }),
+    ]);
     const query = vi.mocked(db.query).mock.calls[0]?.[0] ?? "";
     expect(query).toContain("INSERT INTO bets");
     expect(query).toContain("UPDATE markets");
     expect(query).toContain("ON CONFLICT (tx_hash, event_index) DO NOTHING");
     expect(query).toContain("(xmax = 0) AS new_bettor");
+    expect(query).toContain("invariant_guard");
     expect(redis.del).toHaveBeenCalledWith(
       "ipredict:v1:market:7",
       "ipredict:v1:markets:active",
@@ -169,5 +165,103 @@ describe("bet_placed handler", () => {
       "ipredict:v1:market:7",
       "ipredict:v1:markets:active",
     );
+  });
+
+  it("batches ordered placements from one ledger into one atomic SQL statement", async () => {
+    const otherBettor = "G" + "B".repeat(55);
+    const first = sampleEvent();
+    const second: DecodedContractEvent = {
+      ...sampleEvent({
+        market_id: 8,
+        bettor: otherBettor,
+        is_yes: false,
+        amount: 500n,
+        net_amount: 490n,
+        fee: 10n,
+        is_increase: false,
+      }),
+      topics: ["bet"],
+      txHash: "b".repeat(64),
+      eventIndex: 0,
+    };
+    const db: DbClient = {
+      query: vi.fn().mockResolvedValue({
+        rows: [{ side_valid: true, markets_present: true, event_inserted: "2", applied: "2" }],
+        rowCount: 1,
+      }),
+    };
+    const redis: RedisClient = { del: vi.fn().mockResolvedValue(1) };
+
+    await expect(handleBetPlacedEvents([first, second], db, redis)).resolves.toHaveLength(2);
+
+    expect(db.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = vi.mocked(db.query).mock.calls[0];
+    const rows = JSON.parse(params?.[0] as string);
+    expect(rows.map((row: { tx_hash: string }) => row.tx_hash)).toEqual([
+      first.txHash,
+      second.txHash,
+    ]);
+    expect(sql).toContain("DISTINCT ON (tx_hash, event_index)");
+    expect(sql).toContain("GROUP BY market_id, bettor, is_yes");
+    expect(redis.del).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects mixed-ledger batches before any write", async () => {
+    const db: DbClient = { query: vi.fn() };
+    const redis: RedisClient = { del: vi.fn() };
+
+    await expect(
+      handleBetPlacedEvents(
+        [sampleEvent(), { ...sampleEvent(), ledger: 123457, txHash: "b".repeat(64) }],
+        db,
+        redis,
+      ),
+    ).rejects.toThrow("exactly one ledger");
+    expect(db.query).not.toHaveBeenCalled();
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate caches when the atomic batch statement rolls back", async () => {
+    const db: DbClient = { query: vi.fn().mockRejectedValue(new Error("transaction aborted")) };
+    const redis: RedisClient = { del: vi.fn() };
+
+    await expect(handleBetPlacedEvents([sampleEvent()], db, redis)).rejects.toThrow(
+      "transaction aborted",
+    );
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates duplicate delivery in SQL and still repairs cache invalidation on retry", async () => {
+    const event = sampleEvent();
+    const db: DbClient = {
+      query: vi.fn().mockResolvedValue({
+        rows: [{ side_valid: true, markets_present: true, event_inserted: "0", applied: "0" }],
+        rowCount: 1,
+      }),
+    };
+    const redis: RedisClient = { del: vi.fn().mockResolvedValue(1) };
+
+    await handleBetPlacedEvents([event, { ...event }], db, redis);
+
+    expect(db.query).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(db.query).mock.calls[0][0]).toContain(
+      "ON CONFLICT (tx_hash, event_index) DO NOTHING",
+    );
+    expect(redis.del).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a duplicate event key with a contradictory payload", async () => {
+    const event = sampleEvent();
+    const db: DbClient = { query: vi.fn() };
+    const redis: RedisClient = { del: vi.fn() };
+
+    await expect(
+      handleBetPlacedEvents(
+        [event, { ...event, data: { ...event.data as object, is_yes: false } }],
+        db,
+        redis,
+      ),
+    ).rejects.toThrow("conflicting payloads");
+    expect(db.query).not.toHaveBeenCalled();
   });
 });

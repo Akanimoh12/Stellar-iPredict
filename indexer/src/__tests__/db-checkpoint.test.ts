@@ -7,6 +7,7 @@ import {
   saveCheckpointLedger,
   withTransaction,
   processEventsWithCheckpointAtomic,
+  processLedgerBatchWithCheckpoint,
   type Queryable,
 } from "../db.js";
 
@@ -128,5 +129,44 @@ describe("Database Checkpoint & Transaction Helpers", () => {
       expect.stringContaining(`INSERT INTO ${CHECKPOINT_TABLE_NAME}`),
       [CHECKPOINT_ID, 500]
     );
+  });
+
+  it("processLedgerBatchWithCheckpoint commits a batch before advancing its checkpoint", async () => {
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    };
+    const db = { connect: vi.fn().mockResolvedValue(client) };
+    const processBatch = vi.fn().mockResolvedValue(undefined);
+    const events = [{ id: 1 }, { id: 2 }];
+
+    await processLedgerBatchWithCheckpoint(db, events, 500, processBatch);
+
+    expect(processBatch).toHaveBeenCalledWith(events, client);
+    expect(client.query.mock.calls.map(([sql]) => sql)).toEqual([
+      "BEGIN",
+      expect.stringContaining(`INSERT INTO ${CHECKPOINT_TABLE_NAME}`),
+      "COMMIT",
+    ]);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("processLedgerBatchWithCheckpoint rolls back and never advances the checkpoint on batch failure", async () => {
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    };
+    const db = { connect: vi.fn().mockResolvedValue(client) };
+
+    await expect(
+      processLedgerBatchWithCheckpoint(db, [{ id: 1 }, { id: 2 }], 500, async () => {
+        throw new Error("partial batch failure");
+      }),
+    ).rejects.toThrow("partial batch failure");
+
+    const sql = client.query.mock.calls.map(([query]) => query as string);
+    expect(sql).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(sql.some((query) => query.includes(`INSERT INTO ${CHECKPOINT_TABLE_NAME}`))).toBe(false);
+    expect(client.release).toHaveBeenCalledOnce();
   });
 });

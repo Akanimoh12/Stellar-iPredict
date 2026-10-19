@@ -111,3 +111,21 @@ export async function processEventsWithCheckpointAtomic<E>(
   await saveCheckpointLedger(client, checkpointLedger);
 }
 
+/**
+ * Process one ordered ledger batch and its checkpoint on the same checked-out
+ * client and transaction. The batch callback may collapse compatible writes
+ * into fewer statements; a rejection rolls back both event effects and the
+ * checkpoint before the client is released.
+ */
+export async function processLedgerBatchWithCheckpoint<E>(
+  db: Pool | { connect: () => Promise<any> },
+  events: readonly E[],
+  checkpointLedger: number,
+  processBatchFn: (events: readonly E[], client: Queryable) => Promise<void>,
+): Promise<void> {
+  await withTransaction(db, async (client) => {
+    await processBatchFn(events, client);
+    await saveCheckpointLedger(client, checkpointLedger);
+  });
+}
+

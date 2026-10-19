@@ -123,7 +123,7 @@ function makeRedis(): RedisClient {
 function deadLetterCalls(db: ReturnType<typeof makeDb>): Array<{ sql: string; params: readonly unknown[] }> {
   return db.query.mock.calls
     .map(([sql, params]) => ({ sql: sql as string, params: params as readonly unknown[] }))
-    .filter((call) => call.sql.includes("dead_letter_events"));
+    .filter((call) => call.sql.includes("INSERT INTO dead_letter_events"));
 }
 
 beforeEach(() => {

@@ -1,4 +1,4 @@
-import { referralRegisteredPayloadSchema, type ReferralRegisteredPayload } from "../schemas.js";
+import { parseEventPayload, type ReferralRegisteredPayload } from "../schemas.js";
 import { invalidateLeaderboardCache } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
@@ -13,7 +13,7 @@ export function decodeReferralRegisteredEvent(
     throw new Error(`Unexpected event topic: ${String(domain)}:${String(action)}`);
   }
 
-  return referralRegisteredPayloadSchema.parse(event.data);
+  return parseEventPayload("referral_registered", event.data);
 }
 
 export async function handleReferralRegisteredEvent(

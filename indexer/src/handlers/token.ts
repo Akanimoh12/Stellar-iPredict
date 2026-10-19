@@ -61,12 +61,12 @@ export const TOKEN_TRANSFER_TOPIC = "token_transfer";
 
 const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
 
-interface TokenMintPayload {
+export interface TokenMintPayload {
   to: string;
   amount: string;
 }
 
-interface TokenTransferPayload {
+export interface TokenTransferPayload {
   from: string;
   to: string;
   amount: string;

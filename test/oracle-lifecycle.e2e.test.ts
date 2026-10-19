@@ -171,93 +171,106 @@ class StatefulTestDatabase {
 
     // CTE from handleBetPlacedEvent
     if (trimmed.startsWith("WITH input AS") && trimmed.includes("upserted_bet")) {
-      const [
-        ledger_seq,
-        tx_hash,
-        event_index,
-        event_type,
-        payload,
-        market_id_val,
-        bettor_val,
-        net_amount_val,
-        gross_amount_val,
-        is_yes_val,
-      ] = params as [number, string, number, string, string, string | number, string, string, string, boolean];
+      type BatchInput = {
+        ordinal: number;
+        ledger_seq: number;
+        tx_hash: string;
+        event_index: string;
+        payload: unknown;
+        market_id: number;
+        bettor: string;
+        net_amount: string;
+        gross_amount: string;
+        is_yes: boolean;
+      };
+      const parsed = JSON.parse(String(params[0])) as BatchInput[];
+      const seen = new Set<string>();
+      const batch = parsed
+        .sort((a, b) => a.ordinal - b.ordinal)
+        .filter((row) => {
+          const key = `${row.tx_hash}:${row.event_index}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
 
-      const marketId = Number(market_id_val);
-      const bettor = String(bettor_val).trim();
-      const netAmount = String(net_amount_val);
-      const grossAmount = String(gross_amount_val);
-      const isYes = Boolean(is_yes_val);
+      const marketsPresent = batch.every((row) => this.markets.has(Number(row.market_id)));
+      const sides = new Map<string, boolean>();
+      let sideValid = true;
+      for (const row of batch) {
+        const positionKey = `${Number(row.market_id)}:${String(row.bettor).trim()}`;
+        const side = Boolean(row.is_yes);
+        const knownSide = sides.get(positionKey) ?? this.bets.get(positionKey)?.is_yes;
+        if (knownSide !== undefined && knownSide !== side) sideValid = false;
+        sides.set(positionKey, side);
+      }
 
-      const dedupeKey = `${tx_hash}:${event_index}`;
-      const isDuplicateEvent = this.events.has(dedupeKey);
-
-      if (isDuplicateEvent) {
-        // Idempotency: skip inserting event and modifying balances
+      if (!marketsPresent || !sideValid) {
         return {
-          rows: [{ side_valid: true, event_inserted: false, applied: false }] as T[],
+          rows: [{ side_valid: sideValid, markets_present: marketsPresent, event_inserted: 0, applied: 0 }] as T[],
           rowCount: 1,
         };
       }
 
-      // Check opposite side violation
-      const betKey = `${marketId}:${bettor}`;
-      const existingBet = this.bets.get(betKey);
-      if (existingBet && existingBet.is_yes !== isYes) {
-        return {
-          rows: [{ side_valid: false, event_inserted: false, applied: false }] as T[],
-          rowCount: 0,
-        };
-      }
+      let inserted = 0;
+      for (const row of batch) {
+        const marketId = Number(row.market_id);
+        const bettor = String(row.bettor).trim();
+        const netAmount = String(row.net_amount);
+        const grossAmount = String(row.gross_amount);
+        const isYes = Boolean(row.is_yes);
+        const dedupeKey = `${row.tx_hash}:${row.event_index}`;
+        if (this.events.has(dedupeKey)) continue;
 
-      // Record event
-      this.events.set(dedupeKey, {
-        ledger_seq: Number(ledger_seq),
-        tx_hash,
-        event_index: Number(event_index),
-        event_type,
-        market_id: marketId,
-        actor: bettor,
-        payload,
-      });
-
-      const isNewBettor = !existingBet;
-      if (existingBet) {
-        const updatedNet = (BigInt(existingBet.net_amount.replace(".", "")) + BigInt(netAmount.replace(".", "")));
-        const updatedGross = (BigInt(existingBet.gross_amount.replace(".", "")) + BigInt(grossAmount.replace(".", "")));
-        existingBet.net_amount = stroopsToXlm(updatedNet);
-        existingBet.gross_amount = stroopsToXlm(updatedGross);
-      } else {
-        this.bets.set(betKey, {
-          market_id: String(marketId),
-          bettor,
-          net_amount: netAmount,
-          gross_amount: grossAmount,
-          is_yes: isYes,
-          claimed: false,
-          created_at: new Date(),
+        this.events.set(dedupeKey, {
+          ledger_seq: Number(row.ledger_seq),
+          tx_hash: row.tx_hash,
+          event_index: Number(row.event_index),
+          event_type: "bet_placed",
+          market_id: marketId,
+          actor: bettor,
+          payload: JSON.stringify(row.payload),
         });
-      }
+        inserted++;
 
-      // Update market aggregates
-      const market = this.markets.get(marketId);
-      if (market) {
-        if (isYes) {
-          const currentYes = BigInt(market.total_yes.replace(".", ""));
-          market.total_yes = stroopsToXlm(currentYes + BigInt(netAmount.replace(".", "")));
+        const betKey = `${marketId}:${bettor}`;
+        const existingBet = this.bets.get(betKey);
+        const isNewBettor = !existingBet;
+        if (existingBet) {
+          existingBet.net_amount = stroopsToXlm(
+            BigInt(existingBet.net_amount.replace(".", "")) + BigInt(netAmount),
+          );
+          existingBet.gross_amount = stroopsToXlm(
+            BigInt(existingBet.gross_amount.replace(".", "")) + BigInt(grossAmount),
+          );
         } else {
-          const currentNo = BigInt(market.total_no.replace(".", ""));
-          market.total_no = stroopsToXlm(currentNo + BigInt(netAmount.replace(".", "")));
+          this.bets.set(betKey, {
+            market_id: String(marketId),
+            bettor,
+            net_amount: stroopsToXlm(BigInt(netAmount)),
+            gross_amount: stroopsToXlm(BigInt(grossAmount)),
+            is_yes: isYes,
+            claimed: false,
+            created_at: new Date(),
+          });
         }
-        if (isNewBettor) {
-          market.bet_count += 1;
+
+        const market = this.markets.get(marketId)!;
+        if (isYes) {
+          market.total_yes = stroopsToXlm(
+            BigInt(market.total_yes.replace(".", "")) + BigInt(netAmount),
+          );
+        } else {
+          market.total_no = stroopsToXlm(
+            BigInt(market.total_no.replace(".", "")) + BigInt(netAmount),
+          );
         }
+        if (isNewBettor) market.bet_count += 1;
         market.updated_at = new Date();
       }
 
       return {
-        rows: [{ side_valid: true, event_inserted: true, applied: true }] as T[],
+        rows: [{ side_valid: true, markets_present: true, event_inserted: inserted, applied: inserted }] as T[],
         rowCount: 1,
       };
     }

@@ -9,6 +9,11 @@ import {
   normalizeScience,
   normalizeSports,
   normalizeOutcome,
+  validateProviderSchema,
+  CryptoRawPayloadSchema,
+  SportsRawPayloadSchema,
+  PoliticsRawPayloadSchema,
+  ScienceRawPayloadSchema,
 } from "../src/adapters/normalize.js";
 import {
   BINANCE_TICKER_BTCUSDT,
@@ -639,5 +644,50 @@ describe("captured provider responses", () => {
     // `response.json()` throws a SyntaxError on this; the adapters classify it
     // as a data error, and no value is produced.
     expect(() => JSON.parse(TRUNCATED_JSON_RESPONSE)).toThrow(SyntaxError);
+  });
+
+  describe("Provider response schema validation with Zod (Issue #911)", () => {
+    it("validates valid crypto payload", () => {
+      const valid = { price: 65000, threshold: 60000, comparator: "gte", provider: "binance" };
+      const parsed = validateProviderSchema(CryptoRawPayloadSchema, valid, "binance");
+      expect(parsed.price).toBe(65000);
+      expect(parsed.comparator).toBe("gte");
+    });
+
+    it("rejects non-object payload with NormalizationError", () => {
+      expect(() => validateProviderSchema(CryptoRawPayloadSchema, "not-an-object", "test")).toThrow(
+        NormalizationError,
+      );
+    });
+
+    it("rejects invalid comparator in crypto payload", () => {
+      const invalid = { price: 65000, threshold: 60000, comparator: "invalid_op" };
+      try {
+        validateProviderSchema(CryptoRawPayloadSchema, invalid, "binance");
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(NormalizationError);
+        expect((err as NormalizationError).field).toBe("comparator");
+      }
+    });
+
+    it("rejects missing required number in sports payload", () => {
+      const invalid = { final: "not-a-bool", outcome: true };
+      try {
+        validateProviderSchema(SportsRawPayloadSchema, invalid, "sportdataapi");
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(NormalizationError);
+        expect((err as NormalizationError).field).toBe("final");
+      }
+    });
+
+    it("validates politics and science payloads", () => {
+      const politics = { outcome: true, consensusFraction: 0.85 };
+      expect(validateProviderSchema(PoliticsRawPayloadSchema, politics, "reuters").consensusFraction).toBe(0.85);
+
+      const science = { outcome: false, confidence: 0.92 };
+      expect(validateProviderSchema(ScienceRawPayloadSchema, science, "committee").confidence).toBe(0.92);
+    });
   });
 });

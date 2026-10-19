@@ -5,6 +5,56 @@
  * Preserves provider's original decimal string precision.
  */
 
+export class InvalidPriceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPriceError";
+  }
+}
+
+/**
+ * Validates that a price string represents a finite, non-negative decimal value.
+ * Rejects "NaN", "Infinity", "-Infinity", negative prices, or non-numeric strings.
+ */
+export function validatePriceString(value: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidPriceError(
+      `Invalid price: expected non-empty string, received ${typeof value === "string" ? '""' : typeof value}`,
+    );
+  }
+  const trimmed = value.trim();
+  if (trimmed.startsWith("-")) {
+    throw new InvalidPriceError(
+      `Invalid price: negative price values are not permitted (received "${value}")`,
+    );
+  }
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || Number.isNaN(num) || num < 0) {
+    throw new InvalidPriceError(
+      `Invalid price: expected finite non-negative number, received "${value}"`,
+    );
+  }
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new InvalidPriceError(`Invalid price: malformed decimal format "${value}"`);
+  }
+}
+
+/**
+ * Validates that a threshold is a finite, non-negative number.
+ */
+export function validateThreshold(threshold: number): void {
+  if (
+    typeof threshold !== "number" ||
+    !Number.isFinite(threshold) ||
+    Number.isNaN(threshold) ||
+    threshold < 0
+  ) {
+    throw new InvalidPriceError(
+      `Invalid threshold: expected finite non-negative number, received ${threshold}`,
+    );
+  }
+}
+
 /**
  * Compare decimal strings without floating point conversion
  * 
@@ -18,8 +68,12 @@ export function compareDecimal(
   threshold: number,
   operator: '>' | '<' | '>=' | '<=' | '==' | '!='
 ): boolean {
+  validatePriceString(value);
+  validateThreshold(threshold);
+
+  const trimmed = value.trim();
   // Parse to BigInt by removing decimal point and tracking scale
-  const valueParts = value.split('.');
+  const valueParts = trimmed.split('.');
   const valueInt = valueParts[0] + (valueParts[1] || '');
   const valueScale = valueParts[1]?.length || 0;
   

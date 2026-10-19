@@ -51,6 +51,8 @@ export interface SourceResult {
   provider?: string;
   request?: unknown;
   respondedAt?: string;
+  /** Cryptographic SHA-256 hash of the raw payload for dispute evidence. */
+  payloadHash?: string;
 }
 
 export interface ResolutionResult {

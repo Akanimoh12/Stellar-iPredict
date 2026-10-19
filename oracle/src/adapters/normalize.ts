@@ -53,8 +53,91 @@
  *   interpretation, not a guess.
  */
 
+import { z } from "zod";
 import { AdapterError } from "./errors.js";
 import { applyConfidenceCeiling, assessQuote, type FreshnessPolicy } from "./freshness.js";
+
+/**
+ * Zod schemas for provider response validation (Issue #911)
+ */
+export const CryptoRawPayloadSchema = z.object({
+  price: z.number().refine(Number.isFinite, { message: "expected finite number" }),
+  threshold: z.number().refine(Number.isFinite, { message: "expected finite number" }),
+  comparator: z.enum(["gte", "lte"]),
+  observedAtMs: z.number().nullable().optional(),
+  freshness: z.any().optional(),
+  now: z.number().optional(),
+  provider: z.string().optional(),
+});
+
+export const SportsRawPayloadSchema = z.object({
+  final: z.boolean(),
+  outcome: z.boolean(),
+  sourceConfidence: z
+    .number()
+    .refine(Number.isFinite, { message: "expected finite number" })
+    .optional(),
+  provider: z.string().optional(),
+});
+
+export const PoliticsRawPayloadSchema = z.object({
+  outcome: z.boolean(),
+  consensusFraction: z
+    .number()
+    .refine(Number.isFinite, { message: "expected finite number" }),
+  provider: z.string().optional(),
+});
+
+export const ScienceRawPayloadSchema = z.object({
+  outcome: z.boolean(),
+  confidence: z
+    .number()
+    .refine(Number.isFinite, { message: "expected finite number" }),
+  provider: z.string().optional(),
+});
+
+/**
+ * Validate a provider response payload against its Zod schema.
+ * Throws NormalizationError with structured field information on schema violations.
+ */
+export function validateProviderSchema<T>(
+  schema: z.ZodType<T>,
+  data: unknown,
+  source: string,
+): T {
+  if (data === null || typeof data !== "object") {
+    throw new NormalizationError(
+      source,
+      "payload",
+      data,
+      `expected an object, received ${describe(data)}`,
+    );
+  }
+
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const field = String(issue.path[0] || "payload");
+    const received = (data as Record<string, unknown>)?.[field];
+
+    let detail = issue.message;
+    if (field === "comparator") {
+      detail = `expected "gte" or "lte", received ${describe(received)}`;
+    } else if (received === null || received === undefined) {
+      detail = "required number is missing";
+    } else if (issue.code === "invalid_type" && issue.expected === "boolean") {
+      detail = `expected boolean, received ${describe(received)}`;
+    } else if (typeof received !== "number") {
+      detail = `expected number, received ${describe(received)}`;
+    } else if (!Number.isFinite(received)) {
+      detail = `expected finite number, received ${String(received)}`;
+    }
+
+    throw new NormalizationError(source, field, received, detail);
+  }
+
+  return result.data;
+}
 
 /**
  * A provider response that could not be normalized.

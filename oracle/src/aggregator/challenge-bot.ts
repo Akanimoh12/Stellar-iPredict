@@ -194,6 +194,11 @@ export class ChallengeBot {
       bond: submission.bond.toString(),
     });
 
+    if (submission.submitter === this.options.challengerKeypair.publicKey()) {
+      this.logger.warn("cannot challenge own submission", { marketId: submission.marketId });
+      return { marketId: submission.marketId, challenged: false, reason: "Cannot challenge own submission" };
+    }
+
     // Check if we're still within the challenge window
     const now = Math.floor(Date.now() / 1000);
     if (now > submission.challengeDeadline) {

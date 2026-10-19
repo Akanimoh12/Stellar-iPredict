@@ -28,6 +28,7 @@ import {
   listUnresolvedDeadLetterEvents,
   countUnresolvedDeadLetterEvents,
   DEAD_LETTER_ALERT_THRESHOLD,
+  DEAD_LETTER_MAX_ATTEMPTS,
 } from "./deadLetter.js";
 import { refreshDeadLetterQueueDepth } from "./metrics.js";
 import { createLogger, parseLogLevel } from "./log.js";
@@ -59,6 +60,10 @@ async function main(): Promise<void> {
 
   const dryRun = process.argv.includes("--dry-run");
   const batchSize = parseBatchSize(process.argv);
+  const configuredMaxAttempts = Number(process.env.DEAD_LETTER_MAX_ATTEMPTS ?? DEAD_LETTER_MAX_ATTEMPTS);
+  const maxAttempts = Number.isInteger(configuredMaxAttempts) && configuredMaxAttempts > 0
+    ? configuredMaxAttempts
+    : DEAD_LETTER_MAX_ATTEMPTS;
 
   const logger = createLogger({
     level: parseLogLevel(process.env.LOG_LEVEL),
@@ -107,7 +112,10 @@ async function main(): Promise<void> {
     // ── Dry-run: list without replaying ─────────────────────────────────
     if (dryRun) {
       const rows = await listUnresolvedDeadLetterEvents(db as unknown as Parameters<typeof listUnresolvedDeadLetterEvents>[0], batchSize);
-      const total = await countUnresolvedDeadLetterEvents(db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0]);
+      const total = await countUnresolvedDeadLetterEvents(
+        db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0],
+        maxAttempts,
+      );
       logger.info("dead-letter reprocess dry-run", {
         dryRun: true,
         total,
@@ -126,17 +134,23 @@ async function main(): Promise<void> {
 
     // ── Refresh queue-depth gauge before processing ──────────────────────
     const depthBefore = await refreshDeadLetterQueueDepth(
-      () => countUnresolvedDeadLetterEvents(db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0]),
+      () => countUnresolvedDeadLetterEvents(
+        db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0],
+        maxAttempts,
+      ),
       DEAD_LETTER_ALERT_THRESHOLD,
       logger,
     );
 
     logger.info("dead-letter reprocess started", { batchSize, depthBefore });
 
-    const summary = await reprocessDeadLetterBatch(db, redis, { batchSize });
+    const summary = await reprocessDeadLetterBatch(db, redis, { batchSize, maxAttempts });
 
     const depthAfter = await refreshDeadLetterQueueDepth(
-      () => countUnresolvedDeadLetterEvents(db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0]),
+      () => countUnresolvedDeadLetterEvents(
+        db as unknown as Parameters<typeof countUnresolvedDeadLetterEvents>[0],
+        maxAttempts,
+      ),
       DEAD_LETTER_ALERT_THRESHOLD,
       logger,
     );

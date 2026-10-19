@@ -1,6 +1,25 @@
+import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadAggregatorConfig } from "./config.js";
-import { exportCouncilAudit, type AuditFormat } from "./council-audit.js";
+import { exportCouncilAudit, type AuditFormat, type CouncilAuditRecord } from "./council-audit.js";
+
+export interface ReplayArgs {
+  input: string;
+  marketId: string;
+}
+
+export interface ReplayResult {
+  marketId: string;
+  yesVotes: number;
+  noVotes: number;
+  totalVoters: number;
+  threshold: number;
+  replayedDecision: boolean | null;
+  recordedDecision: boolean | null;
+  evidenceDecision: boolean | null;
+  evidenceOutcomes: readonly boolean[];
+  evidenceComplete: boolean;
+}
 
 export interface ParsedAuditArgs {
   format: AuditFormat;
@@ -23,10 +42,83 @@ export function parseAuditArgs(argv: readonly string[]): ParsedAuditArgs {
   return { format };
 }
 
+/** Parses `--replay <audit.json> --market <id>` for an offline audit replay. */
+export function parseReplayArgs(argv: readonly string[]): ReplayArgs | null {
+  const replayIndex = argv.indexOf("--replay");
+  if (replayIndex < 0) return null;
+  const input = argv[replayIndex + 1];
+  const marketIndex = argv.indexOf("--market");
+  const marketId = argv[marketIndex + 1];
+  if (!input) throw new Error("--replay <audit.json> is required");
+  if (!marketId) throw new Error("--market <id> is required with --replay");
+  return { input, marketId };
+}
+
+function parseRecordedDecision(decision: string | null): boolean | null {
+  if (decision === "yes" || decision === "true" || decision === "YES") return true;
+  if (decision === "no" || decision === "false" || decision === "NO") return false;
+  return null;
+}
+
+/** Recomputes a finalized decision from the votes and stored provider evidence. */
+export function replayAuditRecord(
+  record: CouncilAuditRecord,
+  threshold: number,
+): ReplayResult {
+  const replayedDecision = record.yesVotes >= threshold && record.yesVotes > record.noVotes
+    ? true
+    : record.noVotes >= threshold && record.noVotes > record.yesVotes
+      ? false
+      : null;
+  const evidenceOutcomes = record.rawPayloads
+    .map((payload) => payload.outcome)
+    .filter((outcome): outcome is boolean => outcome !== null);
+  const distinctEvidence = [...new Set(evidenceOutcomes)];
+  return {
+    marketId: record.marketId,
+    yesVotes: record.yesVotes,
+    noVotes: record.noVotes,
+    totalVoters: record.totalVoters,
+    threshold,
+    replayedDecision,
+    recordedDecision: parseRecordedDecision(record.decision),
+    evidenceDecision: distinctEvidence.length === 1 ? distinctEvidence[0] : null,
+    evidenceOutcomes,
+    evidenceComplete: record.rawPayloads.length > 0 &&
+      record.rawPayloads.every((payload) => !payload.truncated && payload.outcome !== null),
+  };
+}
+
+async function replayFromFile(args: ReplayArgs, threshold: number): Promise<ReplayResult> {
+  const parsed: unknown = JSON.parse(await readFile(args.input, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error("replay input must be a JSON audit export array");
+  const record = parsed.find((candidate): candidate is CouncilAuditRecord =>
+    typeof candidate === "object" && candidate !== null &&
+    (candidate as { marketId?: unknown }).marketId === args.marketId,
+  );
+  if (!record) throw new Error(`market ${args.marketId} was not found in ${args.input}`);
+  return replayAuditRecord(record, threshold);
+}
+
 async function main(): Promise<void> {
-  const args = parseAuditArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const replayArgs = parseReplayArgs(argv);
+
+  if (replayArgs) {
+    const threshold = Number(process.env.COUNCIL_THRESHOLD ?? 4);
+    if (!Number.isInteger(threshold) || threshold <= 0) {
+      throw new Error("COUNCIL_THRESHOLD must be a positive integer for replay");
+    }
+    process.stdout.write(JSON.stringify(
+      await replayFromFile(replayArgs, threshold),
+      null,
+      2,
+    ) + "\n");
+    return;
+  }
 
   const aggregatorConfig = loadAggregatorConfig(process.env);
+  const args = parseAuditArgs(argv);
   const pool = new Pool({ connectionString: aggregatorConfig.DATABASE_URL });
 
   try {

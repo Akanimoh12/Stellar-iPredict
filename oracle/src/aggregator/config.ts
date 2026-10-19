@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { optionalEnv } from "../config/env.js";
+import { normalizeEnvironment, optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
@@ -105,7 +105,7 @@ const schema = z.object({
 
 export type AggregatorConfig = z.infer<typeof schema>;
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
-  const result = schema.safeParse(env);
+  const result = schema.safeParse(normalizeEnvironment(env));
   if (!result.success) {
     const details = result.error.issues
       .map((issue) => `  ${issue.path.join(".") || "config"}: ${issue.message}`)

@@ -19,18 +19,26 @@ function replyMock() {
 describe("central Fastify error handler", () => {
   it("returns known 4xx errors in a stable shape", () => {
     const reply = replyMock();
-    errorHandler(notFound("Market not found") as never, { id: "req-1" } as never, reply as never);
+    errorHandler(notFound("Market not found") as never, { id: "req-1", url: "/markets/1" } as never, reply as never);
     expect(reply.statusCode).toBe(404);
     expect(reply.payload).toEqual({
+      type: "about:blank",
+      title: "Market not found",
+      status: 404,
+      instance: "/markets/1",
       error: { code: "NOT_FOUND", message: "Market not found", requestId: "req-1" },
     });
   });
 
   it("hides internals and stack traces for 500s", () => {
     const reply = replyMock();
-    errorHandler(new Error("database password leaked") as never, { id: "req-1" } as never, reply as never);
+    errorHandler(new Error("database password leaked") as never, { id: "req-1", url: "/" } as never, reply as never);
     expect(reply.statusCode).toBe(500);
     expect(reply.payload).toEqual({
+      type: "about:blank",
+      title: "Internal server error",
+      status: 500,
+      instance: "/",
       error: { code: "INTERNAL_SERVER_ERROR", message: "Internal server error", requestId: "req-1" },
     });
     expect(JSON.stringify(reply.payload)).not.toContain("stack");
@@ -39,9 +47,13 @@ describe("central Fastify error handler", () => {
 
   it("maps explicit bad requests", () => {
     const reply = replyMock();
-    errorHandler(badRequest("Invalid page") as never, { id: "req-1" } as never, reply as never);
+    errorHandler(badRequest("Invalid page") as never, { id: "req-1", url: "/markets" } as never, reply as never);
     expect(reply.statusCode).toBe(400);
     expect(reply.payload).toEqual({
+      type: "about:blank",
+      title: "Invalid page",
+      status: 400,
+      instance: "/markets",
       error: { code: "BAD_REQUEST", message: "Invalid page", requestId: "req-1" },
     });
   });

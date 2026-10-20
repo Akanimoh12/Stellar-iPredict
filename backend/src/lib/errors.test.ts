@@ -484,7 +484,13 @@ describe("errors from each origin", () => {
       notFound("missing"),
     ]) {
       const reply = handleError(error, "envelope shape");
-      expect(Object.keys(reply.payload as object)).toEqual(["error"]);
+      expect(Object.keys(reply.payload as object).sort()).toEqual([
+        "error",
+        "instance",
+        "status",
+        "title",
+        "type",
+      ]);
       expect(Object.keys((reply.payload as { error: object }).error).sort()).toEqual([
         "code",
         "message",

@@ -106,19 +106,30 @@ export const pool: Pool = new Proxy({} as Pool, {
  * `total` is the number of connections currently held by the pool, `idle` how
  * many are available for immediate reuse, and `waiting` how many requests are
  * queued because all connections are checked out. A rising `waiting` count is
- * the first sign of exhaustion.
+ * the first sign of exhaustion. `max` is the configured ceiling, so `total`
+ * can be read as a fraction of capacity.
  */
 export interface PoolMetrics {
   total: number;
   idle: number;
   waiting: number;
+  max: number;
 }
 
+/**
+ * Current pool occupancy. Reads the pool only if it already exists: a metrics
+ * scrape must not be the thing that constructs a pool, or fails when
+ * `DATABASE_URL` is unset. Before the first query the gauges are zero.
+ */
 export function getPoolMetrics(): PoolMetrics {
+  if (!_pool) {
+    return { total: 0, idle: 0, waiting: 0, max: DEFAULT_POOL_SIZE };
+  }
   return {
-    total: pool.totalCount,
-    idle: pool.idleCount,
-    waiting: pool.waitingCount,
+    total: _pool.totalCount,
+    idle: _pool.idleCount,
+    waiting: _pool.waitingCount,
+    max: DEFAULT_POOL_SIZE,
   };
 }
 

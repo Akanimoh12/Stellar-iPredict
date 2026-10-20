@@ -64,6 +64,55 @@ export function signWebhookPayload(secret: string, timestamp: number, body: stri
     .digest("hex");
 }
 
+/**
+ * Verify a webhook signature using constant-time comparison.
+ *
+ * Returns true only if the signature is valid, the timestamp is fresh (within
+ * the tolerance window), and all headers are present and well-formed. Returns
+ * false for any validation failure — use as a gate, not for error diagnosis.
+ *
+ * @param rawBody           - The exact raw request body string that was signed
+ * @param headers           - The HTTP request headers (headers["x-signature"] and headers["x-timestamp"])
+ * @param secret            - WEBHOOK_SIGNING_SECRET (raw string, not hex-encoded)
+ * @param toleranceSeconds  - Maximum age of the timestamp in seconds. Defaults to 300 (5 minutes).
+ * @returns                 - true if the signature is valid and fresh, false otherwise
+ */
+export function verifyWebhookSignature(
+  rawBody: string,
+  headers: Record<string, string | string[] | undefined>,
+  secret: string,
+  toleranceSeconds: number = 300,
+): boolean {
+  const signature = headers["x-signature"];
+  const timestampHeader = headers["x-timestamp"];
+
+  if (!signature || typeof signature !== "string") return false;
+  if (!timestampHeader || typeof timestampHeader !== "string") return false;
+
+  const timestamp = parseInt(timestampHeader, 10);
+  if (Number.isNaN(timestamp)) return false;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestamp) > toleranceSeconds) return false;
+
+  const signedMaterial = `${timestamp}.${rawBody}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", secret)
+    .update(signedMaterial)
+    .digest("hex");
+
+  const signatureBuffer = Buffer.from(signature, "hex");
+  const expectedBuffer = Buffer.from(expectedSignature, "hex");
+
+  if (signatureBuffer.length !== expectedBuffer.length) return false;
+
+  try {
+    return crypto.timingSafeEqual(signatureBuffer, expectedBuffer);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Exponential backoff with jitter (issue #460)
 // ---------------------------------------------------------------------------

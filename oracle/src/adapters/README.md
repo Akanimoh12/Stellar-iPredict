@@ -19,6 +19,26 @@ Common conventions
 Adapters
 --------
 
+## Crypto adapter fallback chain (issue #902)
+
+When resolving crypto markets, adapters should be registered in this priority order to enable graceful fallback:
+
+1. **Binance** (primary) — lowest latency, highest data quality
+2. **CoinGecko** (secondary) — good global coverage, free API available
+3. **CoinMarketCap** (tertiary) — broad symbol coverage
+
+Adapters are tried in registration order and fail-safe: if Binance becomes unavailable, resolution falls back to CoinGecko, and if both fail, CoinMarketCap is consulted. Markets with bonded stakes require `minAgreement: 2` to prevent single-provider resolution (issue #903).
+
+- `binance` (Binance API)
+  - Files: `binance.ts`
+  - Mapping: expects `params.symbol` to be a Binance trading pair (e.g.
+    `BTCUSDT`). Binance supports klines / historical samples which adapters may
+    use to select the price at a specific millisecond timestamp.
+  - Freshness: uses `/api/v3/ticker/24hr` and its `closeTime`. The shorter
+    `/api/v3/ticker/price` endpoint carries no timestamp at all, so freshness
+    would be unverifiable there.
+  - Quota: Binance has per-endpoint weight limits; use `rateLimiter`.
+
 - `coingecko` (CoinGecko API)
   - Files: `coingecko.ts`
   - Mapping: expects `params.symbol` to be the CoinGecko coin id (e.g. "bitcoin").
@@ -41,16 +61,6 @@ Adapters
   - Freshness: `last_updated_timestamp` / `last_updated` on each quote.
   - Quota: Strict rate limits on free tiers. API key required for higher
     request volumes.
-
-- `binance` (Binance API)
-  - Files: `binance.ts`
-  - Mapping: expects `params.symbol` to be a Binance trading pair (e.g.
-    `BTCUSDT`). Binance supports klines / historical samples which adapters may
-    use to select the price at a specific millisecond timestamp.
-  - Freshness: uses `/api/v3/ticker/24hr` and its `closeTime`. The shorter
-    `/api/v3/ticker/price` endpoint carries no timestamp at all, so freshness
-    would be unverifiable there.
-  - Quota: Binance has per-endpoint weight limits; use `rateLimiter`.
 
 - `reuters` (Reuters/NLP feed)
   - Files: `reuters.ts`

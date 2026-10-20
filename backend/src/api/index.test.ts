@@ -62,7 +62,10 @@ describe("mounting", () => {
     });
 
     expect(res.statusCode).toBe(400);
-    expect(res.json().message).toBe("Invalid Stellar address format");
+    expect(res.json().error).toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Invalid Stellar address format",
+    });
   });
 
   it("does not serve feature routes off the unversioned prefix", async () => {

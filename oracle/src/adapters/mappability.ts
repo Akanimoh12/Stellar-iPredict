@@ -29,7 +29,7 @@
  * it would look exactly like "the override did not apply".
  */
 
-import { readFileSync as readTextFile } from "node:fs";
+import { readFileSync } from "node:fs";
 
 import type { DataAdapter, Market } from "./index.js";
 import { isCryptoMarketParams, isPoliticsMarketParams } from "./index.js";
@@ -183,7 +183,7 @@ export class MappabilityOverrides {
   constructor(options: MappabilityOverridesOptions = {}) {
     this.filePath = options.filePath ?? process.env.MARKET_MAPPABILITY_OVERRIDES_FILE;
     this.env = options.env ?? process.env;
-    this.readFile = options.readFile ?? ((path) => readTextFile(path, "utf8"));
+    this.readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
   }
 
   /**
@@ -287,14 +287,6 @@ function readSymbolMap(value: unknown, label: string): Record<string, string[]> 
     result[adapter] = symbols as string[];
   }
   return result;
-}
-
-// `readFileSync` is imported lazily so the module stays usable in environments
-// (like a bundled CLI) where node:fs is present but not wanted at import time.
-function readFileSync(path: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { readFileSync: read } = require("node:fs") as typeof import("node:fs");
-  return read(path, "utf8");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

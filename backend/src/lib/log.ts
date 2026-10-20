@@ -28,6 +28,9 @@ export const MAX_REQUEST_ID_LENGTH = 128;
 /** Conservative charset — keeps control characters out of log lines. */
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 
+/** Stellar account addresses must not appear in logged query strings. */
+const STELLAR_ADDRESS_PATTERN = /G[A-Z2-7]{55}/i;
+
 /** Headers that must never reach the logs verbatim. */
 export const REDACTED_HEADERS = [
   "req.headers.authorization",
@@ -97,10 +100,25 @@ export function sanitizeUrl(
     if (!param) return param;
     const eqIdx = param.indexOf("=");
     const rawKey = eqIdx === -1 ? param : param.slice(0, eqIdx);
-    const key = decodeURIComponent(rawKey).toLowerCase();
+    let key: string;
+    try {
+      key = decodeURIComponent(rawKey).toLowerCase();
+    } catch {
+      return `${rawKey}=[redacted]`;
+    }
 
     if (allowedParams.has(key)) {
-      return param;
+      const rawValue = eqIdx === -1 ? "" : param.slice(eqIdx + 1);
+      let value: string;
+      try {
+        value = decodeURIComponent(rawValue.replace(/\+/g, " "));
+      } catch {
+        return `${rawKey}=[redacted]`;
+      }
+
+      if (!STELLAR_ADDRESS_PATTERN.test(value)) {
+        return param;
+      }
     }
 
     return `${rawKey}=[redacted]`;

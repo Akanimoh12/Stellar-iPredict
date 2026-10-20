@@ -12,7 +12,7 @@ describe("address utilities", () => {
 
   it("rejects invalid Stellar addresses", () => {
     expect(() => normalizeAddress("not-a-stellar-address")).toThrow(
-      "Invalid Stellar address",
+      "Invalid Stellar address format",
     );
     expect(isValidAddress("not-a-stellar-address")).toBe(false);
   });
@@ -23,13 +23,13 @@ describe("address utilities", () => {
     }
     expect(() => normalizeAddress(null as unknown as string)).toThrow(TypeError);
     expect(() => normalizeAddress(undefined as unknown as string)).toThrow(
-      "Invalid Stellar address",
+      "Invalid Stellar address format",
     );
   });
 
   it("rejects a muxed (M...) / contract (C...) / secret (S...) key as an account address", () => {
     const secret = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7)).secret();
     expect(isValidAddress(secret)).toBe(false);
-    expect(() => normalizeAddress(secret)).toThrow("Invalid Stellar address");
+    expect(() => normalizeAddress(secret)).toThrow("Invalid Stellar address format");
   });
 });

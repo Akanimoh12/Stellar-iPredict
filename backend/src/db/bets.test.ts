@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getBetsByBettor, BetRow } from './bets';
+import { getBetsByBettor, getBetsByBettorPaginated, BetRow } from './bets';
 import { Pool } from 'pg';
 
 describe('getBetsByBettor', () => {
@@ -68,6 +68,45 @@ describe('getBetsByBettor', () => {
     expect(result[0].net_amount).toBe(hugeAmountStr);
     expect(result[0].gross_amount).toBe(hugeAmountStr);
     expect(typeof result[0].net_amount).toBe('string');
+  });
+});
+
+describe("getBetsByBettorPaginated", () => {
+  it("fetches a stable page and the total count using parameterized queries", async () => {
+    const rows: BetRow[] = [
+      {
+        market_id: "7",
+        bettor: "GBETTOR",
+        net_amount: "100",
+        gross_amount: "102",
+        is_yes: true,
+        claimed: false,
+        created_at: new Date(),
+      },
+    ];
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows })
+      .mockResolvedValueOnce({ rows: [{ total: 21 }] });
+    const mockPool = { query } as unknown as Pool;
+
+    const result = await getBetsByBettorPaginated(mockPool, "GBETTOR", 2, 10);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("ORDER BY created_at DESC, market_id DESC"),
+      ["GBETTOR", 10, 10],
+    );
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("COUNT(*)::INT AS total"),
+      ["GBETTOR"],
+    );
+    expect(result).toEqual({
+      bets: rows,
+      total: 21,
+      page: 2,
+      limit: 10,
+      totalPages: 3,
+    });
   });
 });
 
@@ -183,4 +222,3 @@ describe("getBetsByMarket", () => {
     expect(r2.bets[0].address).toBe("GADDR3");
   });
 });
-

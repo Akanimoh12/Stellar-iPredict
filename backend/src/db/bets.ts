@@ -138,6 +138,35 @@ export async function getBetsByBettor(
 }
 
 /**
+ * Fetch a page of bets placed by a specific bettor.
+ */
+export async function getBetsByBettorPaginated(
+  pool: Pool,
+  address: string,
+  page: number,
+  limit: number,
+): Promise<PaginatedBets> {
+  const offset = (page - 1) * limit;
+  const [{ rows: bets }, { rows: countRows }] = await Promise.all([
+    pool.query<BetRow>(
+      `SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
+         FROM bets
+        WHERE bettor = $1
+        ORDER BY created_at DESC, market_id DESC
+        LIMIT $2 OFFSET $3`,
+      [address, limit, offset],
+    ),
+    pool.query<{ total: number }>(
+      "SELECT COUNT(*)::INT AS total FROM bets WHERE bettor = $1",
+      [address],
+    ),
+  ]);
+
+  const total = Number(countRows[0]?.total ?? 0);
+  return { bets, total, page, limit, totalPages: Math.ceil(total / limit) };
+}
+
+/**
  * Return all bets across every market, each tagged with its market id.
  * Useful for cross-cutting aggregations (stats, admin reports, etc.).
  */

@@ -1,6 +1,7 @@
 import { REQUEST_ID_HEADER } from "./log.js";
 
-export interface FastifyErrorLike extends Error { statusCode?: number; code?: string }
+export interface AjvValidationIssue { instancePath?: string; message?: string; params?: Record<string, unknown> }
+export interface FastifyErrorLike extends Error { statusCode?: number; code?: string; validation?: AjvValidationIssue[] }
 export interface FastifyReplyLike { status(code: number): FastifyReplyLike; header(name: string, value: string): FastifyReplyLike; send(payload: unknown): unknown }
 export interface FastifyInstanceLike { setErrorHandler(handler: typeof errorHandler): void }
 export interface FastifyRequestLike { method: string; url: string; id?: string }
@@ -21,7 +22,22 @@ export const requestTimeout = (message = "Request timeout") => new HttpError(408
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
 export const payloadTooLarge = (message = "Payload too large") => new HttpError(413, "PAYLOAD_TOO_LARGE", message);
 
-export interface ErrorResponse { error: { code: string; message: string; requestId: string } }
+export interface ValidationDetail { field: string; message: string }
+export interface ErrorResponse { error: { code: string; message: string; requestId: string; details?: ValidationDetail[] } }
+
+/**
+ * Field-level detail for a Fastify/AJV schema validation failure (#879).
+ *
+ * `instancePath` is empty for a root-level failure such as a missing
+ * required property, where AJV names the field in `params` instead.
+ */
+function validationDetails(error: FastifyErrorLike): ValidationDetail[] | undefined {
+  if (!Array.isArray(error.validation) || error.validation.length === 0) return undefined;
+  return error.validation.map((issue) => ({
+    field: issue.instancePath ? issue.instancePath.slice(1) : String(issue.params?.missingProperty ?? "(body)"),
+    message: issue.message ?? "Invalid value",
+  }));
+}
 
 const DEPENDENCY_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004", "08006", "08007", "57P01"]);
 export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolean {
@@ -141,9 +157,20 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
 export function errorHandler(error: FastifyErrorLike, request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);
   const requestId = request.id ?? "unknown";
+  const details = validationDetails(error);
   if (mapped.statusCode === 503) reply.header("Retry-After", "5");
   reply.header(REQUEST_ID_HEADER, requestId);
-  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message, requestId } } satisfies ErrorResponse);
+  // RFC 7807 problem details (#880), with our existing `error` envelope kept
+  // intact as an extension member so current consumers of `error.code` /
+  // `error.message` / `error.requestId` are unaffected.
+  reply.header("Content-Type", "application/problem+json");
+  reply.status(mapped.statusCode).send({
+    type: "about:blank",
+    title: mapped.message,
+    status: mapped.statusCode,
+    instance: request.url,
+    error: { code: mapped.code, message: mapped.message, requestId, ...(details ? { details } : {}) },
+  } satisfies ErrorResponse & { type: string; title: string; status: number; instance: string });
 }
 
 export function registerErrorHandler(app: FastifyInstanceLike): void {

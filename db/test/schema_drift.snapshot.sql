@@ -328,7 +328,10 @@ CREATE TABLE schema_drift_check.bets (
  gross_amount numeric(30,7) NOT NULL,
  is_yes boolean NOT NULL,
  claimed boolean DEFAULT false NOT NULL,
- created_at timestamp without time zone DEFAULT now()
+ created_at timestamp without time zone DEFAULT now(),
+ CONSTRAINT ck_bets_gross_amount_nonnegative CHECK ((gross_amount >= (0)::numeric)),
+ CONSTRAINT ck_bets_net_amount_lte_gross CHECK ((net_amount <= gross_amount)),
+ CONSTRAINT ck_bets_net_amount_nonnegative CHECK ((net_amount >= (0)::numeric))
 );
 
 
@@ -720,7 +723,7 @@ CREATE TABLE schema_drift_check.oracle_submissions (
  submitter character(56) NOT NULL,
  outcome character varying(255) NOT NULL,
  bond_amount numeric NOT NULL,
- submitted_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+ submitted_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
  status schema_drift_check.oracle_submission_status DEFAULT 'submitted'::schema_drift_check.oracle_submission_status NOT NULL,
  decision character varying(255),
  tx_hash character(64),
@@ -731,6 +734,7 @@ CREATE TABLE schema_drift_check.oracle_submissions (
  updated_at timestamp with time zone DEFAULT now() NOT NULL,
  request_id text,
  CONSTRAINT chk_oracle_submissions_request_id CHECK (((request_id IS NULL) OR (request_id ~ '^[A-Za-z0-9._:-]{1,128}$'::text))),
+ CONSTRAINT ck_oracle_submissions_bond_nonnegative CHECK ((bond_amount >= (0)::numeric)),
  CONSTRAINT ck_oracle_submissions_outcome_canonical CHECK (((outcome)::text = ANY ((ARRAY['YES'::character varying, 'NO'::character varying])::text[]))),
  CONSTRAINT ck_oracle_submissions_submitter_address CHECK ((submitter ~ '^G[A-Z2-7]{55}$'::text))
 );

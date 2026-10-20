@@ -61,6 +61,10 @@ Stores each bettor’s position for a market. The table is keyed by `(market_id,
 Primary key:
 - `(market_id, bettor)`
 
+Constraints:
+- `market_id` references `markets.id` and is non-null as part of the primary key
+- `net_amount` and `gross_amount` are nonnegative, and `net_amount` cannot exceed `gross_amount`
+
 Index:
 - `idx_bets_bettor_created_at` on `(bettor, created_at DESC)` for bettor history
 - `idx_bets_market_created_at` on `(market_id, created_at DESC)` for market bet pages
@@ -79,6 +83,11 @@ are explicitly frozen in `migration-names.ts`: applied migrations are tracked
 by filename, so renaming a historical file could replay its DDL on an existing
 deployment. Do not rename or renumber an applied migration; add the next
 sequential migration instead.
+
+`0029_markets_sort_indexes.sql` is retained for checksum and rollback
+compatibility with deployments that already applied it. Its duplicate index
+DDL is skipped on fresh installs because `0028_markets_sort_indexes.sql`
+already creates those idempotent indexes.
 
 ### `leaderboard`
 
@@ -197,7 +206,7 @@ Tracks oracle submissions for dispute and resolution workflows.
 | `submitter` | `CHAR(56)` | Wallet address of the submitter; `CHECK` enforces the Stellar public-key shape (#408) |
 | `outcome` | `VARCHAR(255)` | Proposed outcome; `CHECK (outcome IN ('YES','NO'))` (#650) |
 | `bond_amount` | `NUMERIC` | Bond attached to the submission |
-| `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
+| `submitted_at` | `TIMESTAMP WITH TIME ZONE NOT NULL` | Submission timestamp |
 | `status` | `oracle_submission_status` | Lifecycle state: `submitted`, `challenged`, `finalized`, or `rejected` |
 | `decision` | `VARCHAR(255)` | Finalized decision (`yes`/`no`) |
 | `tx_hash` | `CHAR(64)` | Finalization transaction hash |
@@ -212,6 +221,7 @@ maintained by the shared database trigger.
 
 `market_id` was widened from `INTEGER` to `BIGINT` in migration `0021` so it
 can carry a foreign key to `markets.id` (also `BIGINT`) — see below.
+`bond_amount` is constrained to nonnegative values.
 
 ### `oracle_disputes`
 
@@ -233,6 +243,10 @@ Stores the bond and escalation details for challenged submissions.
 | `council_deadline` | `TIMESTAMPTZ` | Council decision deadline |
 | `created_at` | `TIMESTAMPTZ` | Row creation time |
 | `updated_at` | `TIMESTAMPTZ` | Last update time, set by trigger |
+
+Bond amounts are constrained to be positive, with the challenger bond strictly
+greater than the submitter bond. `total_bond` is generated from the two bond
+columns.
 
 ### Oracle relationships and lifecycle
 

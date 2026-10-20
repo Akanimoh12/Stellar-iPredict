@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { Client } from 'pg';
-import { LEGACY_MIGRATION_GROUPS } from './migration-names.js';
+import { LEGACY_MIGRATION_GROUPS, REDUNDANT_MIGRATIONS } from './migration-names.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -175,6 +175,12 @@ export async function runMigrations(
         } else {
           console.log(`Skipping ${file} (already applied)`);
         }
+        continue;
+      }
+
+      const duplicateOf = REDUNDANT_MIGRATIONS[file];
+      if (duplicateOf) {
+        console.log(`Skipping ${file}; its DDL is already applied by ${duplicateOf}.`);
         continue;
       }
 

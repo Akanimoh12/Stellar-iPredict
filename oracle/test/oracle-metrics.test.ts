@@ -47,7 +47,7 @@ function fakePool(tables: FakeTables, onQuery?: (sql: string, params?: unknown[]
       if (sql.includes("COUNT(*)") && sql.includes("oracle_disputes")) {
         return { rows: [{ count: String(tables.disputes ?? 0) }] as unknown as T[] };
       }
-      if (sql.includes("finalized_at")) {
+      if (sql.includes("oracle_resolution_lag")) {
         const rows = (tables.lag ?? []).slice(0, Number(params?.[0] ?? Infinity));
         return { rows: rows as unknown as T[] };
       }
@@ -122,7 +122,7 @@ describe("oracle metrics collector", () => {
         ],
       },
       (sql, params) => {
-        if (sql.includes("finalized_at")) limit = params?.[0];
+        if (sql.includes("oracle_resolution_lag")) limit = params?.[0];
       },
     );
 

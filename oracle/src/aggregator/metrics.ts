@@ -19,6 +19,25 @@
  */
 
 import { createServer, type Server } from "node:http";
+import type { QueryablePool } from "./tally.js";
+
+export interface ResolutionMetricStore {
+  recordResolution(entry: ResolutionLagEntry): Promise<void>;
+}
+
+/** Creates the durable resolution observation writer used after finalization. */
+export function createPostgresResolutionMetricStore(pool: QueryablePool): ResolutionMetricStore {
+  return {
+    async recordResolution(entry) {
+      await pool.query(
+        `INSERT INTO oracle_resolution_lag (market_id, end_time, resolved_at_epoch, lag_hours)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (market_id) DO NOTHING`,
+        [entry.marketId, entry.endTime, entry.resolvedAt, entry.lagHours],
+      );
+    },
+  };
+}
 
 /**
  * Meaningful histogram bucket boundaries in hours for oracle resolution lag (#450).

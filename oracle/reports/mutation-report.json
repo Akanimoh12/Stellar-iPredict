@@ -1,0 +1,402 @@
+{
+  "generatedAt": "2026-09-29T18:04:15.116Z",
+  "targetScore": 90,
+  "score": 96,
+  "total": 28,
+  "killed": 27,
+  "survived": 1,
+  "results": [
+    {
+      "mutant": {
+        "id": "TH-01",
+        "category": "boundary",
+        "description": "Relax non-positive threshold check from <= 0 to < 0 (permits threshold 0)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "threshold <= 0",
+        "replace": "threshold < 0"
+      },
+      "status": "killed",
+      "durationMs": 7855,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 64\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES r"
+    },
+    {
+      "mutant": {
+        "id": "TH-02",
+        "category": "conditional",
+        "description": "Bypass integer check on threshold (permits floats)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "!Number.isInteger(threshold)",
+        "replace": "false"
+      },
+      "status": "killed",
+      "durationMs": 7602,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 42\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES r"
+    },
+    {
+      "mutant": {
+        "id": "TH-03",
+        "category": "statement",
+        "description": "Do not trim member identifiers",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const member = vote.member.trim();",
+        "replace": "const member = vote.member;"
+      },
+      "status": "killed",
+      "durationMs": 6065,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 53\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES r"
+    },
+    {
+      "mutant": {
+        "id": "TH-04",
+        "category": "conditional",
+        "description": "Allow blank member identifiers into vote map",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "if (member) votesByMember.set(member, vote.outcome);",
+        "replace": "votesByMember.set(member, vote.outcome);"
+      },
+      "status": "survived",
+      "durationMs": 8066,
+      "outputSnippet": ""
+    },
+    {
+      "mutant": {
+        "id": "TH-05",
+        "category": "arithmetic",
+        "description": "Invert tally counter increment logic (increment no on outcome true)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "if (outcome) yes += 1;",
+        "replace": "if (outcome) no += 1;"
+      },
+      "status": "killed",
+      "durationMs": 6037,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m9 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 74\u001b[2mms\u001b[22m\u001b[39m\n\u001b[31m   \u001b[31m×\u001b[31m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when "
+    },
+    {
+      "mutant": {
+        "id": "TH-06",
+        "category": "boundary",
+        "description": "Mutate yes threshold boundary from >= to > (strictly greater)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const yesReached = yes >= threshold;",
+        "replace": "const yesReached = yes > threshold;"
+      },
+      "status": "killed",
+      "durationMs": 7906,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m7 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 60\u001b[2mms\u001b[22m\u001b[39m\n\u001b[31m   \u001b[31m×\u001b[31m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when "
+    },
+    {
+      "mutant": {
+        "id": "TH-07",
+        "category": "boundary",
+        "description": "Mutate yes threshold boundary from >= to === (exact match only)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const yesReached = yes >= threshold;",
+        "replace": "const yesReached = yes === threshold;"
+      },
+      "status": "killed",
+      "durationMs": 7083,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 62\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES r"
+    },
+    {
+      "mutant": {
+        "id": "TH-08",
+        "category": "boundary",
+        "description": "Mutate no threshold boundary from >= to > (strictly greater)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const noReached = no >= threshold;",
+        "replace": "const noReached = no > threshold;"
+      },
+      "status": "killed",
+      "durationMs": 7751,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m4 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 47\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES r"
+    },
+    {
+      "mutant": {
+        "id": "TH-09",
+        "category": "boundary",
+        "description": "Mutate no threshold boundary from >= to === (exact match only)",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const noReached = no >= threshold;",
+        "replace": "const noReached = no === threshold;"
+      },
+      "status": "killed",
+      "durationMs": 14764,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 127\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES "
+    },
+    {
+      "mutant": {
+        "id": "TH-10",
+        "category": "logical",
+        "description": "Mutate ambiguity condition from yesReached === noReached to yesReached && noReached",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const ambiguous = yesReached === noReached;",
+        "replace": "const ambiguous = yesReached && noReached;"
+      },
+      "status": "killed",
+      "durationMs": 20098,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m5 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 279\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when YES "
+    },
+    {
+      "mutant": {
+        "id": "TH-11",
+        "category": "conditional",
+        "description": "Invert ternary selection: return yesReached on ambiguous and null on unambiguous",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "const result = ambiguous ? null : yesReached;",
+        "replace": "const result = ambiguous ? yesReached : null;"
+      },
+      "status": "killed",
+      "durationMs": 10689,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/threshold.test.ts \u001b[2m(\u001b[22m\u001b[2m18 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m14 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 66\u001b[2mms\u001b[22m\u001b[39m\n\u001b[31m   \u001b[31m×\u001b[31m selectThresholdOutcome\u001b[2m > \u001b[22mreturns true when"
+    },
+    {
+      "mutant": {
+        "id": "TH-12",
+        "category": "statement",
+        "description": "Omit logging vote tally details",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "logger?.info(\"vote tally\", {",
+        "replace": "if (false) logger?.info(\"vote tally\", {"
+      },
+      "status": "killed",
+      "durationMs": 21512,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "TH-13",
+        "category": "assignment",
+        "description": "Remove null fallback for undefined marketId in logger payload",
+        "file": "src/aggregator/threshold.ts",
+        "testFile": "test/threshold.test.ts",
+        "find": "marketId: marketId ?? null,",
+        "replace": "marketId: marketId,"
+      },
+      "status": "killed",
+      "durationMs": 20527,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-01",
+        "category": "conditional",
+        "description": "Invert settlement membership check in reconcileBonds (!settled -> settled)",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "if (!settledMarkets.has(sub.marketId)) {",
+        "replace": "if (settledMarkets.has(sub.marketId)) {"
+      },
+      "status": "killed",
+      "durationMs": 20097,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-02",
+        "category": "assignment",
+        "description": "Zero out expectedAmount in discrepancies",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "expectedAmount: sub.bondAmount,",
+        "replace": "expectedAmount: 0n,"
+      },
+      "status": "killed",
+      "durationMs": 20667,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-03",
+        "category": "assignment",
+        "description": "Blank submitter in discrepancies",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "submitter: sub.submitter,",
+        "replace": "submitter: \"\","
+      },
+      "status": "killed",
+      "durationMs": 20868,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-04",
+        "category": "assignment",
+        "description": "Hardcode discrepancy status to finalized (ignoring cancelled/expired)",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "status: sub.status,",
+        "replace": "status: \"finalized\","
+      },
+      "status": "killed",
+      "durationMs": 16835,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m2 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 52\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-05",
+        "category": "assignment",
+        "description": "Corrupt finalizedAt date in discrepancies",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "finalizedAt: sub.finalizedAt,",
+        "replace": "finalizedAt: new Date(0),"
+      },
+      "status": "killed",
+      "durationMs": 8211,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 62\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-06",
+        "category": "statement",
+        "description": "Do not execute onDiscrepancy callback in runBondReconciliation",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "await onDiscrepancy(d);",
+        "replace": "// await onDiscrepancy(d);"
+      },
+      "status": "killed",
+      "durationMs": 11008,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 80\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-07",
+        "category": "statement",
+        "description": "Omit discrepancy warning log in runBondReconciliation",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "logger?.warn(\"bond refund discrepancy detected\", {",
+        "replace": "if (false) logger?.warn(\"bond refund discrepancy detected\", {"
+      },
+      "status": "killed",
+      "durationMs": 13616,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 84\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-08",
+        "category": "statement",
+        "description": "Omit completion info log in runBondReconciliation",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "logger?.info(\"bond reconciliation complete\", {",
+        "replace": "if (false) logger?.info(\"bond reconciliation complete\", {"
+      },
+      "status": "killed",
+      "durationMs": 20485,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-09",
+        "category": "conditional",
+        "description": "Mutate recordSettlement return logic to always return true (bypassing conflict detection)",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "return (result.rows.length ?? 0) > 0;",
+        "replace": "return true;"
+      },
+      "status": "killed",
+      "durationMs": 20134,
+      "outputSnippet": "spawnSync C:\\Windows\\system32\\cmd.exe ETIMEDOUT"
+    },
+    {
+      "mutant": {
+        "id": "BR-10",
+        "category": "conditional",
+        "description": "Mutate recordSettlement return logic to always return false",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "return (result.rows.length ?? 0) > 0;",
+        "replace": "return false;"
+      },
+      "status": "killed",
+      "durationMs": 13657,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 81\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-11",
+        "category": "assignment",
+        "description": "Swap marketId and recipient parameter bindings in recordSettlement query",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "[input.marketId, input.recipient, String(input.settledAmountStroops)]",
+        "replace": "[input.recipient, input.marketId, String(input.settledAmountStroops)]"
+      },
+      "status": "killed",
+      "durationMs": 21168,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n"
+    },
+    {
+      "mutant": {
+        "id": "BR-12",
+        "category": "assignment",
+        "description": "Bind zero string for amount in recordSettlement query",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "String(input.settledAmountStroops)",
+        "replace": "\"0\""
+      },
+      "status": "killed",
+      "durationMs": 19149,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 51\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-13",
+        "category": "assignment",
+        "description": "Zero out checkedCount in runBondReconciliation summary result",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "checkedCount: submissions.length,",
+        "replace": "checkedCount: 0,"
+      },
+      "status": "killed",
+      "durationMs": 6261,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 56\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-14",
+        "category": "assignment",
+        "description": "Zero out settledCount in runBondReconciliation summary result",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "settledCount: settlements.length,",
+        "replace": "settledCount: 0,"
+      },
+      "status": "killed",
+      "durationMs": 15053,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 69\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    },
+    {
+      "mutant": {
+        "id": "BR-15",
+        "category": "conditional",
+        "description": "Narrow SQL status filter in oracle_submissions query to only finalized",
+        "file": "src/aggregator/bond-reconciliation.ts",
+        "testFile": "test/bond-reconciliation.test.ts",
+        "find": "WHERE status IN ('finalized', 'cancelled', 'expired')",
+        "replace": "WHERE status IN ('finalized')"
+      },
+      "status": "killed",
+      "durationMs": 16871,
+      "outputSnippet": "\n\u001b[1m\u001b[46m RUN \u001b[49m\u001b[22m \u001b[36mv3.2.7 \u001b[39m\u001b[90mC:/Users/HP/oss-place/Stellar-iPredict/oracle\u001b[39m\n\n \u001b[31m❯\u001b[39m test/bond-reconciliation.test.ts \u001b[2m(\u001b[22m\u001b[2m11 tests\u001b[22m\u001b[2m | \u001b[22m\u001b[31m1 failed\u001b[39m\u001b[2m)\u001b[22m\u001b[32m 57\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[32m✓\u001b[39m reconcileBonds\u001b[2m > \u001b[22mreturns empty array w"
+    }
+  ]
+}

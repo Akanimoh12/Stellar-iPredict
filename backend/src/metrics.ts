@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { serializeCacheMetrics } from "./cache/hitRate.js";
+import { serializeNegativeCacheMetrics } from "./cache/negativeCache.js";
+import { serializeOracleAuthFailureMetrics } from "./lib/oracleAuthFailures.js";
 
 /**
  * Request-duration histogram — issue #87
@@ -130,6 +132,35 @@ function statusKey(label: string, statusCode: number): string {
  * the query resolved (see db/pool.ts `queryWithCancel`).
  */
 const abandonedQueryRegistry = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Database query histogram — database load (db_query_duration_ms)
+// ---------------------------------------------------------------------------
+
+/**
+ * Duration of every statement executed through the shared Postgres pool.
+ *
+ * This is the "database load" half of the cache/DB correlation: when the hit
+ * rate for a namespace falls, `rate(db_query_duration_ms_count[...])` is what
+ * rises, because every miss that the cache cannot absorb becomes a query.
+ * `docs/ORACLE_AND_BACKEND.md#monitoring` lists it as a canonical metric and
+ * the `DatabaseSlow` alert already reads its buckets, so until now that alert
+ * had no series to evaluate.
+ *
+ * It gets its own histogram rather than a route label on the API histogram:
+ * a database query is not a request, and the bucket ladder that makes sense
+ * for HTTP responses (mostly <100 ms) is not the one that makes sense for SQL.
+ */
+let dbQueryHistogram: HistogramEntry = newDbQueryEntry();
+
+function newDbQueryEntry(): HistogramEntry {
+  return {
+    buckets: DEFAULT_BUCKETS,
+    counts: new Array<number>(DEFAULT_BUCKETS.length).fill(0),
+    sum: 0,
+    count: 0,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -363,6 +394,69 @@ export function resetAbandonedQueryCounts(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Database query histogram API
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one completed database query.
+ *
+ * @param durationMs Wall-clock time of the statement, in milliseconds.
+ *                   A query that throws still cost the round trip, so
+ *                   callers record in a `finally`.
+ */
+export function observeDbQuery(durationMs: number): void {
+  const idx = dbQueryHistogram.buckets.findIndex((b) => durationMs <= b);
+  const bucketIdx = idx === -1 ? dbQueryHistogram.counts.length - 1 : idx;
+  dbQueryHistogram.counts[bucketIdx]!++;
+  dbQueryHistogram.sum += durationMs;
+  dbQueryHistogram.count++;
+}
+
+/**
+ * Snapshot of the database query histogram.
+ *
+ * Uses the route label `"db"` so it can reuse {@link HistogramSnapshot};
+ * there is only ever one of these, so the label carries no information and
+ * is not exported as a Prometheus label.
+ */
+export function getDbQueryHistogram(): HistogramSnapshot {
+  return snapshotEntry("db", dbQueryHistogram)!;
+}
+
+/** Reset the database query histogram. Useful in tests. */
+export function resetDbQueryHistogram(): void {
+  dbQueryHistogram = newDbQueryEntry();
+}
+
+/**
+ * Serialize the database query histogram in Prometheus text exposition format.
+ *
+ * Emitted unconditionally, including before the first query: a series that
+ * only appears once traffic arrives is one the `DatabaseSlow` alert cannot
+ * evaluate and no dashboard panel can be built against.
+ */
+export function serializeDbQueryMetrics(): string {
+  const snapshot = getDbQueryHistogram();
+  const cumulative = cumulativeCounts(snapshot.counts);
+
+  const lines = [
+    "# HELP db_query_duration_ms Duration of statements executed through the shared Postgres pool, in milliseconds",
+    "# TYPE db_query_duration_ms histogram",
+  ];
+
+  for (let i = 0; i < snapshot.buckets.length; i++) {
+    const le = snapshot.buckets[i];
+    const leStr = le === Infinity ? "+Inf" : String(le);
+    lines.push(`db_query_duration_ms_bucket{le="${leStr}"} ${cumulative[i]}`);
+  }
+
+  lines.push(`db_query_duration_ms_sum ${snapshot.sum}`);
+  lines.push(`db_query_duration_ms_count ${snapshot.count}`);
+
+  return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -458,10 +552,23 @@ export function serializeMetrics(): string {
     }
   }
 
-  // Cache hit rate (issue #214). Always emitted, even before the first
-  // lookup — a series that only appears once traffic arrives is a series
-  // nobody can build a dashboard panel against.
-  return lines.join("\n") + "\n" + serializeCacheMetrics();
+  // Oracle authentication-failure telemetry (issue #576). Always emitted, so
+  // the alert expressions and the dashboard panels exist before the incident.
+  const oracleAuth = serializeOracleAuthFailureMetrics();
+
+  // Cache hit rate (issue #214), negative-cache hit rate, and database query
+  // duration. All always emitted, even before the first lookup or query — a
+  // series that only appears once traffic arrives is a series nobody can
+  // build a dashboard panel or an alert against.
+  return [
+    lines.join("\n"),
+    oracleAuth,
+    serializeCacheMetrics(),
+    serializeNegativeCacheMetrics(),
+    serializeDbQueryMetrics(),
+  ]
+    .map((block) => block.replace(/\n+$/, ""))
+    .join("\n") + "\n";
 }
 
 /**
@@ -470,10 +577,14 @@ export function serializeMetrics(): string {
  * The pool module is imported lazily so that loading the metrics serialiser
  * never forces a `DATABASE_URL`/pool to be created in tests or other contexts
  * that never touch the metrics endpoint.
+ *
+ * `db_pool_connections_max` is the configured ceiling, so saturation reads as
+ * `total / max` on a dashboard. Query latency is exported separately as the
+ * `db_query_duration_ms` histogram (see {@link serializeDbQueryMetrics}).
  */
 export async function serializePoolMetrics(): Promise<string> {
   const { getPoolMetrics } = await import("./db/pool.js");
-  const { total, idle, waiting } = getPoolMetrics();
+  const { total, idle, waiting, max } = getPoolMetrics();
 
   return [
     "# HELP db_pool_connections Database connection pool occupancy",
@@ -481,6 +592,9 @@ export async function serializePoolMetrics(): Promise<string> {
     `db_pool_connections_total ${total}`,
     `db_pool_connections_idle ${idle}`,
     `db_pool_connections_waiting ${waiting}`,
+    "# HELP db_pool_connections_max Configured maximum size of the database connection pool",
+    "# TYPE db_pool_connections_max gauge",
+    `db_pool_connections_max ${max}`,
   ].join("\n");
 }
 

@@ -57,6 +57,24 @@ describe("MarketQueryMappingStore", () => {
     expect(() => validateMarketQueryMapping({ marketId: "market-1", date: "not-a-date" })).toThrow(/date/);
   });
 
+  it("normalizes date-only and timezone-offset dates to UTC", () => {
+    expect(validateMarketQueryMapping({ marketId: "date-only", date: "2026-04-02" }).date)
+      .toBe("2026-04-02T00:00:00.000Z");
+    expect(validateMarketQueryMapping({
+      marketId: "offset-date",
+      date: "2026-04-02T09:30:00+05:30",
+    }).date).toBe("2026-04-02T04:00:00.000Z");
+  });
+
+  it("rejects timezone-naive date-times and invalid calendar dates", () => {
+    expect(() =>
+      validateMarketQueryMapping({ marketId: "naive-date", date: "2026-04-02T09:30:00" }),
+    ).toThrow(/timezone-qualified/);
+    expect(() =>
+      validateMarketQueryMapping({ marketId: "invalid-date", date: "2026-02-30" }),
+    ).toThrow(/timezone-qualified/);
+  });
+
   it("lists mappings in insertion order and removes them by market id", () => {
     const store = new MarketQueryMappingStore();
     store.set(BTC_FIXTURE);

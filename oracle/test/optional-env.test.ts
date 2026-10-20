@@ -35,6 +35,11 @@ describe("a .env file with blank optionals", () => {
   });
 
   it("starts the monitor with no alert webhook", () => {
-    expect(loadMonitorConfig({ ...shared, ALERT_WEBHOOK_URL: "" }).ALERT_WEBHOOK_URL).toBeUndefined();
+    expect(loadMonitorConfig({
+      ...shared,
+      HOURLY_BOND_SPEND_LIMIT_XLM: "1000",
+      BOND_SPEND_ALERT_THRESHOLD_PERCENT: "80",
+      ALERT_WEBHOOK_URL: "",
+    }).ALERT_WEBHOOK_URL).toBeUndefined();
   });
 });

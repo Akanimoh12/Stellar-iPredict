@@ -1,19 +1,164 @@
-import { Networks, rpc } from "@stellar/stellar-sdk";
-import { Pool } from "pg";
-import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
-import { createLogger, type Logger } from "../log.js";
-import {
-  loadOracleMetricsConfig,
-  startOracleMetrics,
-  type OracleMetricsRuntime,
-} from "../metrics/index.js";
-import { createWebhookAlertSender } from "./alert.js";
-import { createPostgresSubmissionStore, computeTally } from "./tally.js";
-import { selectThresholdOutcome } from "./threshold.js";
-import { assertCanFinalize, createBalancedValidationConfig } from "./submission-validator.js";
-import { finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
+/**
+ * Oracle Aggregator Public Module API
+ *
+ * This barrel module groups aggregator exports by domain concern:
+ * - Runner: Aggregator loop and worker process lifecycle (`./runner.js`)
+ * - Governance: Council config, votes, audits, and inactivity monitoring (`./governance.js`)
+ * - Bonds: Bond minimum monitoring, reconciliations, and dashboards (`./bonds.js`)
+ * - Settlement: Decision finalization, on-chain/off-chain submitters, notifications (`./settlement.js`)
+ * - Watchers: Submission, dispute, conflict, and stuck market detection (`./watchers.js`)
+ * - Metrics & Health: Observability, Prometheus metrics, and health checks (`./metrics.js`, `./health.js`)
+ *
+ * Consumers needing narrow imports can import directly from sub-modules (e.g. `./runner.js`, `./governance.js`)
+ * to avoid pulling in heavy transitive dependencies like `@stellar/stellar-sdk` or `pg`.
+ */
 
+// ── Aggregator Runner & Lifecycle ───────────────────────────────────────────
+export {
+  runAggregator,
+  startAggregator,
+  createProductionDependencies,
+  systemClock,
+  ShutdownGracePeriodExceededError,
+  type AggregatorMarket,
+  type ProcessMarketContext,
+  type AggregatorDependencies,
+  type AggregatorClock,
+  type RunAggregatorOptions,
+} from "./runner.js";
 
+// ── Governance & Council ────────────────────────────────────────────────────
+export {
+  loadCouncilConfig,
+  isCouncilMember,
+  describeCouncilConfig,
+  hasQuorum,
+  meetsThreshold,
+  compareCouncilResolvers,
+  COUNCIL_SIZE,
+  COUNCIL_DEFAULT_THRESHOLD,
+  CouncilVoteManager,
+  buildAuditRecord,
+  collectCouncilAudit,
+  exportCouncilAudit,
+  toAuditCsv,
+  toAuditJson,
+  checkCouncilInactivity,
+  checkCouncilInactivityFromDb,
+  checkCouncilWindowExceeded,
+  checkCouncilWindowExceededFromDb,
+  checkCouncilNoVotesBeforeDeadline,
+  checkCouncilNoVotesBeforeDeadlineFromDb,
+  type CouncilConfig,
+  type CouncilResolverReport,
+  type AuditFormat,
+  type CouncilAuditInput,
+  type CouncilAuditRecord,
+  type CouncilInactivityAlert,
+  type CouncilWindowExceededAlert,
+  type CouncilNoVotesPageAlert,
+  type CouncilNoVotesPageOptions,
+  type CouncilInactivityMonitorOptions,
+  type EscalatedMarketRecord,
+} from "./governance.js";
+
+// ── Bonds & Reconciliation ──────────────────────────────────────────────────
+export {
+  assertBondSpendWithinHourlyLimit,
+  checkBondSpendFromDb,
+  checkBondMinimum,
+  checkBondMinimumFromDb,
+  BondSpendLimitExceededError,
+  getBondDashboardData,
+  reconcileBonds,
+  runBondReconciliation,
+  recordSettlement,
+  type BondAlert,
+  type BondSpendLimitOptions,
+  type BondSpendStatus,
+  type BondMonitorOptions,
+  type OracleSubmissionRecord,
+  type BondDashboardData,
+  type BondRefundDiscrepancy,
+  type BondReconciliationOptions,
+  type BondReconciliationResult,
+  type BondSettlement,
+  type RecordSettlementInput,
+  type TerminalSubmission,
+} from "./bonds.js";
+
+// ── Settlement, Submissions & Finalization ──────────────────────────────────
+export {
+  MarketAlreadyFinalizedError,
+  finalizeMarketDecision,
+  queryMarketState,
+  queryRegisteredResolvers,
+  resolveMarketOnChain,
+  createStellarSubmitter,
+  OffChainSubmitterService,
+  notifyFinalized,
+  createPostgresNotificationStore,
+  failedWebhookNotificationsTableSql,
+  computeTally,
+  createPostgresSubmissionStore,
+  SubmissionTracker,
+  selectThresholdOutcome,
+  type OnChainSubmitter,
+  type ResolveMarketResult,
+  type DataAdapter,
+  type OffChainSubmitterOptions,
+  type OffChainSubmitterStore,
+  type SubmittedOutcomeResult,
+  type FinalizeNotification,
+  type FinalizeNotifierOptions,
+  type MarketTally,
+  type SubmissionStore,
+} from "./settlement.js";
+
+// ── Watchers, Integrity & Dispute Escalations ───────────────────────────────
+export {
+  detectConflict,
+  detectStuckMarket,
+  detectStuckMarkets,
+  ResolverKeyManager,
+  ChallengeBot,
+  startChallengeBot,
+  detectNewSubmissions,
+  SubmissionWatcher,
+  detectDisputeEscalations,
+  DisputeEscalationWatcher,
+  loadCategoryResolverConfig,
+  getResolversForCategory,
+  isAuthorizedResolverForCategory,
+  describeCategoryResolverConfig,
+  MARKET_CATEGORIES,
+  validateSubmissionData,
+  assertCanFinalize,
+  createDefaultValidationConfig,
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type ConflictReport,
+  type StuckMarketAlert,
+  type StuckMarketInput,
+  type ChallengeBotOptions,
+  type OracleSubmission,
+  type ChallengeDecision,
+  type ChallengeResult,
+  type DetectNewSubmissionsResult,
+  type NewSubmissionAlert,
+  type SubmissionRecord,
+  type SubmissionWatcherOptions,
+  type DetectDisputeEscalationsResult,
+  type DisputeEscalationAlert,
+  type DisputeEscalationRecord,
+  type DisputeEscalationWatcherOptions,
+  type CategoryResolverConfig,
+  type MarketCategory,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./watchers.js";
+
+// ── Metrics & Health ────────────────────────────────────────────────────────
 export {
   OracleMetricsCollector,
   OracleMetricsServer,
@@ -28,526 +173,21 @@ export {
   type ResolutionLagSample,
 } from "../metrics/index.js";
 
-export { detectConflict, type ConflictReport } from "./conflict-detection.js";
-export {
-  buildAuditRecord,
-  collectCouncilAudit,
-  exportCouncilAudit,
-  toAuditCsv,
-  toAuditJson,
-  type AuditFormat,
-  type CouncilAuditInput,
-  type CouncilAuditRecord,
-} from "./council-audit.js";
-export {
-  notifyFinalized,
-  type FinalizeNotification,
-  type FinalizeNotifierOptions,
-} from "./finalize-notifier.js";
-export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
-export { ResolverKeyManager } from "./key-rotation.js";
 export {
   AggregatorMetrics,
   AggregatorMetricsServer,
   DEFAULT_LAG_BUCKETS_HOURS,
   ORACLE_RESOLUTION_LAG_H_METRIC,
+  createPostgresResolutionMetricStore,
   type AggregatorMetricsServerOptions,
   type AggregatorMetricsSnapshot,
   type NamedMetric,
   type ResolutionLagEntry,
 } from "./metrics.js";
-export {
-  computeTally,
-  createPostgresSubmissionStore,
-  SubmissionTracker,
-  type MarketTally,
-  type SubmissionStore,
-} from "./tally.js";
-export {
-  loadCouncilConfig,
-  isCouncilMember,
-  describeCouncilConfig,
-  hasQuorum,
-  meetsThreshold,
-  COUNCIL_SIZE,
-  COUNCIL_DEFAULT_THRESHOLD,
-  type CouncilConfig,
-} from "../config/council.js";
-export {
-  resolveMarketOnChain,
-  createStellarSubmitter,
-  type OnChainSubmitter,
-  type ResolveMarketResult,
-} from "../submitter/resolveMarket.js";
-export { CouncilVoteManager } from "./council-votes.js";
-export { MarketAlreadyFinalizedError, finalizeMarketDecision, queryMarketState } from "./market-finalizer.js";
 
 export {
-  OffChainSubmitterService,
-  type DataAdapter,
-  type OffChainSubmitterOptions,
-  type OffChainSubmitterStore,
-  type SubmittedOutcomeResult,
-} from "../submitter/offChainSubmitter.js";
-export {
-  checkBondMinimum,
-  checkBondMinimumFromDb,
-  type BondAlert,
-  type BondMonitorOptions,
-  type OracleSubmissionRecord,
-} from "./bond-monitor.js";
-export {
-  getBondDashboardData,
-  type BondDashboardData,
-} from "./dashboard.js";
-export {
-  reconcileBonds,
-  runBondReconciliation,
-  recordSettlement,
-  type BondRefundDiscrepancy,
-  type BondReconciliationOptions,
-  type BondReconciliationResult,
-  type BondSettlement,
-  type RecordSettlementInput,
-  type TerminalSubmission,
-} from "./bond-reconciliation.js";
-export {
-  checkCouncilInactivity,
-  checkCouncilInactivityFromDb,
-  checkCouncilWindowExceeded,
-  checkCouncilWindowExceededFromDb,
-  type CouncilInactivityAlert,
-  type CouncilWindowExceededAlert,
-  type CouncilInactivityMonitorOptions,
-  type EscalatedMarketRecord,
-} from "./council-inactivity-monitor.js";
-export { ChallengeBot, startChallengeBot, type ChallengeBotOptions, type OracleSubmission, type ChallengeDecision, type ChallengeResult } from "./challenge-bot.js";
-export {
-  detectNewSubmissions,
-  SubmissionWatcher,
-  type DetectNewSubmissionsResult,
-  type NewSubmissionAlert,
-  type SubmissionRecord,
-  type SubmissionWatcherOptions,
-} from "./submission-watcher.js";
-export {
-  detectDisputeEscalations,
-  DisputeEscalationWatcher,
-  type DetectDisputeEscalationsResult,
-  type DisputeEscalationAlert,
-  type DisputeEscalationRecord,
-  type DisputeEscalationWatcherOptions,
-} from "./dispute-escalation-watcher.js";
-export {
-  loadCategoryResolverConfig,
-  getResolversForCategory,
-  isAuthorizedResolverForCategory,
-  describeCategoryResolverConfig,
-  type CategoryResolverConfig,
-  type MarketCategory,
-  MARKET_CATEGORIES,
-} from "./category-resolvers.js";
-export {
-  validateSubmissionData,
-  assertCanFinalize,
-  createDefaultValidationConfig,
-  createStrictValidationConfig,
-  createBalancedValidationConfig,
-  type SubmissionValidationResult,
-  type SubmissionValidationConfig,
-} from "./submission-validator.js";
-
-import {
   AggregatorHealthServer,
   type AggregatorHealthServerOptions,
   type DependencyCheckResult,
   type ReadinessCheckResult,
 } from "./health.js";
-
-export {
-  AggregatorHealthServer,
-  type AggregatorHealthServerOptions,
-  type DependencyCheckResult,
-  type ReadinessCheckResult,
-};
-
-export interface AggregatorMarket { id: string; cancelled: boolean; }
-export interface AggregatorDependencies {
-  connect(): Promise<void>;
-  listExpiredUnresolvedMarkets(now: Date, limit?: number, offset?: number): Promise<AggregatorMarket[]>;
-  getBacklogDepth?(now: Date): Promise<number>;
-  checkReadiness?(): Promise<{ db: { ok: boolean; latencyMs?: number; error?: string }; rpc: { ok: boolean; latencyMs?: number; error?: string } }>;
-  processMarket(market: AggregatorMarket): Promise<void>;
-  close(): Promise<void>;
-}
-
-export function createProductionDependencies(
-  config: AggregatorConfig,
-  logger: Logger = createLogger({ level: config.LOG_LEVEL }),
-  overrides: { database?: Pool; server?: rpc.Server } = {},
-): AggregatorDependencies {
-  const database = overrides.database ?? new Pool({ connectionString: config.DATABASE_URL });
-  const server = overrides.server ?? new rpc.Server(config.SOROBAN_RPC_URL);
-  const submissionStore = createPostgresSubmissionStore(database);
-  const networkPassphrase = config.NETWORK_PASSPHRASE ?? Networks.TESTNET;
-  return {
-    async connect() {
-      await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
-      logger.info("aggregator connected", { rpcUrl: config.SOROBAN_RPC_URL });
-    },
-    async listExpiredUnresolvedMarkets(now, limit, offset = 0) {
-      if (limit !== undefined && limit > 0) {
-        const result = await database.query<AggregatorMarket>(
-          `SELECT id::text, cancelled FROM markets
-           WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
-           ORDER BY end_time ASC, id ASC
-           LIMIT $2 OFFSET $3`,
-          [Math.floor(now.getTime() / 1_000), limit, offset],
-        );
-        return result.rows;
-      }
-      const result = await database.query<AggregatorMarket>(
-        `SELECT id::text, cancelled FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
-         ORDER BY end_time ASC, id ASC`,
-        [Math.floor(now.getTime() / 1_000)],
-      );
-      return result.rows;
-    },
-    async getBacklogDepth(now) {
-      const result = await database.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE`,
-        [Math.floor(now.getTime() / 1_000)],
-      );
-      return parseInt(result.rows[0]?.count ?? "0", 10);
-    },
-    async checkReadiness() {
-      const startDb = Date.now();
-      let dbRes: { ok: boolean; latencyMs?: number; error?: string };
-      try {
-        await database.query("SELECT 1");
-        dbRes = { ok: true, latencyMs: Date.now() - startDb };
-      } catch (err) {
-        dbRes = { ok: false, latencyMs: Date.now() - startDb, error: err instanceof Error ? err.message : String(err) };
-      }
-
-      const startRpc = Date.now();
-      let rpcRes: { ok: boolean; latencyMs?: number; error?: string };
-      try {
-        await server.getLatestLedger();
-        rpcRes = { ok: true, latencyMs: Date.now() - startRpc };
-      } catch (err) {
-        rpcRes = { ok: false, latencyMs: Date.now() - startRpc, error: err instanceof Error ? err.message : String(err) };
-      }
-
-      return { db: dbRes, rpc: rpcRes };
-    },
-    async processMarket(market) {
-      // Handles exactly one market so a failure here cannot stop the poll loop
-      // from moving on to the remaining expired markets.
-      const marketId = market.id.trim();
-      try {
-        // Defensive: the expiry query already filters these out, but a market
-        // can be cancelled or resolved between the query and this call.
-        if (market.cancelled) {
-          logger.info("market is cancelled, skipping", { marketId });
-          return;
-        }
-
-        // The on-chain and finalizer APIs take a numeric market id.
-        const onChainMarketId = Number(marketId);
-        if (!Number.isSafeInteger(onChainMarketId) || onChainMarketId < 0) {
-          logger.error("market id is not a non-negative integer, skipping", { marketId });
-          return;
-        }
-
-        if (!config.MARKET_CONTRACT_ID || !config.RESOLVER_KEY) {
-          logger.error("aggregator is not configured for finalization, skipping", {
-            marketId,
-            hasMarketContractId: Boolean(config.MARKET_CONTRACT_ID),
-            hasResolverKey: Boolean(config.RESOLVER_KEY),
-          });
-          return;
-        }
-
-        // 1. On-chain state — never finalize a market that is already resolved
-        //    or cancelled on the contract, regardless of the DB view.
-        const state = await queryMarketState(
-          server,
-          config.MARKET_CONTRACT_ID,
-          onChainMarketId,
-          config.RESOLVER_KEY,
-          networkPassphrase,
-        );
-        if (state.cancelled) {
-          logger.info("market is cancelled on-chain, skipping", { marketId });
-          return;
-        }
-        if (state.resolved) {
-          logger.info("market is already resolved on-chain, skipping", { marketId });
-          return;
-        }
-
-        // 2. Load the council's current submissions and compute the tally.
-        const votes = await submissionStore.getSubmissions(marketId);
-        const tally = computeTally(marketId, votes);
-        logger.info("computed tally", {
-          marketId,
-          yesVotes: tally.yesVotes,
-          noVotes: tally.noVotes,
-          totalVoters: tally.totalVoters,
-        });
-
-        // 3. Evaluate the threshold. `null` means no outcome (or an ambiguous
-        //    both-outcomes) majority — the market stays untouched this poll.
-        const outcome = selectThresholdOutcome(votes, config.COUNCIL_THRESHOLD, logger, marketId);
-        if (outcome === null) {
-          logger.warn("threshold not met, market left unresolved", {
-            marketId,
-            yesVotes: tally.yesVotes,
-            noVotes: tally.noVotes,
-            threshold: config.COUNCIL_THRESHOLD,
-          });
-          return;
-        }
-
-        // 4. Safety gate — assertCanFinalize throws with a descriptive reason
-        //    if submissions are insufficient or the tally is ambiguous.
-        assertCanFinalize(marketId, tally, createBalancedValidationConfig(config.COUNCIL_THRESHOLD));
-
-        // 5. Finalize on-chain and persist the decision.
-        logger.info("threshold met, finalizing market", { marketId, decision: outcome });
-        const txHash = await finalizeMarketDecision(
-          database,
-          server,
-          config.MARKET_CONTRACT_ID,
-          config.RESOLVER_KEY,
-          onChainMarketId,
-          outcome,
-          [...tally.votes],
-          networkPassphrase,
-        );
-        logger.info("market finalized", { marketId, decision: outcome, txHash });
-      } catch (error) {
-        logger.error("failed to process market", {
-          marketId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    },
-    },
-    async close() {
-      await database.end();
-      logger.info("aggregator stopped");
-    },
-  };
-}
-
-export interface RunAggregatorOptions {
-  signal: AbortSignal;
-  pollIntervalMs: number;
-  batchSize?: number;
-  logger?: Logger;
-  alertSender?: (alert: any) => Promise<void>;
-  onIterationComplete?: (timestamp: number) => void;
-  metrics?: AggregatorMetrics;
-}
-
-export async function runAggregator(
-  dependencies: AggregatorDependencies,
-  options: RunAggregatorOptions,
-): Promise<void> {
-  const logger = options.logger;
-  const alertSender = options.alertSender;
-  const marketFailureMap = new Map<string, number>(); // Track consecutive failures per market
-  const FAILURE_THRESHOLD = 5; // Escalate after 5 consecutive failures
-
-  await dependencies.connect();
-  try {
-    while (!options.signal.aborted) {
-      const startedAt = Date.now();
-      const now = new Date();
-      const backlogDepth = dependencies.getBacklogDepth
-        ? await dependencies.getBacklogDepth(now)
-        : undefined;
-
-      let marketsChecked = 0;
-      let marketsProcessed = 0;
-      let offset = 0;
-      const batchSize = options.batchSize;
-
-      for (;;) {
-        if (options.signal.aborted) break;
-
-        const batch = await dependencies.listExpiredUnresolvedMarkets(now, batchSize, offset);
-        if (batch.length === 0) break;
-
-        for (const market of batch) {
-          if (options.signal.aborted) break;
-          options.metrics?.recordMarketProcessed();
-
-          try {
-            await dependencies.processMarket(market);
-            marketFailureMap.delete(market.id);
-            marketsProcessed++;
-            options.metrics?.recordMarketFinalized();
-          } catch (error) {
-            options.metrics?.recordMarketFailed();
-            const failureCount = (marketFailureMap.get(market.id) ?? 0) + 1;
-            marketFailureMap.set(market.id, failureCount);
-
-            logger?.error("market processing failed", {
-              marketId: market.id,
-              error,
-              consecutiveFailures: failureCount,
-            });
-
-            if (failureCount >= FAILURE_THRESHOLD && alertSender) {
-              try {
-                await alertSender({
-                  marketId: market.id,
-                  attempts: failureCount,
-                  error,
-                });
-              } catch (alertError) {
-                logger?.error("failed to send failure alert", {
-                  marketId: market.id,
-                  alertError,
-                });
-              }
-            }
-          }
-          marketsChecked += 1;
-        }
-
-        if (batchSize === undefined || batchSize <= 0 || batch.length < batchSize) {
-          break;
-        }
-        offset += batchSize;
-      }
-
-      const completedAt = Date.now();
-      options.onIterationComplete?.(completedAt);
-      options.metrics?.recordPollCompleted(completedAt);
-
-      const iterationDurationMs = completedAt - startedAt;
-      logger?.info("poll iteration complete", {
-        marketsChecked,
-        marketsProcessed,
-        backlogDepth,
-        durationMs: iterationDurationMs,
-      });
-
-      if (!options.signal.aborted) {
-        const adjustedSleepMs = Math.max(0, options.pollIntervalMs - iterationDurationMs);
-
-        if (adjustedSleepMs < options.pollIntervalMs && iterationDurationMs > options.pollIntervalMs) {
-          logger?.warn("poll iteration overran configured interval", {
-            configuredIntervalMs: options.pollIntervalMs,
-            iterationDurationMs,
-            nextPollImmediately: true,
-          });
-        }
-
-        if (adjustedSleepMs > 0) {
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, adjustedSleepMs);
-            options.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                resolve();
-              },
-              { once: true },
-            );
-          });
-        }
-      }
-    }
-  } finally {
-    await dependencies.close();
-  }
-}
-
-export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const config = loadAggregatorConfig(env);
-  const logger = createLogger({ level: config.LOG_LEVEL, bindings: { service: "oracle-aggregator" } });
-  const controller = new AbortController();
-  const shutdown = () => controller.abort();
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-
-  let metrics: OracleMetricsRuntime | undefined;
-  let aggMetricsServer: AggregatorMetricsServer | undefined;
-  let healthServer: AggregatorHealthServer | undefined;
-  let lastPollCompletedAt: number | null = null;
-  const aggregatorMetrics = new AggregatorMetrics();
-
-  const dependencies = createProductionDependencies(config, logger);
-
-  try {
-    try {
-      metrics = await startOracleMetrics({
-        config: loadOracleMetricsConfig(env),
-        databaseUrl: config.DATABASE_URL,
-        logger,
-      });
-    } catch (error) {
-      logger.error("oracle metrics endpoint failed to start", { error });
-    }
-
-    try {
-      aggMetricsServer = new AggregatorMetricsServer({
-        metrics: aggregatorMetrics,
-        port: Number(process.env.AGGREGATOR_METRICS_PORT ?? 9102),
-        host: process.env.AGGREGATOR_METRICS_HOST ?? "0.0.0.0",
-      });
-      await aggMetricsServer.start();
-      logger.info("aggregator prometheus metrics server started", { port: 9102 });
-    } catch (error) {
-      logger.error("aggregator prometheus metrics server failed to start", { error });
-    }
-
-    if (config.HEALTH_ENABLED) {
-      try {
-        healthServer = new AggregatorHealthServer({
-          port: config.HEALTH_PORT,
-          host: config.HEALTH_HOST,
-          maxStaleMs: config.MAX_POLL_STALE_MS,
-          getLastPollCompletedAt: () => lastPollCompletedAt,
-          checkReadiness: async () => {
-            if (dependencies.checkReadiness) {
-              return dependencies.checkReadiness();
-            }
-            return {
-              db: { ok: true },
-              rpc: { ok: true },
-            };
-          },
-          logger,
-        });
-        await healthServer.start();
-      } catch (error) {
-        logger.error("oracle health endpoint failed to start", { error });
-      }
-    }
-
-    await runAggregator(dependencies, {
-      signal: controller.signal,
-      pollIntervalMs: config.POLL_INTERVAL_MS,
-      batchSize: config.AGGREGATOR_BATCH_SIZE,
-      logger,
-      metrics: aggregatorMetrics,
-      onIterationComplete: (timestamp) => {
-        lastPollCompletedAt = timestamp;
-      },
-    });
-  } finally {
-    process.off("SIGINT", shutdown);
-    process.off("SIGTERM", shutdown);
-    await healthServer?.stop();
-    await aggMetricsServer?.stop();
-    await metrics?.stop();
-  }
-}

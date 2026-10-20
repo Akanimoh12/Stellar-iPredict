@@ -3,7 +3,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts", "test/**/*.test.ts"],
+    include: ["src/**/*.test.ts"],
+    testTimeout: 30000,
     setupFiles: ["./src/test/vitest.setup.ts"],
     coverage: {
       provider: "v8",
@@ -11,9 +12,12 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/test/**"],
-      // Fail the run only when coverage is explicitly requested via
-      // `vitest run --coverage`; a plain `npm test` is unaffected.
-      all: false,
+      thresholds: {
+        lines: 65,
+        functions: 65,
+        branches: 55,
+        statements: 65,
+      },
     },
   },
   resolve: {

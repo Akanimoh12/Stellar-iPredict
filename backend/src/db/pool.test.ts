@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  shutdown,
   queryWithCancel,
   QueryCancelledError,
   type CancellablePool,
@@ -19,6 +20,8 @@ import {
 import {
   getAbandonedQueryCounts,
   resetAbandonedQueryCounts,
+  getDbQueryHistogram,
+  resetDbQueryHistogram,
 } from "../metrics.js";
 
 /** A fake single connection: resolves pg_backend_pid, then hangs on the
@@ -67,6 +70,7 @@ function createFakePool(fakeClient: { client: unknown }) {
 describe("queryWithCancel", () => {
   beforeEach(() => {
     resetAbandonedQueryCounts();
+    resetDbQueryHistogram();
   });
 
   it("resolves normally and never touches pg_cancel_backend when the signal never aborts", async () => {
@@ -87,6 +91,44 @@ describe("queryWithCancel", () => {
     expect(result.rows).toEqual([{ ok: true }]);
     expect(cancelCalls).toHaveLength(0);
     expect(getAbandonedQueryCounts()).toEqual([]);
+  });
+
+  it("records the statement in the db_query_duration_ms histogram", async () => {
+    // This is the database-load series the cache dashboard plots against hit
+    // rate: every miss that reaches Postgres has to show up here.
+    const fake = createFakeClient(111);
+    const { pool } = createFakePool(fake);
+    const controller = new AbortController();
+
+    const promise = queryWithCancel(pool, "SELECT 1", [], {
+      signal: controller.signal,
+      route: "GET /api/markets/:id",
+    });
+    await flushMicrotasks();
+    fake.settle();
+    await promise;
+
+    const snapshot = getDbQueryHistogram();
+    expect(snapshot.count).toBe(1);
+    expect(snapshot.sum).toBeGreaterThanOrEqual(0);
+  });
+
+  it("records a cancelled statement too — it still ran against the database", async () => {
+    const fake = createFakeClient(222);
+    const { pool } = createFakePool(fake);
+    const controller = new AbortController();
+
+    const promise = queryWithCancel(pool, "SELECT pg_sleep(30)", [], {
+      signal: controller.signal,
+      route: "GET /api/markets/:id",
+    });
+    await flushMicrotasks();
+    controller.abort();
+    await flushMicrotasks();
+    fake.fail(new Error("canceling statement due to user request"));
+
+    await expect(promise).rejects.toBeInstanceOf(QueryCancelledError);
+    expect(getDbQueryHistogram().count).toBe(1);
   });
 
   it("issues pg_cancel_backend on a separate connection and rejects with QueryCancelledError when the client disconnects", async () => {
@@ -167,3 +209,13 @@ describe("queryWithCancel", () => {
 function flushMicrotasks(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+it("shutdown does not initialize an unused database pool", async () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  try {
+    await expect(shutdown()).resolves.toBeUndefined();
+  } finally {
+    if (databaseUrl !== undefined) process.env.DATABASE_URL = databaseUrl;
+  }
+});

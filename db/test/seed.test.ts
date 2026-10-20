@@ -33,7 +33,7 @@ describe("seed data verification", () => {
       c.sql.includes("INSERT INTO leaderboard"),
     );
 
-    expect(marketInserts).toHaveLength(3);
+    expect(marketInserts).toHaveLength(9);
     expect(betInserts).toHaveLength(4);
     expect(leaderboardInserts).toHaveLength(3);
   });
@@ -46,7 +46,7 @@ describe("seed data verification", () => {
 
     const rows = marketInserts.map((c) => c.values);
 
-    expect(rows).toEqual([
+    expect(rows.slice(0, 3)).toEqual([
       [
         1,
         "Will XLM close above $0.20 by Dec 31, 2026?",
@@ -89,6 +89,16 @@ describe("seed data verification", () => {
         "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
         4,
       ],
+    ]);
+  });
+
+  it("includes the six oracle lifecycle markets with unique IDs", async () => {
+    const inserts = await captureInserts();
+    const markets = inserts.filter((c) => c.sql.includes("INSERT INTO markets"));
+    expect(markets.map((c) => c.values?.[0])).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const oracleMarkets = markets.slice(3);
+    expect(oracleMarkets.map((c) => c.values?.[3])).toEqual([
+      "Crypto", "Sports", "Politics", "Science", "Entertainment", "Sports",
     ]);
   });
 

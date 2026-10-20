@@ -1,5 +1,9 @@
 # Council Resolution Runbook
 
+> **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
+> [Stuck Market Runbook](./STUCK_MARKET_RUNBOOK.md). It is checked against the current code
+> and maps which runbook covers what. This file covers council voting, the aggregator, and incident severity and communication.
+
 > **Phase 1.5 Implementation Guide**  
 > How council members submit outcomes and how the aggregator finalizes markets.
 
@@ -221,6 +225,32 @@ for each expired_unresolved_market {
 
 ### Safety Mechanisms
 
+### Ambiguous Tallies and Manual Review
+
+`selectThresholdOutcome` returns `null` when both YES and NO reach the
+configured threshold. This should be impossible with the strict-majority
+configuration, so it is treated as a SEV1 defence-in-depth incident rather
+than resolved arbitrarily.
+
+The aggregator inserts the market into `oracle_ambiguous_tallies`, emits one
+`oracle.aggregator.ambiguous_tally` alert for that market, and excludes the
+market from subsequent polling. The unique market key and `alert_claimed_at`
+make the escalation durable and once-only across restarts. An operator must
+investigate the council votes and clear the record after correction:
+
+```sql
+SELECT * FROM oracle_ambiguous_tallies
+WHERE status = 'manual_review'
+ORDER BY first_seen_at;
+
+UPDATE oracle_ambiguous_tallies
+SET status = 'cleared', alert_claimed_at = NULL
+WHERE market_id = '<market-id>';
+```
+
+Clearing is deliberately manual: it is only safe after the contradictory
+votes or configuration invariant has been understood and corrected.
+
 1. **Minimum Submissions** (`MIN_REQUIRED_SUBMISSIONS`):
    - Prevents finalization based on incomplete data
    - Default: 4 (threshold value) — balanced safety
@@ -262,6 +292,12 @@ CREATE TABLE council_votes (
 CREATE INDEX idx_council_votes_market ON council_votes(market_id);
 CREATE INDEX idx_council_votes_submitted ON council_votes(submitted_at DESC);
 ```
+
+### `oracle_ambiguous_tallies` Table
+
+This table is the durable manual-review queue for impossible split tallies.
+`manual_review` rows are excluded from aggregator polling until an operator clears
+them.
 
 ### Query Examples
 
@@ -394,6 +430,68 @@ journalctl -u ipredict-aggregator -n 500 --no-pager | grep ERROR
 systemctl restart ipredict-aggregator
 systemctl status ipredict-aggregator
 ```
+
+#### Council Deadline Exceeded
+
+**Symptom:** An escalated market has passed its `council_deadline` without reaching quorum (4-of-7 votes).
+
+**Diagnosis:**
+```bash
+# Check for markets past deadline
+psql $DATABASE_URL -c "
+  SELECT market_id, escalated_at, council_deadline,
+         NOW() as current_time,
+         EXTRACT(EPOCH FROM (NOW() - council_deadline))/3600 as hours_past_deadline
+  FROM oracle_disputes
+  WHERE status = 'escalated' AND council_deadline < NOW()
+  ORDER BY council_deadline ASC;
+"
+
+# Check council votes for the market
+psql $DATABASE_URL -c "
+  SELECT member, outcome, submitted_at
+  FROM council_votes
+  WHERE market_id = '<market-id>'
+  ORDER BY submitted_at ASC;
+"
+```
+
+**Impact:** High severity — the market and its escrowed bonds are in limbo indefinitely. Neither the submitter nor challenger can recover their bonds, and the market cannot be resolved.
+
+**Fallback Options (Governance Decision Required):**
+
+The fallback behavior is a governance decision, not purely technical. The following options have different consequences for bond holders:
+
+1. **Admin Force-Resolution** (recommended for clear-cut cases):
+   - An authorized admin calls `resolve_market()` with the correct outcome
+   - Bonds are distributed according to the resolution rules
+   - Requires consensus on the correct outcome from available data
+   - Consequence: One party loses their bond, but funds are unlocked
+
+2. **Market Cancellation** (recommended for ambiguous cases):
+   - An authorized admin cancels the market via the contract
+   - Both parties receive their bonds back
+   - Consequence: No one loses funds, but no resolution is reached
+   - May require recreating the market if resolution is still needed
+
+3. **Council Extension** (temporary measure):
+   - If the deadline was missed due to technical issues, consider extending the window
+   - Requires protocol owner intervention to update the deadline
+   - Consequence: Gives council more time to vote, but delays resolution
+
+**Decision Process:**
+1. Determine why the council failed to reach quorum (technical issue vs. lack of participation)
+2. Assess whether the outcome is objectively determinable from available data
+3. Choose the fallback option based on the situation:
+   - Clear outcome + technical failure → Admin force-resolution
+   - Ambiguous outcome + technical failure → Market cancellation
+   - Lack of participation → Council extension (if time allows) or cancellation
+4. Execute the chosen fallback via the appropriate governance mechanism (council multisig, protocol owner, etc.)
+
+**Prevention:**
+- The monitor alerts when a deadline is approaching (default: 12 hours before)
+- Use this alert to contact inactive council members before the deadline passes
+- Review council participation regularly and replace inactive members
 
 ---
 
@@ -528,6 +626,28 @@ The review is not closed until every SEV1 action item is done.
 
 ## Monitoring & Alerts
 
+### Council Deadline Monitoring
+
+The monitor tracks the council voting window and raises alerts at two stages:
+
+1. **Deadline Approaching** (`oracle.monitor.council_deadline_approaching`):
+   - Triggered when an escalated market has less than 12 hours remaining before its `council_deadline`
+   - Only fires if the market has no council votes yet
+   - Purpose: Give operators time to contact inactive council members
+
+2. **No Votes — Page** (`oracle.monitor.council_no_votes_page`, SEV1):
+   - Triggered when an escalated market still has **zero** council votes and less than `COUNCIL_NO_VOTE_PAGE_HOURS` (default: 6) remain before its `council_deadline`
+   - Pages once per dispute; it re-arms if the market leaves escalation, receives a vote, or its window closes
+   - Payload includes `hoursRemaining` and `windowElapsedPercent`
+   - Purpose: Wake on-call before the window expires with the dispute unresolved and user funds locked
+
+3. **Deadline Exceeded** (`oracle.monitor.council_window_exceeded`):
+   - Triggered when an escalated market has passed its `council_deadline` without reaching quorum
+   - Indicates a governance decision is needed (see troubleshooting section)
+   - Purpose: Force action to prevent indefinite limbo
+
+The deadline is populated when a dispute escalates (via the `OracleEscalatedEvent`), which sets `oracle_disputes.council_deadline` to `escalated_at + COUNCIL_WINDOW_SECONDS` (default: 72 hours).
+
 ### Key Metrics
 
 | Metric | Threshold | Action |
@@ -537,6 +657,9 @@ The review is not closed until every SEV1 action item is done.
 | **Conflict rate** | > 30% dissent | Review data sources |
 | **Aggregator uptime** | < 99% | Investigate crashes |
 | **Submission rate** | < 4 per expired market | Contact inactive members |
+| **Council deadline approaching** | < 12 hours remaining | Alert council members |
+| **Council no votes (page)** | 0 votes, < 6 hours remaining | Page on-call (SEV1) |
+| **Council deadline exceeded** | Deadline passed | Initiate fallback procedure |
 
 ### Prometheus Metrics
 
@@ -577,6 +700,20 @@ groups:
           severity: warning
         annotations:
           summary: "High conflict rate in council votes"
+
+      - alert: CouncilDeadlineApproaching
+        expr: council_deadline - time() < 43200  # 12 hours
+        labels:
+          severity: warning
+        annotations:
+          summary: "Council deadline approaching for market {{ $labels.market_id }}"
+
+      - alert: CouncilDeadlineExceeded
+        expr: time() - council_deadline > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Council deadline exceeded for market {{ $labels.market_id }}"
 ```
 
 ---
@@ -739,3 +876,237 @@ Market ID: 123
 **Last Updated:** July 29, 2026  
 **Version:** Phase 1.5  
 **Status:** Active
+
+
+## Resolver key source and scheduled rotation
+
+Production aggregators should source the resolver signing key from a secret-manager mounted file instead of placing the key directly in the process environment. Set `RESOLVER_KEY_FILE=/run/secrets/resolver_key`; the environment `RESOLVER_KEY` fallback is intended for local development. Retrieval failure is a startup error, and key material must never be logged.
+
+A safe rotation keeps the outgoing and incoming resolvers valid simultaneously for an overlap window:
+
+1. Provision the incoming secret through the configured secret manager and update the mounted file.
+2. Register the incoming resolver on chain **before** making it the preferred signing key.
+3. Promote it locally while retaining the outgoing resolver in the authorized set.
+4. Perform a real signed resolver verification operation with the incoming key. Do not retire the old key based only on configuration validation.
+5. Keep both keys valid for the configured overlap window (for example `RESOLVER_ROTATION_OVERLAP_MS=300000`).
+6. Retire the outgoing resolver only after verification succeeds and the overlap completes.
+7. If registration or verification fails, restore the previous active key and leave it authorized. Do not proceed with retirement.
+
+`ResolverRotationScheduler` implements this ordering and supports a recurring schedule. The rotation interval should be longer than the overlap window; `RESOLVER_ROTATION_INTERVAL_MS` and `RESOLVER_ROTATION_OVERLAP_MS` should be set according to the deployment's key-management policy.
+
+
+---
+
+## Investigating Bond Refund Discrepancies (Issue #573)
+
+**Alert:** `oracle.aggregator.bond_discrepancy` or `oracle.aggregator.bond_reconciliation_failure`
+
+**Severity:** **P0 - Critical**. Any bond discrepancy means user funds are unaccounted for and requires immediate investigation.
+
+### What This Alert Means
+
+A bond refund discrepancy occurs when:
+- A market has been finalized, cancelled, or expired (terminal state)
+- The system expected a bond to be returned to a submitter
+- No corresponding settlement record exists in `bond_settlements` table
+
+This is the most serious class of problem because user funds are unaccounted for.
+
+### Investigation Procedure
+
+#### 1. Identify Affected Markets and Parties
+
+Query the `oracle_submissions` and `bond_settlements` tables to identify discrepancies:
+
+```sql
+-- Find terminal submissions without settlement records
+SELECT 
+  os.market_id,
+  os.submitter,
+  os.bond_amount,
+  os.status,
+  os.finalized_at,
+  bs.settled_at,
+  bs.settled_amount
+FROM oracle_submissions os
+LEFT JOIN bond_settlements bs ON os.market_id = bs.market_id AND os.submitter = bs.recipient
+WHERE os.status IN ('finalized', 'cancelled', 'expired')
+  AND bs.market_id IS NULL
+ORDER BY os.finalized_at DESC;
+```
+
+#### 2. Verify On-Chain State
+
+Check if the bond was actually refunded on-chain but not recorded in the database:
+
+```bash
+# Query the market contract to verify bond settlements
+stellar contract invoke \
+  --id $MARKET_CONTRACT_ID \
+  --network mainnet \
+  -- get_bond_status \
+  --market-id <MARKET_ID> \
+  --submitter <SUBMITTER_ADDRESS>
+```
+
+**Possible outcomes:**
+- **Bond returned on-chain, not in DB**: Database sync issue - proceed to step 3
+- **Bond not returned on-chain**: Critical smart contract issue - escalate immediately
+- **Bond pending or locked**: Transaction may still be processing - wait and re-check
+
+#### 3. Reconcile Database Record
+
+If the bond was returned on-chain but not recorded in the database:
+
+```sql
+-- Manually insert the settlement record (verify amounts first!)
+INSERT INTO bond_settlements (market_id, recipient, settled_amount, settled_at)
+VALUES (
+  '<MARKET_ID>',
+  '<SUBMITTER_ADDRESS>',
+  <BOND_AMOUNT_STROOPS>,
+  '<SETTLEMENT_TIMESTAMP>'
+)
+ON CONFLICT (market_id, recipient) DO NOTHING;
+```
+
+**Important:** Only insert a record if you have verified the on-chain transaction. Never fabricate settlement records.
+
+#### 4. Investigate Root Cause
+
+Common causes of bond discrepancies:
+
+| Cause | Symptoms | Resolution |
+|---|---|---|
+| **Indexer lag or failure** | Settlement happened but wasn't ingested | Check indexer health, re-sync if needed |
+| **Database transaction failure** | Settlement was processed but commit failed | Check database logs, verify transaction integrity |
+| **Smart contract bug** | Bond was never returned on-chain | **SEV1 escalation** - contract audit required |
+| **Concurrent finalization** | Race condition during settlement recording | Review settlement recording logic, add locks if needed |
+| **Network partition** | RPC call succeeded but confirmation failed | Check network logs, verify transaction on explorer |
+
+#### 5. Check for Systemic Issues
+
+If multiple discrepancies are detected:
+
+```sql
+-- Count discrepancies by time period
+SELECT 
+  DATE_TRUNC('hour', finalized_at) as hour,
+  COUNT(*) as discrepancy_count
+FROM oracle_submissions os
+LEFT JOIN bond_settlements bs ON os.market_id = bs.market_id AND os.submitter = bs.recipient
+WHERE os.status IN ('finalized', 'cancelled', 'expired')
+  AND bs.market_id IS NULL
+GROUP BY hour
+ORDER BY hour DESC;
+```
+
+If discrepancies cluster around a specific time, check for:
+- Deployment or configuration changes
+- Infrastructure incidents (database, RPC, network)
+- Elevated error rates in logs
+
+#### 6. User Communication
+
+If user funds are affected:
+
+1. **Within 1 hour:** Post initial status to community channels
+   - State plainly that a bond discrepancy was detected
+   - Confirm whether funds are safe on-chain
+   - Provide timeline for investigation
+
+2. **Every hour:** Post updates until resolved
+
+3. **After resolution:** Post full incident report
+   - Root cause
+   - Impact (how many users, how much XLM)
+   - Corrective actions taken
+   - Preventive measures
+
+**Template:**
+```
+[iPredict incident — bond discrepancy detected]
+
+Market <ID> has a bond settlement discrepancy. We are investigating.
+
+Funds status: [Safe on-chain | At risk | Resolved]
+Affected parties: [Number of users]
+Expected resolution: [Time estimate]
+
+Next update by <UTC timestamp>
+```
+
+#### 7. Reconciliation Job Failures
+
+If the alert is `bond_reconciliation_failure` (the job crashed or timed out):
+
+```bash
+# Check recent reconciliation runs
+npm --prefix oracle run bond-reconciliation:check-status
+
+# View reconciliation logs
+journalctl -u ipredict-bond-reconciliation -n 200 --no-pager | grep ERROR
+```
+
+**Common failure modes:**
+- **Database connection timeout**: Increase pool size or query timeout
+- **Query timeout**: Optimize queries, add indexes if needed
+- **Out of memory**: Increase service memory limit or batch processing
+- **Unhandled exception**: Fix bug and redeploy
+
+**Recovery:**
+```bash
+# Manually trigger reconciliation run
+npm --prefix oracle run bond-reconciliation:run
+
+# Verify it completes successfully
+echo $?  # Should be 0
+```
+
+#### 8. Prevention
+
+After resolving the incident:
+
+1. Add regression test for the root cause scenario
+2. Improve monitoring to detect earlier (e.g., settlement lag alerts)
+3. Add automated reconciliation job if not already running
+4. Review and update this runbook with learnings
+
+### Automated Reconciliation
+
+The bond reconciliation job should run on a schedule:
+
+```bash
+# Run every 15 minutes (cron: */15 * * * *)
+npm --prefix oracle run bond-reconciliation
+```
+
+**Environment variables:**
+```bash
+BOND_RECONCILIATION_ENABLED=true
+BOND_RECONCILIATION_INTERVAL_MS=900000  # 15 minutes
+ALERT_ON_DISCREPANCY=true
+ALERT_ON_RECONCILIATION_FAILURE=true
+```
+
+The job will:
+- Compare `oracle_submissions` to `bond_settlements`
+- Alert on any discrepancies with full context
+- Alert if the job itself fails
+- Log summary metrics for monitoring
+
+### Escalation
+
+**Immediate escalation (page on-call) if:**
+- Bond discrepancy confirmed AND funds not verifiable on-chain
+- Multiple discrepancies detected (≥ 3 markets)
+- Smart contract bug suspected
+- User funds are confirmed lost or locked
+
+**Standard escalation (notify in channel) if:**
+- Single discrepancy with confirmed on-chain settlement (DB sync issue)
+- Reconciliation job failure (one-time)
+
+**No escalation needed if:**
+- Reconciliation completes successfully with zero discrepancies
+- False positive (already resolved in previous run)

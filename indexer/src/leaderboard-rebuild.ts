@@ -73,6 +73,11 @@ export interface Queryable {
 export interface RebuildOptions {
   dryRun?: boolean;
   sinceLedger?: number;
+  /**
+   * Report progress every N events. Defaults to 1000.
+   * Used for observability during long rebuilds.
+   */
+  progressInterval?: number;
 }
 
 interface PlayerState extends LeaderboardRow {
@@ -336,20 +341,80 @@ function calculateRowsPerBatch(columnsPerRow: number, safetyMargin = 10): number
   const MAX_PARAMS = 65535;
   return Math.floor((MAX_PARAMS - safetyMargin) / columnsPerRow);
 }
+/**
+ * Retrieve the last successfully processed ledger from the checkpoint table.
+ * Returns null if no checkpoint exists or if the rebuild is starting fresh.
+ */
+async function getLeaderboardRebuildCheckpoint(db: Queryable): Promise<number | null> {
+  try {
+    const { rows } = await db.query(
+      "SELECT last_processed_ledger FROM leaderboard_rebuild_checkpoint WHERE id = 1"
+    );
+    return rows.length > 0 && rows[0].last_processed_ledger != null
+      ? Number(rows[0].last_processed_ledger)
+      : null;
+  } catch {
+    // Table might not exist or query failed - treat as no checkpoint
+    return null;
+  }
+}
+
+/**
+ * Save the rebuild checkpoint to track progress.
+ * Creates the checkpoint table if it doesn't exist.
+ */
+async function saveLeaderboardRebuildCheckpoint(
+  db: Queryable,
+  ledger: number,
+  eventCount: number
+): Promise<void> {
+  await db.query(
+    `INSERT INTO leaderboard_rebuild_checkpoint (id, last_processed_ledger, event_count, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       last_processed_ledger = EXCLUDED.last_processed_ledger,
+       event_count = EXCLUDED.event_count,
+       updated_at = NOW()`,
+    [ledger, eventCount]
+  );
+}
+
+/**
+ * Clear the rebuild checkpoint after successful completion.
+ */
+async function clearLeaderboardRebuildCheckpoint(db: Queryable): Promise<void> {
+  try {
+    await db.query("DELETE FROM leaderboard_rebuild_checkpoint WHERE id = 1");
+  } catch {
+    // If deletion fails, it's not critical
+  }
+}
+
+
 
 export async function rebuildLeaderboardTable(
   db: Queryable,
   options: RebuildOptions = {}
 ): Promise<LeaderboardSnapshot> {
   const startedAt = Date.now();
+  const progressInterval = options.progressInterval ?? 1000;
+
+  // Check for existing checkpoint to resume from
+  const checkpointLedger = !options.sinceLedger ? await getLeaderboardRebuildCheckpoint(db) : null;
+  const resumeFromLedger = checkpointLedger ?? options.sinceLedger;
+
+  if (checkpointLedger !== null) {
+    console.log(`[leaderboard-rebuild] Resuming from checkpoint at ledger ${checkpointLedger}`);
+  }
+
   const queryParts = [
     "SELECT id, ledger_seq, event_type, market_id, actor, payload",
     "FROM events",
   ];
   const queryParams: unknown[] = [];
 
-  if (options.sinceLedger !== undefined) {
-    queryParams.push(options.sinceLedger);
+  if (resumeFromLedger !== undefined) {
+    queryParams.push(resumeFromLedger);
     queryParts.push(`WHERE ledger_seq >= $${queryParams.length}`);
   }
 
@@ -366,25 +431,48 @@ export async function rebuildLeaderboardTable(
     payload: row.payload,
   }));
 
+  // Build snapshot with progress reporting
   const snapshot = buildLeaderboardSnapshot(events);
+
+  // Report progress during event processing
+  console.log(`[leaderboard-rebuild] Processing ${events.length} events...`);
+
   if (options.dryRun) {
+    console.log(`[leaderboard-rebuild] Dry run complete: ${snapshot.players.length} players, ${snapshot.eventCount} events`);
     return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
-  await db.query("DELETE FROM leaderboard");
+  // Use a shadow table for atomic swap
+  const shadowTable = "leaderboard_shadow";
 
-  if (snapshot.players.length === 0) {
-    return { ...snapshot, durationMs: Date.now() - startedAt };
-  }
-
-  // Start transaction for atomic rebuild
   await db.query("BEGIN");
 
   try {
+    // Create shadow table with same structure as leaderboard
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ${shadowTable} (
+        address TEXT PRIMARY KEY,
+        display_name TEXT,
+        points INTEGER NOT NULL DEFAULT 0,
+        won_bets INTEGER NOT NULL DEFAULT 0,
+        lost_bets INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Clear shadow table
+    await db.query(`DELETE FROM ${shadowTable}`);
+
+    if (snapshot.players.length === 0) {
+      await db.query("COMMIT");
+      await clearLeaderboardRebuildCheckpoint(db);
+      return { ...snapshot, durationMs: Date.now() - startedAt };
+    }
+
     const COLUMNS_PER_ROW = 5; // address, display_name, points, won_bets, lost_bets
     const rowsPerBatch = calculateRowsPerBatch(COLUMNS_PER_ROW);
 
-    // Process players in batches
+    // Process players in batches to shadow table
     for (let i = 0; i < snapshot.players.length; i += rowsPerBatch) {
       const batch = snapshot.players.slice(i, Math.min(i + rowsPerBatch, snapshot.players.length));
 
@@ -403,22 +491,45 @@ export async function rebuildLeaderboardTable(
 
       await db.query(
         [
-          "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
+          `INSERT INTO ${shadowTable} (address, display_name, points, won_bets, lost_bets, updated_at)`,
           `VALUES ${placeholders.join(", ")}`,
-          "ON CONFLICT (address) DO UPDATE SET",
-          "  display_name = EXCLUDED.display_name,",
-          "  points = EXCLUDED.points,",
-          "  won_bets = EXCLUDED.won_bets,",
-          "  lost_bets = EXCLUDED.lost_bets,",
-          "  updated_at = NOW()",
         ].join(" "),
         values
       );
+
+      // Save checkpoint periodically
+      if (snapshot.lastLedgerSeq !== null && (i + rowsPerBatch) % (progressInterval * 10) === 0) {
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        console.log(`[leaderboard-rebuild] Progress: ${i + batch.length}/${snapshot.players.length} players written`);
+      }
     }
 
+    // Atomic swap: drop old leaderboard and rename shadow table
+    await db.query("DROP TABLE IF EXISTS leaderboard");
+    await db.query(`ALTER TABLE ${shadowTable} RENAME TO leaderboard`);
+
+    // Clear checkpoint on success
+    await clearLeaderboardRebuildCheckpoint(db);
+
     await db.query("COMMIT");
+
+    console.log(`[leaderboard-rebuild] Complete: ${snapshot.players.length} players, ${snapshot.eventCount} events in ${Date.now() - startedAt}ms`);
   } catch (error) {
     await db.query("ROLLBACK");
+
+    // Save checkpoint on failure for resumability
+    if (snapshot.lastLedgerSeq !== null) {
+      try {
+        // Use a separate transaction for checkpoint
+        await db.query("BEGIN");
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        await db.query("COMMIT");
+        console.error(`[leaderboard-rebuild] Failed but saved checkpoint at ledger ${snapshot.lastLedgerSeq}`);
+      } catch (checkpointError) {
+        console.error("[leaderboard-rebuild] Failed to save checkpoint", checkpointError);
+      }
+    }
+
     throw error;
   }
 

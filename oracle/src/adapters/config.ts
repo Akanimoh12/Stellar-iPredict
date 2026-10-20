@@ -1,3 +1,5 @@
+import type { OracleEnvironment } from "../config/env.js";
+
 export type AdapterApiKeyName =
   | "coinGecko"
   | "coinMarketCap"
@@ -7,7 +9,7 @@ export type AdapterApiKeyName =
 
 export type AdapterApiKeys = Partial<Record<AdapterApiKeyName, string>>;
 
-export type AdapterEnvironment = Record<string, string | undefined>;
+export type AdapterEnvironment = OracleEnvironment;
 
 /**
  * Environment variables used by the data sources described in the oracle

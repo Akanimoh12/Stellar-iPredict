@@ -9,6 +9,7 @@ import {
   getMarketById,
   getMarkets,
   getResolutionDelayStatus,
+  getUnmappableCandidates,
   type Queryable,
   type MarketCategory,
 } from "../db/markets.js";
@@ -22,17 +23,20 @@ import {
   oddsKey,
   CACHE_TTLS,
 } from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
+import { MAX_PAGINATION_LIMIT, MAX_PAGINATION_OFFSET } from "../lib/pagination.js";
 
 type MarketParams = {
   id: string;
 };
 
-// TTLs in seconds — mirrors docs/ORACLE_AND_BACKEND.md §Caching Strategy
-const MARKET_DETAIL_TTL = 30;
-const MARKETS_ACTIVE_TTL = 15;
-const MARKETS_DEFAULT_TTL = 30;
-const BETS_TTL = CACHE_TTLS.bets; // 30s
-const ODDS_TTL = CACHE_TTLS.odds; // 30s
+// TTLs in seconds — sourced from CACHE_TTLS in cacheKeys.ts so the
+// server-side cache and the Cache-Control header never drift apart (#480).
+const MARKET_DETAIL_TTL = CACHE_TTLS.market;
+const MARKETS_ACTIVE_TTL = CACHE_TTLS.marketsActive;
+const MARKETS_DEFAULT_TTL = CACHE_TTLS.marketsAll;
+const BETS_TTL = CACHE_TTLS.bets;
+const ODDS_TTL = CACHE_TTLS.odds;
 
 export function parsePositiveInteger(value: string): number | null {
   if (!/^\d+$/.test(value)) {
@@ -75,17 +79,28 @@ const categorySchema = z
     message: "Invalid category. Must be one of: Crypto, Sports, Politics, Entertainment, Science",
   });
 
-const marketsQuerySchema = z.object({
-  filter: z
-    .enum(["active", "resolved", "ended", "cancelled", "all"])
-    .default("all"),
-  category: categorySchema,
-  sort: z
-    .enum(["newest", "volume", "ending_soon", "bettors"])
-    .default("newest"),
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-});
+const marketsQuerySchema = z
+  .object({
+    filter: z
+      .enum(["active", "resolved", "ended", "cancelled", "all"])
+      .default("all"),
+    category: categorySchema,
+    sort: z
+      .enum(["newest", "volume", "ending_soon", "bettors"])
+      .default("newest"),
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(MAX_PAGINATION_LIMIT).default(20),
+  })
+  .superRefine(({ page, limit }, ctx) => {
+    const offset = (page - 1) * limit;
+    if (offset > MAX_PAGINATION_OFFSET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["page"],
+        message: `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+      });
+    }
+  });
 
 const marketResponseSchema = {
   type: "object",
@@ -197,8 +212,8 @@ function withCancellation(
   }
   const cancellablePool = db as unknown as CancellablePool;
   return {
-    query: (text: string, values?: unknown[]) =>
-      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }),
+    query: <T>(text: string, values?: unknown[]) =>
+      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }) as unknown as Promise<{ rows: T[] }>,
   };
 }
 
@@ -235,20 +250,33 @@ export function createMarketsRoutes(
             page: {
               type: "integer",
               minimum: 1,
-              description: "Page number (1-indexed)",
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
             },
             limit: {
               type: "integer",
               minimum: 1,
-              maximum: 100,
-              description: "Results per page",
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
             },
           },
         },
-        response: {
+                response: {
           200: {
             type: "object",
             additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives. `max-age` mirrors the server-side Redis TTL. " +
+                  "Varies by filter: `active` filter → 15s, default → 30s.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+              ETag: {
+                type: "string",
+                description: "Strong ETag for conditional GET (RFC 7232).",
+              },
+            },
             properties: {
               markets: { type: "array", items: marketResponseSchema },
               total: { type: "number" },
@@ -268,7 +296,8 @@ export function createMarketsRoutes(
         return reply.status(400).send({
           error: {
             code: "BAD_REQUEST",
-            message: "Invalid query parameters",
+            message:
+              parsed.error.issues[0]?.message ?? "Invalid query parameters",
             issues: parsed.error.issues,
             requestId: request.id,
           },
@@ -286,7 +315,7 @@ export function createMarketsRoutes(
         "GET /api/markets",
       );
 
-      const result = redis
+            const result = redis
         ? await getOrSet(redis, key, ttl, () =>
             getMarkets({ filter, category, sort, page, limit }, cancellableDb)
           )
@@ -301,6 +330,7 @@ export function createMarketsRoutes(
 
       const etag = computeEtag(body);
       reply.header("ETag", etag);
+      reply.header("Cache-Control", cacheControlPublic(ttl));
 
       if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
         return reply.status(304).send();
@@ -357,6 +387,63 @@ export function createMarketsRoutes(
     }
   );
 
+  // ── GET /api/markets/unmappable ────────────────────────────────────────────
+  // Issue #745: markets no adapter can resolve must be found well before
+  // expiry, not at it. Static path — Fastify matches it ahead of
+  // `/api/markets/:id`.
+  //
+  // The backend does not hold the oracle's adapter rules, so it reports the
+  // *candidate set* — open, un-cancelled markets ordered by how soon they
+  // expire — and the caller classifies them. Duplicating an adapter list into
+  // SQL would let the two drift apart silently, which is the failure this
+  // endpoint exists to prevent.
+  app.get(
+    "/api/markets/unmappable",
+    {
+      schema: {
+        summary: "Open markets that may be unresolvable, soonest to expire first",
+        description:
+          "Candidate set for the oracle's mappability sweep (#745). The backend does not know which markets " +
+          "an adapter can query, so it returns open, un-cancelled markets ordered by end_time ascending. " +
+          "Markets already past end_time lead the list: they are the ones holding stakes with no resolution path.",
+        tags: ["markets"],
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              candidates: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: "string" },
+                    question: { type: "string" },
+                    category: { type: "string" },
+                    end_time: { type: "string", description: "Epoch seconds" },
+                  },
+                  required: ["id", "question", "category", "end_time"],
+                },
+              },
+              checked: { type: "number", description: "Candidates returned" },
+              windowSeconds: { type: "number" },
+              includePastExpiry: { type: "boolean" },
+              checkedAt: { type: "string" },
+            },
+            required: ["candidates", "checked", "windowSeconds", "includePastExpiry", "checkedAt"],
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      // Short cache: this drives a periodic sweep, not a user-facing view, and
+      // an operator running it repeatedly should not hammer `markets`.
+      reply.header("Cache-Control", "public, max-age=60");
+      return getUnmappableCandidates(db);
+    }
+  );
+
   // ── GET /api/markets/:id/odds ─────────────────────────────────────────────
   app.get<{ Params: MarketParams }>(
     "/api/markets/:id/odds",
@@ -372,14 +459,25 @@ export function createMarketsRoutes(
           },
           required: ["id"],
         },
-        response: {
-          200: oddsResponseSchema,
+                response: {
+          200: {
+            ...oddsResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis odds TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
           400: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -438,6 +536,7 @@ export function createMarketsRoutes(
         };
       };
 
+      reply.header("Cache-Control", cacheControlPublic(ODDS_TTL));
       return redis
         ? getOrSet(redis, oddsKey(id), ODDS_TTL, calculateOddsPayload)
         : calculateOddsPayload();
@@ -459,14 +558,25 @@ export function createMarketsRoutes(
           },
           required: ["id"],
         },
-        response: {
-          200: marketResponseSchema,
+                response: {
+          200: {
+            ...marketResponseSchema,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis market-detail TTL (30s).",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
+          },
           400: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -486,6 +596,7 @@ export function createMarketsRoutes(
         throw notFound("Market not found");
       }
 
+      reply.header("Cache-Control", cacheControlPublic(MARKET_DETAIL_TTL));
       return market;
     }
   );
@@ -514,20 +625,30 @@ export function createMarketsRoutes(
             page: {
               type: "integer",
               minimum: 1,
-              description: "Page number (1-indexed)",
+              description: `Page number (1-indexed). (page - 1) × limit must not exceed ${MAX_PAGINATION_OFFSET}; use cursor-based pagination for deeper results.`,
             },
             limit: {
               type: "integer",
               minimum: 1,
-              maximum: 100,
-              description: "Results per page",
+              maximum: MAX_PAGINATION_LIMIT,
+              description: `Results per page (maximum ${MAX_PAGINATION_LIMIT})`,
             },
           },
         },
-        response: {
+                response: {
           200: {
             type: "object",
             additionalProperties: false,
+            headers: {
+              "Cache-Control": {
+                type: "string",
+                description:
+                  "Cache directives for this response. " +
+                  "`max-age` mirrors the server-side Redis bets TTL (30s). " +
+                  "Public blockchain data; safe for shared caches.",
+                example: "public, max-age=30, stale-while-revalidate=30",
+              },
+            },
             properties: {
               bets: {
                 type: "array",
@@ -566,7 +687,7 @@ export function createMarketsRoutes(
         },
       },
     },
-    async (request) => {
+        async (request, reply) => {
       const id = parsePositiveInteger(request.params.id);
       if (id === null) {
         throw badRequest("id must be a positive integer");
@@ -574,7 +695,13 @@ export function createMarketsRoutes(
 
       const query = request.query as { page?: number; limit?: number };
       const page = Math.max(1, query.page ?? 1);
-      const limit = Math.min(100, Math.max(1, query.limit ?? 50));
+      const limit = Math.min(MAX_PAGINATION_LIMIT, Math.max(1, query.limit ?? 50));
+      const offset = (page - 1) * limit;
+      if (offset > MAX_PAGINATION_OFFSET) {
+        throw badRequest(
+          `Requested page produces offset ${offset}, above the maximum ${MAX_PAGINATION_OFFSET}. Use cursor-based pagination for deeper results.`,
+        );
+      }
 
       const cancellableDb = withCancellation(
         db,
@@ -603,6 +730,7 @@ export function createMarketsRoutes(
       const key = betsKey(id);
       const loader = () => getBetsByMarketFromDb(id, page, limit, cancellableDb);
 
+      reply.header("Cache-Control", cacheControlPublic(BETS_TTL));
       return redis ? getOrSet(redis, key, BETS_TTL, loader) : loader();
     },
   );

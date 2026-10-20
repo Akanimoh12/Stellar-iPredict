@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+export type OracleEnvironment = Record<string, string | undefined>;
+
+/** Normalizes process-style environment values before module validation. */
+export function normalizeEnvironment(environment: OracleEnvironment = process.env): OracleEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).map(([name, value]) => [
+      name,
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    ]),
+  );
+}
+
 /**
  * Treats an empty environment variable as absent.
  *

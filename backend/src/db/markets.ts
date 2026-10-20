@@ -59,27 +59,90 @@ const MARKET_COLUMNS = `
   updated_at
 `;
 
+/**
+ * Sort expressions, each ending in a unique `id` tiebreaker.
+ *
+ * The tiebreaker is load-bearing for pagination, not cosmetic: without a
+ * trailing unique term, rows that tie on the sort key have an order Postgres
+ * does not guarantee, so two page requests reading the same snapshot can
+ * disagree about which rows fall inside each LIMIT/OFFSET window — surfacing
+ * as a row repeated across pages or skipped between them. `id` is unique and
+ * immutable, which makes every sort a total order.
+ */
 const ORDER_BY: Record<MarketSort, string> = {
-  newest: "created_at DESC",
-  volume: "(total_yes + total_no) DESC, created_at DESC",
-  ending_soon: "end_time ASC",
-  bettors: "bet_count DESC, created_at DESC",
+  newest: "created_at DESC, id ASC",
+  volume: "(total_yes + total_no) DESC, created_at DESC, id ASC",
+  ending_soon: "end_time ASC, id ASC",
+  bettors: "bet_count DESC, created_at DESC, id ASC",
 };
 
-function buildFilterClause(filter: MarketFilter): string {
-  switch (filter) {
-    case "active":
-      return "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
-    case "resolved":
-      return "resolved = true";
-    case "ended":
-      return "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT";
-    case "cancelled":
-      return "cancelled = true";
-    case "all":
-    default:
-      return "";
+const ACTIVE_CLAUSE = "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
+
+const FILTER_CLAUSES: Record<MarketFilter, string> = {
+  active: ACTIVE_CLAUSE,
+  resolved: "resolved = true",
+  ended: "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT",
+  cancelled: "cancelled = true",
+  all: "",
+};
+
+/**
+ * Looks `key` up in a fixed allowlist table, rejecting anything that is not
+ * one of its own keys. Own-property lookup matters: a value such as
+ * `constructor` or `__proto__` would otherwise resolve to an
+ * `Object.prototype` member and reach the SQL text.
+ */
+function allowlisted<T>(table: Record<string, T>, key: string, name: string): T {
+  if (!Object.hasOwn(table, key)) {
+    throw new Error(`unsupported ${name}: ${key}`);
   }
+  return table[key];
+}
+
+/**
+ * The ORDER BY expression for `sort`. Only the fixed `ORDER_BY` text ever
+ * reaches SQL, so the sort value is checked here, at construction, rather than
+ * relying on the API layer's zod enum to have run first.
+ */
+export function buildMarketsOrderBy(sort: MarketSort): string {
+  return allowlisted(ORDER_BY, sort, "sort");
+}
+
+/**
+ * Builds the WHERE clause and its bind values. Every user-supplied value is a
+ * `$n` placeholder, and the numbering is derived from the bind values pushed so
+ * far, so `LIMIT`/`OFFSET` placed after it can take `values.length + 1` and
+ * `+ 2` without a separate counter.
+ */
+export function buildMarketsWhere({
+  filter,
+  category,
+  sort,
+}: Required<Pick<GetMarketsInput, "filter" | "sort">> & Pick<GetMarketsInput, "category">): {
+  whereSql: string;
+  values: unknown[];
+} {
+  const filterClause = allowlisted(FILTER_CLAUSES, filter, "filter");
+  allowlisted(ORDER_BY, sort, "sort");
+
+  const values: unknown[] = [];
+  const conditions: string[] = [];
+
+  if (category) {
+    values.push(category);
+    conditions.push(`category = $${values.length}`);
+  }
+
+  if (filterClause) {
+    conditions.push(filterClause);
+  }
+
+  if (sort === "ending_soon") {
+    conditions.push(ACTIVE_CLAUSE);
+  }
+
+  const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  return { whereSql, values };
 }
 
 export async function getMarkets(
@@ -99,27 +162,8 @@ export async function getMarkets(
     throw new Error("limit must be a positive integer");
   }
 
-  const baseValues: unknown[] = [];
-  const whereConditions: string[] = [];
-
-  if (category) {
-    baseValues.push(category);
-    whereConditions.push(`category = $${baseValues.length}`);
-  }
-
-  const filterClause = buildFilterClause(filter);
-  if (filterClause) {
-    whereConditions.push(filterClause);
-  }
-
-  if (sort === "ending_soon") {
-    whereConditions.push(
-      "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT",
-    );
-  }
-
-  const whereSql =
-    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  const { whereSql, values: baseValues } = buildMarketsWhere({ filter, category, sort });
+  const orderBy = buildMarketsOrderBy(sort);
   const offset = (page - 1) * limit;
 
   // Fetch the page and its total row count (over the same filtered set) in a
@@ -140,7 +184,7 @@ export async function getMarkets(
       COUNT(*) OVER ()::INT AS total_count
     FROM markets
     ${whereSql}
-    ORDER BY ${ORDER_BY[sort]}
+    ORDER BY ${orderBy}
     LIMIT $${baseValues.length + 1}
     OFFSET $${baseValues.length + 2}
   `;
@@ -276,6 +320,70 @@ export async function getResolutionDelayStatus(
     oldestOverdueSeconds,
     delayedMarketIds: rows.map((r) => Number(r.id)),
     graceSeconds,
+    checkedAt: new Date(nowSeconds * 1000).toISOString(),
+  };
+}
+
+// ── Unmappable-market sweep (issue #745) ─────────────────────────────────────
+//
+// A market whose question no adapter can map is unresolvable by construction.
+// Today that is discovered at expiry, when resolution is already urgent. The
+// backend cannot run the oracle's mappability rules, so what it can do is
+// hand out the *candidate set* — open markets, soonest to expire first — and
+// let the oracle classify it. Splitting it this way keeps the category rules
+// in one place instead of duplicating an adapter list into SQL.
+
+/** A market the sweep should classify. Carries no symbol — the DB has none. */
+export type UnmappableCandidate = {
+  id: string;
+  question: string;
+  /** Stored category, e.g. "Crypto". Adapters use the lowercase form. */
+  category: string;
+  end_time: string;
+};
+
+export type UnmappableCandidateResult = {
+  candidates: UnmappableCandidate[];
+  /** Markets within `withinSeconds` of expiry, plus `includePastExpiry` ones. */
+  checked: number;
+  windowSeconds: number;
+  includePastExpiry: boolean;
+  checkedAt: string;
+};
+
+export async function getUnmappableCandidates(
+  db: Queryable = getDefaultDb(),
+  opts: {
+    withinSeconds?: number;
+    limit?: number;
+    includePastExpiry?: boolean;
+    now?: number;
+  } = {},
+): Promise<UnmappableCandidateResult> {
+  const withinSeconds = opts.withinSeconds ?? Number(process.env.UNMAPPABLE_SWEEP_WINDOW_SECONDS ?? 30 * 24 * 3600);
+  const limit = opts.limit ?? Number(process.env.UNMAPPABLE_SWEEP_LIMIT ?? 100);
+  const includePastExpiry = opts.includePastExpiry ?? true;
+  const nowSeconds = Math.floor((opts.now ?? Date.now()) / 1000);
+  const cutoff = nowSeconds + withinSeconds;
+
+  // `end_time` is a past deadline for markets that expired but have not been
+  // resolved. Those are the most urgent of all, so they lead the list.
+  const { rows } = await db.query<UnmappableCandidate>(
+    `SELECT id::TEXT, question, category, end_time::TEXT
+       FROM markets
+      WHERE resolved = false
+        AND cancelled = false
+        AND ($1 OR end_time <= $2)
+      ORDER BY end_time ASC
+      LIMIT $3`,
+    [includePastExpiry, cutoff, limit],
+  );
+
+  return {
+    candidates: rows,
+    checked: rows.length,
+    windowSeconds: withinSeconds,
+    includePastExpiry,
     checkedAt: new Date(nowSeconds * 1000).toISOString(),
   };
 }

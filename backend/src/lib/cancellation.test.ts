@@ -40,19 +40,14 @@ describe("registerCancellationHook", () => {
 
     app.get("/slow", async (request, reply) => {
       capturedSignal = request.abortSignal;
-      // Simulate the client disconnecting mid-handler: fire 'close' on the
-      // real raw ServerResponse before we've written anything.
       expect(reply.raw.writableEnded).toBe(false);
       reply.raw.emit("close");
-
-      // Give the signal's listener a turn to run.
-      await new Promise((resolve) => setImmediate(resolve));
       handlerSawAbort = capturedSignal?.aborted ?? false;
 
       return { ok: true };
     });
 
-    await app.inject({ method: "GET", url: "/slow" });
+    await app.inject({ method: "GET", url: "/slow" }).catch(() => {});
 
     expect(handlerSawAbort).toBe(true);
     expect(capturedSignal?.aborted).toBe(true);

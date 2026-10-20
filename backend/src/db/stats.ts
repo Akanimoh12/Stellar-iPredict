@@ -41,15 +41,16 @@ function computeBetAggregates(bets: { marketId: number; bet: Bet }[]): BetAggreg
   const bettors = new Set<string>();
 
   for (const { bet } of bets) {
-    totalVolume += bet.amount;
+    const amount = Number(bet.amount) || 0;
+    totalVolume += amount;
     bettors.add(bet.address);
 
     if (bet.isYes) {
       yesCount++;
-      yesVolume += bet.amount;
+      yesVolume += amount;
     } else {
       noCount++;
-      noVolume += bet.amount;
+      noVolume += amount;
     }
 
     if (bet.claimed) {

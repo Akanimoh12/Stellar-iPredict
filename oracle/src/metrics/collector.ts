@@ -18,11 +18,10 @@
  *
  * ## Resolution lag
  *
- * There is no `markets.resolved_at` column. `oracle_submissions.finalized_at`
- * (added in `db/migrations/0011_extend_oracle_submissions.sql`) is the moment
- * the decision was recorded, and `markets.end_time` is the expiry, so lag is
- * the difference between them. This matches `AggregatorMetrics.recordResolution`,
- * which computes the same quantity in-process for a single finalization.
+ * Resolution observations are stored in `oracle_resolution_lag` after the
+ * finalization transaction commits. This keeps the historical series intact
+ * across restarts and avoids coupling the finalization write to the metrics
+ * write.
  */
 
 import type { QueryablePool } from "../aggregator/tally.js";
@@ -93,14 +92,11 @@ export async function collectResolutionLag(
   limit: number,
 ): Promise<ResolutionLagSample[]> {
   const result = await pool.query<LagRow>(
-    `SELECT s.market_id::text                    AS market_id,
-            m.end_time                           AS end_time,
-            EXTRACT(EPOCH FROM s.finalized_at)   AS finalized_at_epoch
-       FROM oracle_submissions s
-       JOIN markets m ON m.id = s.market_id
-      WHERE s.status = 'finalized'
-        AND s.finalized_at IS NOT NULL
-      ORDER BY s.finalized_at DESC
+    `SELECT market_id::text AS market_id,
+            end_time,
+            resolved_at_epoch
+       FROM oracle_resolution_lag
+      ORDER BY resolved_at_epoch DESC
       LIMIT $1`,
     [limit],
   );

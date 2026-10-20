@@ -18,7 +18,7 @@
 | `postgres` | `postgres:16.4-alpine` | 1 | no |
 | `redis` | `redis:7.4-alpine` | 1 | no |
 | `api` | `../backend` (`Dockerfile`) | `API_REPLICAS`, default 3 | no |
-| `indexer` | `../indexer` (`src/Dockerfile`) | 1, always | no |
+| `indexer` | `../indexer` (`Dockerfile`) | 1, always | no |
 | `oracle-aggregator` | `../oracle` (`src/aggregator/Dockerfile`) | 1 | yes — `RESOLVER_KEY` |
 | `oracle-monitor` | same image as `oracle-aggregator`, different command | 1 | no (read-only) |
 | `log-collector` | `fluent/fluent-bit:3.1.9` | 1 | no |

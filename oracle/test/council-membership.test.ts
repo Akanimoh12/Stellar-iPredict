@@ -7,6 +7,7 @@ import {
   hasQuorum,
   meetsThreshold,
   describeCouncilConfig,
+  compareCouncilResolvers,
   COUNCIL_SIZE,
   COUNCIL_DEFAULT_THRESHOLD,
 } from "../src/config/council.js";
@@ -155,6 +156,33 @@ describe("isCouncilMember", () => {
   it("returns false for an unknown key", () => {
     const config = loadCouncilConfig(buildEnv());
     expect(isCouncilMember(config, Keypair.random().publicKey())).toBe(false);
+  });
+});
+
+describe("compareCouncilResolvers", () => {
+  it("reports configured members missing from the chain", () => {
+    const config = loadCouncilConfig(buildEnv());
+    const missing = config.members[0]!;
+    const report = compareCouncilResolvers(config, config.members.slice(1));
+
+    expect(report.matches).toBe(false);
+    expect(report.missingOnChain).toEqual([missing]);
+    expect(report.unconfiguredOnChain).toEqual([]);
+  });
+
+  it("reports on-chain resolvers absent from configuration", () => {
+    const config = loadCouncilConfig(buildEnv());
+    const extra = Keypair.random().publicKey();
+    const report = compareCouncilResolvers(config, [...config.members, extra]);
+
+    expect(report.matches).toBe(false);
+    expect(report.missingOnChain).toEqual([]);
+    expect(report.unconfiguredOnChain).toEqual([extra]);
+  });
+
+  it("matches identical resolver sets", () => {
+    const config = loadCouncilConfig(buildEnv());
+    expect(compareCouncilResolvers(config, [...config.members].reverse()).matches).toBe(true);
   });
 });
 

@@ -32,6 +32,7 @@
 
 import { StrKey } from "@stellar/stellar-sdk";
 import { z } from "zod";
+import { normalizeEnvironment } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -155,6 +156,32 @@ export interface CouncilConfig {
   resolverSecretKey: string;
 }
 
+export interface CouncilResolverDivergence {
+  /** Configured members absent from the on-chain resolver set. */
+  missingOnChain: readonly string[];
+  /** On-chain resolvers absent from configured council membership. */
+  unconfiguredOnChain: readonly string[];
+  matches: boolean;
+}
+
+export type CouncilResolverReport = CouncilResolverDivergence;
+
+/** Compares canonical resolver addresses without exposing any secret config. */
+export function compareCouncilResolvers(
+  config: CouncilConfig,
+  onChainResolvers: readonly string[],
+): CouncilResolverDivergence {
+  const configured = new Set(config.members);
+  const onChain = new Set(onChainResolvers);
+  const missingOnChain = config.members.filter((member) => !onChain.has(member));
+  const unconfiguredOnChain = onChainResolvers.filter((resolver) => !configured.has(resolver));
+  return {
+    missingOnChain,
+    unconfiguredOnChain,
+    matches: missingOnChain.length === 0 && unconfiguredOnChain.length === 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -171,7 +198,7 @@ export interface CouncilConfig {
  * - `RESOLVER_SECRET_KEY` is missing or malformed.
  */
 export function loadCouncilConfig(env: NodeJS.ProcessEnv = process.env): CouncilConfig {
-  const parsed = schema.parse(env);
+  const parsed = schema.parse(normalizeEnvironment(env));
   const threshold = parsed.COUNCIL_THRESHOLD;
   const quorum = parsed.COUNCIL_QUORUM ?? threshold;
   return {

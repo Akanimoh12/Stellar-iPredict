@@ -137,11 +137,9 @@ oracle submission is open, the finalizers still run so bonds are never stranded
 in escrow — they simply skip the resolution step and leave the market as it is.
 
 Oracle-specific contract errors: `21` submission exists, `22` submission not
-found, `23` already challenged, `24` challenge window not elapsed, `25` bond
-transfer failed (reserved — bond escrow traps rather than returning it),
-`26` challenge window closed, `27` invalid state transition, `28` bond too
-small. Codes `21`–`25` were already declared on `implementation-drips` and keep
-their numbering and names.
+found, `23` already challenged, `24` challenge window not elapsed, `25` challenge
+window closed, `26` invalid state transition, `27` bond too small. These errors
+are reachable and documented at their definition site in the contract source.
 
 ---
 
@@ -368,6 +366,7 @@ CREATE INDEX idx_events_ledger   ON events(ledger_seq DESC);
 import { rpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 
 const POLL_INTERVAL_MS = 5_000;
+// Capped at 1000 (MAX_EVENTS_PER_PAGE) to bound backfill memory usage.
 const EVENTS_PER_PAGE = 200;
 
 async function indexEvents(fromLedger: number): Promise<number> {
@@ -381,10 +380,16 @@ async function indexEvents(fromLedger: number): Promise<number> {
     limit: EVENTS_PER_PAGE
   });
 
-  for (const event of response.events) {
-    const topics = event.topic.map(t => scValToNative(t));
-    const data = scValToNative(event.value);
-    await writeEventToDb(event.ledger, event.txHash, topics, data);
+  // Process in chunks to bound memory and yield to the event loop.
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < response.events.length; i += CHUNK_SIZE) {
+    const chunk = response.events.slice(i, i + CHUNK_SIZE);
+    for (const event of chunk) {
+      const topics = event.topic.map(t => scValToNative(t));
+      const data = scValToNative(event.value);
+      await writeEventToDb(event.ledger, event.txHash, topics, data);
+    }
+    await new Promise(resolve => setImmediate(resolve));
   }
 
   return response.latestLedger;
@@ -637,12 +642,12 @@ services:
 #### Indexer Image Runbook
 
 Build the production indexer image from the `indexer/` directory. The Dockerfile
-lives under `indexer/src/` so the build context can still include
+lives under `indexer/` so the build context can still include
 `package-lock.json`, `tsconfig.json`, and the full source tree.
 
 ```bash
 cd indexer
-docker build -f src/Dockerfile -t ipredict-indexer:local .
+docker build -t ipredict-indexer:local .
 ```
 
 Run the image with the same environment variables documented in
@@ -666,8 +671,10 @@ const METRICS = {
 
   // Application health
   "api_request_duration_ms":  "histogram",
-  "cache_hit_rate":           "gauge",
-  "db_query_duration_ms":     "histogram",
+  "cache_hit_rate":           "gauge",    // whole cache, windowed in PromQL
+  "cache_namespace_hit_rate": "gauge",    // per key namespace: market, bets, …
+  "negative_cache_hit_rate":  "gauge",    // not-found lookups, counted apart
+  "db_query_duration_ms":     "histogram", // the load cache misses create
 
   // Business metrics
   "markets_created_total":    "counter",
@@ -683,13 +690,35 @@ const METRICS = {
 
 // Alerts
 const ALERTS = [
-  { name: "IndexerStalled",     condition: "indexer_lag_ledgers > 100" },
+  { name: "IndexerLagWarning",   condition: "indexer_lag_ledgers > 100 for 5m" },
+  { name: "IndexerLagCritical",  condition: "indexer_lag_ledgers > 500 for 10m" },
+  { name: "IndexerCursorStalled", condition: "time() - indexer_cursor_last_advanced_timestamp_seconds > 60 for 5m" },
   { name: "HighRPCErrorRate",   condition: "rpc_errors_total rate > 5/min" },
   { name: "MarketStuck",        condition: "market unresolved > 48h past expiry" },
   { name: "HighAPILatency",     condition: "api_p99 > 2000ms" },
   { name: "DatabaseSlow",       condition: "db_query_p99 > 500ms" },
+  { name: "LowCacheHitRate",    condition: "cache hit rate < 50% over 10m" },
+  { name: "CacheHitRateBelowBaseline",
+    condition: "one namespace < 80% of its own 6h baseline, ≥100 lookups" },
 ];
 ```
+
+Per-namespace hit rate is what makes a hit-rate alert actionable: the
+aggregate tells you *something* changed, while `market` vs `bets` vs
+`leaderboard` tells you which key structure broke. `CacheHitRateBelowBaseline`
+compares each namespace against its own recent history rather than a fixed
+number, so a namespace that normally runs cold does not page and one that
+normally runs hot does not hide a regression behind an absolute floor.
+Negative-cache lookups (answers of "this does not exist") are a separate
+metric family: folding them into `cache_hit_rate` would let a 404 storm prop
+the hit rate up while Postgres ran the same zero-row query over and over.
+
+The **Cache & Database Load** Grafana dashboard (`infra/grafana/cache.json`)
+plots hit rate by namespace, misses falling through to the database, the
+negative-cache hit rate, `db_query_duration_ms` rate and latency, pool
+occupancy and API latency on one time axis with a shared crosshair, so a
+hit-rate dip and the query spike it causes are read as one event.
+
 
 ---
 

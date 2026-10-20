@@ -117,6 +117,7 @@ export function normalizeSchemaDump(dump: string): string {
     .split("\n")
     .map((line) => line.replace(/\s+$/g, ""))
     .filter((line) => {
+      if (/^\\(?:un)?restrict\s/.test(line)) return false;
       if (line.includes("PostgreSQL database dump")) return false;
       if (line.includes("Dumped from database version")) return false;
       if (line.includes("Dumped by pg_dump version")) return false;

@@ -33,7 +33,7 @@ describe("decodeTokenMint", () => {
     const event: DecodedEvent = {
       topics: [TOKEN_MINT_TOPIC],
       data: {
-        user: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        user: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: 500,
       },
       ledger: 12345,
@@ -42,7 +42,7 @@ describe("decodeTokenMint", () => {
     };
 
     const result = decodeTokenMint(event);
-    expect(result.to).toBe("GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    expect(result.to).toBe("GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
     expect(result.amount).toBe("500");
   });
 
@@ -108,7 +108,7 @@ describe("decodeTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "250.0000000",
       },
       ledger: 12345,
@@ -119,7 +119,7 @@ describe("decodeTokenTransfer", () => {
     const result = decodeTokenTransfer(event);
     expect(result).toEqual({
       from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
       amount: "250.0000000",
     });
   });
@@ -129,7 +129,7 @@ describe("decodeTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: 123.456,
       },
       ledger: 12345,
@@ -146,7 +146,7 @@ describe("decodeTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "invalid",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "100",
       },
       ledger: 12345,
@@ -321,7 +321,7 @@ describe("handleTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "250",
       },
       ledger: 12345,
@@ -341,7 +341,7 @@ describe("handleTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "150",
       },
       ledger: 12345,
@@ -370,7 +370,7 @@ describe("handleTokenTransfer", () => {
       "150",
     ]);
     expect(creditCall?.[1]).toEqual([
-      "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
       "150",
     ]);
   });
@@ -380,7 +380,7 @@ describe("handleTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "200",
       },
       ledger: 12345,
@@ -392,7 +392,7 @@ describe("handleTokenTransfer", () => {
 
     expect(mockRedis?.del).toHaveBeenCalledWith(
       "token_balance:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "token_balance:GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "token_balance:GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
       "stats:global",
       "leaderboard:top20",
     );
@@ -420,7 +420,7 @@ describe("handleTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "300",
       },
       ledger: 12345,
@@ -445,6 +445,8 @@ describe("handleTokenTransfer", () => {
         if (sql === "BEGIN") return { rows: [] };
         if (sql === "ROLLBACK") return { rows: [] };
         if (sql.includes("SELECT")) return { rows: [{ exists: false }] };
+        // Allow idempotency INSERT INTO events to succeed
+        if (sql.includes("INSERT INTO events")) return { rows: [], rowCount: 1 };
         throw new Error("Database error");
       }),
     } as any;
@@ -455,7 +457,7 @@ describe("handleTokenTransfer", () => {
       topics: [TOKEN_TRANSFER_TOPIC],
       data: {
         from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        to: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         amount: "100",
       },
       ledger: 12345,

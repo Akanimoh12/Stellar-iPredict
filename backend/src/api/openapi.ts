@@ -82,7 +82,7 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
  * security headers set for #71, and the spec is what tooling consumes anyway.
  */
 export function registerOpenApi(app: FastifyInstance, options: OpenApiOptions = {}): void {
-  app.register(swagger, { openapi: buildOpenApiDocument(options) });
+  app.register(swagger, { openapi: buildOpenApiDocument(options) as any });
 
   // Nested so it loads after the plugin above and lands in the spec itself.
   app.register(async (routes) => {

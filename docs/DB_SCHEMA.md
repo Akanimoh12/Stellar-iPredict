@@ -125,9 +125,11 @@ workflow described in
 | `tx_hash` | `CHAR(64)` | Finalization transaction hash |
 | `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
 | `council_votes` | `JSONB` | Council vote records used to resolve the market |
+| `request_id` | `TEXT` | Correlation id of the writer: the backend request id for an HTTP submission, or the aggregator's attempt id for a finalized decision. Nullable; `CHECK`ed against the request id format (#467) |
 
 Indexes: `idx_oracle_submissions_market_id` unique on `market_id`,
-`idx_oracle_submissions_status` on `status`.
+`idx_oracle_submissions_status` on `status`, `idx_oracle_submissions_request_id`
+on `request_id` (partial, non-null rows only).
 
 ### `council_votes`
 

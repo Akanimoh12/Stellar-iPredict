@@ -163,7 +163,7 @@ fn submit_before_market_expiry_is_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #28)")] // OracleBondTooSmall
+#[should_panic(expected = "Error(Contract, #27)")] // OracleBondTooSmall
 fn submit_with_bond_below_minimum_is_rejected() {
     let t = setup();
     expire_market(&t);
@@ -200,7 +200,7 @@ fn challenge_escalates_to_council_without_finalizing() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #28)")] // OracleBondTooSmall
+#[should_panic(expected = "Error(Contract, #27)")] // OracleBondTooSmall
 fn challenge_rejects_bond_not_strictly_larger_than_submitter() {
     let t = setup();
     submit(&t, t.market_id, true);
@@ -210,7 +210,7 @@ fn challenge_rejects_bond_not_strictly_larger_than_submitter() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #28)")] // OracleBondTooSmall
+#[should_panic(expected = "Error(Contract, #27)")] // OracleBondTooSmall
 fn challenge_rejects_below_disputer_minimum() {
     let t = setup();
     submit(&t, t.market_id, true);
@@ -219,7 +219,7 @@ fn challenge_rejects_below_disputer_minimum() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #26)")] // OracleWindowClosed
+#[should_panic(expected = "Error(Contract, #25)")] // OracleWindowClosed
 fn challenge_after_window_elapsed_is_rejected() {
     let t = setup();
     submit(&t, t.market_id, true);
@@ -301,7 +301,7 @@ fn finalize_an_escalated_submission_is_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #27)")] // OracleInvalidState
+#[should_panic(expected = "Error(Contract, #26)")] // OracleInvalidState
 fn double_finalize_is_rejected() {
     let t = setup();
     submit(&t, t.market_id, true);
@@ -320,7 +320,7 @@ fn council_ruling_upholding_submitter_finalizes() {
     escalate(&t);
 
     // Council rules in the submitter's favour (outcome == submission.outcome).
-    t.client.resolve_challenge(&t.admin, &t.market_id, &true);
+    council_ruling(&t, &t.admin, t.market_id, true);
 
     let sub = t.client.get_oracle_submission(&t.market_id);
     assert_eq!(sub.state, OracleState::Finalized);
@@ -337,7 +337,7 @@ fn council_ruling_against_submitter_finalizes() {
     submit(&t, t.market_id, true); // submitter asserts `true`
     escalate(&t);
 
-    t.client.resolve_challenge(&t.admin, &t.market_id, &false);
+    council_ruling(&t, &t.admin, t.market_id, false);
 
     let sub = t.client.get_oracle_submission(&t.market_id);
     assert_eq!(sub.state, OracleState::Finalized);
@@ -357,11 +357,11 @@ fn resolve_challenge_by_non_resolver_is_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #27)")] // OracleInvalidState
+#[should_panic(expected = "Error(Contract, #26)")] // OracleInvalidState
 fn resolve_challenge_when_not_escalated_is_rejected() {
     let t = setup();
     submit(&t, t.market_id, true); // still Submitted
-    t.client.resolve_challenge(&t.admin, &t.market_id, &true);
+    council_ruling(&t, &t.admin, t.market_id, true);
 }
 
 // ── No fees accrue on the unchallenged auto-finalize path ────────────────────
@@ -373,4 +373,17 @@ fn unchallenged_finalize_does_not_accumulate_fees() {
     advance(&t.env, CHALLENGE_WINDOW);
     t.client.finalize_outcome(&t.market_id);
     assert_eq!(t.client.get_accumulated_fees(), 0);
+}
+
+// Settlement fixtures must satisfy the current council vote and deadline requirements.
+fn council_ruling(t: &OracleTest, caller: &Address, market_id: u64, outcome: bool) {
+    let submission = t.client.get_oracle_submission(&market_id);
+    if submission.state == OracleState::Escalated {
+        t.client.vote_on_challenge(caller, &market_id, &outcome);
+        let now = t.env.ledger().timestamp();
+        if now < submission.council_deadline {
+            advance(&t.env, submission.council_deadline - now);
+        }
+    }
+    t.client.resolve_challenge(caller, &market_id, &outcome);
 }

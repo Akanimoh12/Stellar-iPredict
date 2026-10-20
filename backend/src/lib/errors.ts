@@ -1,6 +1,7 @@
 import { REQUEST_ID_HEADER } from "./log.js";
 
-export interface FastifyErrorLike extends Error { statusCode?: number; code?: string }
+export interface AjvValidationIssue { instancePath?: string; message?: string; params?: Record<string, unknown> }
+export interface FastifyErrorLike extends Error { statusCode?: number; code?: string; validation?: AjvValidationIssue[] }
 export interface FastifyReplyLike { status(code: number): FastifyReplyLike; header(name: string, value: string): FastifyReplyLike; send(payload: unknown): unknown }
 export interface FastifyInstanceLike { setErrorHandler(handler: typeof errorHandler): void }
 export interface FastifyRequestLike { method: string; url: string; id?: string }
@@ -21,7 +22,22 @@ export const requestTimeout = (message = "Request timeout") => new HttpError(408
 export const conflict = (message = "Conflict") => new HttpError(409, "CONFLICT", message);
 export const payloadTooLarge = (message = "Payload too large") => new HttpError(413, "PAYLOAD_TOO_LARGE", message);
 
-export interface ErrorResponse { error: { code: string; message: string; requestId: string } }
+export interface ValidationDetail { field: string; message: string }
+export interface ErrorResponse { error: { code: string; message: string; requestId: string; details?: ValidationDetail[] } }
+
+/**
+ * Field-level detail for a Fastify/AJV schema validation failure (#879).
+ *
+ * `instancePath` is empty for a root-level failure such as a missing
+ * required property, where AJV names the field in `params` instead.
+ */
+function validationDetails(error: FastifyErrorLike): ValidationDetail[] | undefined {
+  if (!Array.isArray(error.validation) || error.validation.length === 0) return undefined;
+  return error.validation.map((issue) => ({
+    field: issue.instancePath ? issue.instancePath.slice(1) : String(issue.params?.missingProperty ?? "(body)"),
+    message: issue.message ?? "Invalid value",
+  }));
+}
 
 const DEPENDENCY_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004", "08006", "08007", "57P01"]);
 export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolean {
@@ -29,12 +45,92 @@ export function isDependencyUnavailable(error: FastifyErrorLike | Error): boolea
   return typeof code === "string" && DEPENDENCY_CODES.has(code.toUpperCase());
 }
 
+/**
+ * Diagnostic fields Postgres (`pg`) attaches to a database error.
+ *
+ * Their presence is a reliable fingerprint for "this text came from the
+ * database driver", which is the distinction that matters: a driver message
+ * embeds schema details, so it must never be forwarded to a client.
+ */
+const DRIVER_DIAGNOSTIC_FIELDS = [
+  "severity", "detail", "hint", "position", "routine", "schema",
+  "table", "column", "constraint", "dataType", "internalQuery",
+] as const;
+
+/** A SQLSTATE is 5 characters: a 2-character class then a 3-character code. */
+const SQLSTATE_PATTERN = /^(?:[0-9]{2}|[A-Z]{2})[0-9A-Z]{3}$/;
+
+export interface DriverErrorLike extends Error {
+  code?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Whether `error` originated in a database driver rather than in our own code.
+ *
+ * This is what stops a raw Postgres message reaching a client. Such a message
+ * routinely names the table, column and constraint it tripped over — for
+ * example a duplicate-submission failure reads
+ * `duplicate key value violates unique constraint "uq_oracle_submissions_market_id"`,
+ * which alone discloses the schema, and its `DETAIL` line adds the offending
+ * key value.
+ *
+ * Detected structurally rather than by code allow-list, so a SQLSTATE or
+ * diagnostic field the caller has not anticipated is still caught. Callers that
+ * want a *specific* client-facing message (the duplicate-submission conflict)
+ * map the error themselves and throw an {@link HttpError}, which is exempt.
+ */
+export function isDatabaseDriverError(error: FastifyErrorLike | Error): boolean {
+  if (error instanceof HttpError) return false;
+  const candidate = error as DriverErrorLike;
+  if (DRIVER_DIAGNOSTIC_FIELDS.some((field) => candidate[field] !== undefined)) return true;
+  return typeof candidate.code === "string" && SQLSTATE_PATTERN.test(candidate.code.toUpperCase());
+}
+
+/**
+ * Client-facing codes for errors we did not author.
+ *
+ * A SQLSTATE is a database implementation detail, and echoing one gives a
+ * client something to branch on that means nothing outside this service. Every
+ * non-HttpError is reported with one of these instead.
+ */
+function clientCodeFor(statusCode: number): string {
+  if (statusCode === 401) return "UNAUTHORIZED";
+  if (statusCode === 403) return "FORBIDDEN";
+  if (statusCode === 404) return "NOT_FOUND";
+  if (statusCode === 405) return "METHOD_NOT_ALLOWED";
+  if (statusCode === 409) return "CONFLICT";
+  if (statusCode === 413) return "PAYLOAD_TOO_LARGE";
+  if (statusCode === 408) return "REQUEST_TIMEOUT";
+  return "BAD_REQUEST";
+}
+
+/** Fallback text for a status we have nothing specific to say about. */
+function genericMessageFor(statusCode: number): string {
+  // Reuse the exported constructors so the curated text is defined once: a
+  // client that hits a handled path and an unhandled one sees the same wording.
+  switch (clientCodeFor(statusCode)) {
+    case "UNAUTHORIZED": return unauthorized().message;
+    case "FORBIDDEN": return forbidden().message;
+    case "NOT_FOUND": return notFound().message;
+    case "METHOD_NOT_ALLOWED": return methodNotAllowed().message;
+    case "CONFLICT": return conflict().message;
+    case "PAYLOAD_TOO_LARGE": return payloadTooLarge().message;
+    case "REQUEST_TIMEOUT": return requestTimeout().message;
+    default: return "Bad request";
+  }
+}
+
 export function mapError(error: FastifyErrorLike | Error): { statusCode: number; code: string; message: string } {
+  // Our own errors carry a message we wrote, so it is safe to surface.
   if (error instanceof HttpError) return { statusCode: error.statusCode, code: error.code, message: error.message };
   if (isDependencyUnavailable(error)) return { statusCode: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable" };
+
   const maybeStatus = (error as FastifyErrorLike).statusCode;
   const rawCode = (error as FastifyErrorLike).code;
 
+  // Fastify's own transport-level failures have messages we control, and
+  // naming the limit is useful to a client fixing their request.
   if (rawCode === "FST_ERR_CTP_BODY_TOO_LARGE" || maybeStatus === 413) {
     return { statusCode: 413, code: "PAYLOAD_TOO_LARGE", message: error.message || "Payload too large" };
   }
@@ -44,6 +140,13 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
 
   const statusCode = typeof maybeStatus === "number" && maybeStatus >= 400 && maybeStatus < 500 ? maybeStatus : 500;
   if (statusCode < 500) {
+    // A database error carrying a 4xx must not be forwarded verbatim: its text
+    // names tables, columns and constraints. Report the conflict generically
+    // and let the server log keep the detail.
+    if (isDatabaseDriverError(error)) {
+      return { statusCode, code: clientCodeFor(statusCode), message: genericMessageFor(statusCode) };
+    }
+
     const code = rawCode === "FST_ERR_VALIDATION" ? "BAD_REQUEST" : (rawCode ?? "BAD_REQUEST");
     return { statusCode, code, message: error.message || "Request failed" };
   }
@@ -54,9 +157,20 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
 export function errorHandler(error: FastifyErrorLike, request: FastifyRequestLike, reply: FastifyReplyLike): void {
   const mapped = mapError(error);
   const requestId = request.id ?? "unknown";
+  const details = validationDetails(error);
   if (mapped.statusCode === 503) reply.header("Retry-After", "5");
   reply.header(REQUEST_ID_HEADER, requestId);
-  reply.status(mapped.statusCode).send({ error: { code: mapped.code, message: mapped.message, requestId } } satisfies ErrorResponse);
+  // RFC 7807 problem details (#880), with our existing `error` envelope kept
+  // intact as an extension member so current consumers of `error.code` /
+  // `error.message` / `error.requestId` are unaffected.
+  reply.header("Content-Type", "application/problem+json");
+  reply.status(mapped.statusCode).send({
+    type: "about:blank",
+    title: mapped.message,
+    status: mapped.statusCode,
+    instance: request.url,
+    error: { code: mapped.code, message: mapped.message, requestId, ...(details ? { details } : {}) },
+  } satisfies ErrorResponse & { type: string; title: string; status: number; instance: string });
 }
 
 export function registerErrorHandler(app: FastifyInstanceLike): void {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -10,11 +11,29 @@ export interface ProvenanceRecord {
   recordedAt: string;
   sources: SourceResult[];
   decision: Pick<ResolutionResult, "status" | "outcome" | "confidence">;
+  /** Content hashes per provider / adapter for cryptographic dispute evidence. */
+  payloadHashes?: Record<string, string>;
 }
 
 export interface ProvenanceStore {
   save(record: ProvenanceRecord): Promise<void>;
   get(marketId: string): Promise<ProvenanceRecord | undefined>;
+}
+
+/**
+ * Computes a deterministic SHA-256 content hash of a raw provider payload for dispute evidence.
+ */
+export function computePayloadHash(payload: unknown): string {
+  if (payload === undefined || payload === null) {
+    return "";
+  }
+  const serialized =
+    typeof payload === "string"
+      ? payload
+      : Buffer.isBuffer(payload)
+        ? payload.toString("utf8")
+        : JSON.stringify(payload);
+  return createHash("sha256").update(serialized).digest("hex");
 }
 
 /** Remove credentials recursively before provider responses reach storage. */
@@ -43,15 +62,30 @@ export function createProvenanceRecord(
   result: ResolutionResult,
   recordedAt = new Date().toISOString(),
 ): ProvenanceRecord {
+  const sanitizedSources = sanitizeProvenanceValue(result.sources) as SourceResult[];
+  const payloadHashes: Record<string, string> = {};
+
+  for (const source of sanitizedSources) {
+    if (source.raw !== undefined && source.raw !== null) {
+      const hash = computePayloadHash(source.raw);
+      source.payloadHash = hash;
+      const key = source.provider || source.adapterId;
+      if (key) {
+        payloadHashes[key] = hash;
+      }
+    }
+  }
+
   return {
     marketId,
     recordedAt,
-    sources: sanitizeProvenanceValue(result.sources) as SourceResult[],
+    sources: sanitizedSources,
     decision: {
       status: result.status,
       outcome: result.outcome,
       confidence: result.confidence,
     },
+    payloadHashes,
   };
 }
 

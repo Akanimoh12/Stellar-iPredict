@@ -2,9 +2,13 @@ import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { HealthCheckResult } from "@/db/health";
 
-vi.mock("@/db/health", () => ({
-  pingDb: vi.fn(),
-}));
+vi.mock("@/db/health", async () => {
+  const actual = await vi.importActual<typeof import("@/db/health")>("@/db/health");
+  return {
+    ...actual,
+    pingDb: vi.fn(),
+  };
+});
 
 vi.mock("@/db/redis", () => ({
   pingRedis: vi.fn(),
@@ -94,6 +98,18 @@ describe("GET /readyz", () => {
     expect(body.status).toBe("not ready");
     expect(body.checks.db.ok).toBe(false);
     expect(body.checks.redis.ok).toBe(false);
+  });
+
+  it("keeps /healthz liveness at 200 while /readyz reports not ready", async () => {
+    pingDbMock.mockResolvedValue({ ok: false, error: "timeout" });
+    pingRedisMock.mockResolvedValue({ ok: false, error: "no connection" });
+
+    const app = makeServer();
+    const live = await app.inject({ method: "GET", url: "/healthz" });
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(live.statusCode).toBe(200);
+    expect(ready.statusCode).toBe(503);
   });
 
   it("bounds a hung dependency check with a timeout instead of hanging", async () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveMarketOnChain, type OnChainSubmitter, type ResolveMarketResult } from "../src/submitter/resolveMarket.js";
+import {
+  classifyResolutionFailure,
+  ResolutionSubmissionError,
+  resolveMarketOnChain,
+  type OnChainSubmitter,
+  type ResolveMarketResult,
+} from "../src/submitter/resolveMarket.js";
 import { AggregatorMetrics, ORACLE_RESOLUTION_LAG_H_METRIC } from "../src/aggregator/metrics.js";
 
 function makeDeps(overrides: {
@@ -152,5 +158,46 @@ describe("resolveMarketOnChain", () => {
 
     const line = metrics.serializeMetric(ORACLE_RESOLUTION_LAG_H_METRIC, "88");
     expect(line).toMatch(/^oracle_resolution_lag_h\{market_id="88"\} /);
+  });
+});
+
+
+describe("resolution submission failure handling", () => {
+  it("classifies expired and sequence-number failures distinctly", () => {
+    expect(classifyResolutionFailure(new Error("tx_too_late: ledger bound expired"))).toBe("expired");
+    expect(classifyResolutionFailure(new Error("tx_bad_seq sequence number mismatch"))).toBe("sequence");
+    expect(classifyResolutionFailure(new Error("contract rejected"))).toBe("rejected");
+  });
+
+  it("does not resubmit an ambiguous transaction that durable state says landed", async () => {
+    let resolvedChecks = 0;
+    const submitter: OnChainSubmitter = {
+      submitResolution: vi.fn(async () => {
+        throw new ResolutionSubmissionError(
+          "ambiguous",
+          "confirmation timed out",
+          "landed-hash",
+        );
+      }),
+    };
+    const recorded: ResolveMarketResult[] = [];
+    const result = await resolveMarketOnChain(
+      {
+        submitter,
+        isAlreadyResolved: async () => {
+          resolvedChecks += 1;
+          return resolvedChecks >= 2;
+        },
+        recordResult: async (value) => recorded.push(value),
+        maxRetries: 3,
+        retryBackoffMs: 1,
+      },
+      "42",
+      true,
+    );
+
+    expect(submitter.submitResolution).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ marketId: "42", outcome: true, txHash: "landed-hash" });
+    expect(recorded).toEqual([result]);
   });
 });

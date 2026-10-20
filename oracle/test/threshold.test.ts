@@ -6,6 +6,7 @@ import {
 } from "../src/aggregator/threshold.js";
 import { computeTally } from "../src/aggregator/tally.js";
 import { CouncilVoteManager } from "../src/aggregator/council-votes.js";
+import type { SubmissionStore } from "../src/aggregator/tally.js";
 
 const yes = (member: string): CouncilVote => ({ member, outcome: true });
 const no = (member: string): CouncilVote => ({ member, outcome: false });
@@ -48,6 +49,10 @@ describe("selectThresholdOutcome", () => {
     expect(selectThresholdOutcome(votes, 3)).toBeNull();
   });
 
+  it("completely ignores blank member submissions so they never satisfy a threshold", () => {
+    expect(selectThresholdOutcome([yes("   "), no("")], 1)).toBeNull();
+  });
+
   it("is deterministic regardless of vote ordering", () => {
     const base = [yes("a"), yes("b"), no("c"), no("d"), yes("e")];
     const shuffled = [base[3], base[0], base[4], base[2], base[1]];
@@ -87,6 +92,29 @@ describe("selectThresholdOutcome", () => {
         totalMembers: 4,
         ambiguous: false,
         outcome: true,
+      }),
+    );
+  });
+
+  it("returns true when YES strictly exceeds the threshold (> threshold)", () => {
+    const votes = [yes("a"), yes("b"), yes("c"), yes("d"), no("e")];
+    expect(selectThresholdOutcome(votes, 3)).toBe(true);
+  });
+
+  it("returns false when NO strictly exceeds the threshold (> threshold)", () => {
+    const votes = [no("a"), no("b"), no("c"), no("d"), yes("e")];
+    expect(selectThresholdOutcome(votes, 3)).toBe(false);
+  });
+
+  it("logs marketId as null when marketId is omitted/undefined", () => {
+    const info = vi.fn();
+    const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    type LoggerArg = Parameters<typeof selectThresholdOutcome>[2];
+    selectThresholdOutcome([yes("a")], 1, logger as unknown as LoggerArg);
+    expect(info).toHaveBeenCalledWith(
+      "vote tally",
+      expect.objectContaining({
+        marketId: null,
       }),
     );
   });
@@ -133,5 +161,29 @@ describe("CouncilVoteManager", () => {
   it("rejects a blank council member", () => {
     const mgr = new CouncilVoteManager();
     expect(() => mgr.submitVote("   ", true)).toThrow("Council member is required");
+  });
+
+  it("uses the durable store for market tallies and replaces a member vote", async () => {
+    const votes = new Map<string, boolean>();
+    const store: SubmissionStore = {
+      async recordSubmission(_marketId, member, outcome) {
+        votes.set(member, outcome);
+      },
+      async getSubmissions() {
+        return [...votes.entries()].map(([member, outcome]) => ({ member, outcome }));
+      },
+    };
+    const manager = new CouncilVoteManager(store);
+
+    await manager.submitVoteToStore("42", "alice", true);
+    await manager.submitVoteToStore("42", "alice", false);
+    await manager.submitVoteToStore("42", "bob", true);
+
+    await expect(manager.getTallyFromStore("42")).resolves.toMatchObject({
+      yesVotes: 1,
+      noVotes: 1,
+      totalVoters: 2,
+    });
+    await expect(manager.getAgreedOutcomeFromStore("42", 2)).resolves.toBeNull();
   });
 });

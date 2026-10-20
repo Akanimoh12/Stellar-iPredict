@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { optionalEnv } from "../config/env.js";
+import { normalizeEnvironment, optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
@@ -22,9 +22,12 @@ const schema = z.object({
 
   /** Health server options (Issue #449). */
   HEALTH_ENABLED: z.coerce.boolean().default(true),
-  HEALTH_PORT: positiveInteger.default(9102),
+  HEALTH_PORT: positiveInteger.default(9103),
   HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
   MAX_POLL_STALE_MS: positiveInteger.default(30_000),
+
+  /** Maximum time to drain an in-flight market after SIGTERM/SIGINT. */
+  SHUTDOWN_GRACE_MS: positiveInteger.default(20_000),
 
   /** Fraction (0–1) of dissenting votes that triggers a conflict flag. */
   CONFLICT_THRESHOLD: unitFraction.default(0.3),
@@ -35,8 +38,40 @@ const schema = z.object({
   /** Initial resolver key for signing finalization transactions. */
   RESOLVER_KEY: optionalEnv(z.string().min(1)),
 
+  /**
+   * Market contract finalization transactions are sent to. processMarket skips
+   * every market while this or RESOLVER_KEY is unset. Declared here because
+   * the schema strips undeclared keys, which left it permanently undefined.
+   */
+  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
+
+  /** Stellar network passphrase for signing; defaults to testnet when unset. */
+  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
+
   /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
   FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
+
+  /** Optional webhook URL for aggregator alert notifications (issue #462). */
+  ALERT_WEBHOOK_URL: optionalEnv(z.string().url()),
+
+  /**
+   * HMAC-SHA256 signing secret for finalization webhook deliveries (issue #461).
+   * When set, each delivery includes `X-Signature` and `X-Timestamp` headers.
+   * Keep this value distinct from API keys; rotate via a `_FILE` indirection.
+   */
+  WEBHOOK_SIGNING_SECRET: optionalEnv(z.string().min(1)),
+
+  /**
+   * Maximum total delivery attempts (initial + retries) for the finalization
+   * webhook (issue #460). Defaults to 5.
+   */
+  FINALIZE_WEBHOOK_MAX_ATTEMPTS: positiveInteger.default(5),
+
+  /**
+   * Milliseconds before the same (severity, marketId) alert is re-delivered
+   * (issue #462). Set to 0 to disable cooldown. Defaults to 15 minutes.
+   */
+  ALERT_COOLDOWN_MS: z.coerce.number().int().min(0).default(15 * 60 * 1_000),
 
   SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
   SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
@@ -70,5 +105,12 @@ const schema = z.object({
 
 export type AggregatorConfig = z.infer<typeof schema>;
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
-  return schema.parse(env);
+  const result = schema.safeParse(normalizeEnvironment(env));
+  if (!result.success) {
+    const details = result.error.issues
+      .map((issue) => `  ${issue.path.join(".") || "config"}: ${issue.message}`)
+      .join("\n");
+    throw new Error(`[ipredict-oracle] invalid configuration:\n${details}`);
+  }
+  return result.data;
 }

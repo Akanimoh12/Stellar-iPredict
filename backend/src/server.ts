@@ -22,6 +22,7 @@ import {
   genReqId,
   registerRequestLogging,
 } from "./lib/log.js";
+import { config } from "./config/index.js";
 
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
@@ -125,15 +126,29 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // Validate allowed origins against credentials and format rules at startup
   validateCorsAllowlist(allowedOrigins, { credentials: corsCredentials });
 
-  const server = Fastify({
+      const server = Fastify({
     logger: options.logger ?? createLoggerOptions(),
     genReqId,
     // The onResponse hook in registerRequestLogging is the single per-request
     // log line; Fastify's built-in pair would just duplicate it.
     disableRequestLogging: true,
-    bodyLimit: options.bodyLimit ?? DEFAULT_BODY_LIMIT,
-    connectionTimeout: options.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS,
-    requestTimeout: options.requestTimeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    // Trust proxy headers **only** from known reverse proxies.  Using `true`
+    // (the previous approach) makes Fastify honour X-Forwarded-For from any
+    // peer — including the original client — which lets attackers spoof their
+    // rate-limit IP or bypass address-based controls (#485).
+    //
+    // `TRUSTED_PROXIES` is a comma-separated list of CIDR ranges (e.g.
+    // "10.0.0.0/8,172.16.0.0/12").  In test mode we fall back to `false`
+    // so `server.inject()` clients aren't treated as proxied.
+    bodyLimit: options.bodyLimit ?? config.BODY_LIMIT_BYTES,
+    connectionTimeout: options.connectionTimeout ?? config.CONNECTION_TIMEOUT_MS,
+    requestTimeout: options.requestTimeout ?? config.REQUEST_TIMEOUT_MS,
+    trustProxy:
+      process.env.NODE_ENV === "test"
+        ? false
+        : config.TRUSTED_PROXIES.length > 0
+          ? config.TRUSTED_PROXIES
+          : ["127.0.0.1/32", "::1/128"],
   });
 
   // Independent record of every route ever registered, regardless of where in
@@ -143,6 +158,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // real route table (#476); not meant for runtime use.
   const registeredRoutes: { method: string; url: string }[] = [];
   server.addHook("onRoute", (opts) => {
+    if (opts.url === "/metrics") return;
     const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
     for (const method of methods) {
       if (method === "HEAD" || method === "OPTIONS") continue;
@@ -153,6 +169,10 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   registerRequestLogging(server);
   registerMetricsHook(server);
+  // The one route deliberately registered ahead of CORS and the not-found
+  // handler: an unauthorized scrape must get the same 404 as an unknown path,
+  // and the 404/405 handler would otherwise learn that /metrics exists and
+  // answer 405. It still receives CORS headers — see the CORS comment below.
   registerMetricsEndpoint(server);
   // Exposes request.abortSignal, which read-only GET routes pass into
   // queryWithCancel (db/pool.ts) so a disconnecting client's query gets
@@ -164,11 +184,6 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // Registered before anything adds a route: the 404/405 handler learns which
   // methods a path accepts from an onRoute hook, which only sees later routes.
   registerNotFoundHandler(server);
-
-  // Per-route rate limiting — runs early so abusive clients are rejected
-  // before any route handler or downstream middleware does real work.
-  registerRateLimiter(server);
-
 
   // Security headers. Locked down for a JSON API: nothing is rendered, so every
   // content source is denied and the API cannot be framed.
@@ -201,6 +216,18 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
 
   // CORS: allowlist only, never a reflected wildcard.
+  //
+  // Ordering (#470): register CORS ahead of every route (bar /metrics, above)
+  // and of every hook that can reply early, such as the rate limiter below —
+  // the same hazard the OpenAPI comment further down describes. Fastify runs
+  // onRequest hooks in registration order, and a hook that sends its own reply
+  // skips all hooks after it: with the limiter registered first, 429s reached
+  // browsers with no CORS headers and their Retry-After was unreadable. (Routes
+  // themselves pick up root hooks when the server becomes ready, so a route
+  // above this line would still get CORS on Fastify 5 — keep the order anyway.)
+  // Keep this registration at the root, never inside an encapsulated route
+  // plugin: cors-routes.test.ts fails for any route or early reply that ends
+  // up without CORS headers.
   // Security rationale (issue #472):
   // Credentials (cookies / HTTP auth headers) are disabled by default (`corsCredentials: false`).
   // The API is bearer-token and API-key authenticated via request headers, so cookies
@@ -232,15 +259,16 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     maxAge: 86400,
   });
 
+  // Per-route rate limiting — runs before any route handler or downstream
+  // middleware does real work. Registered after helmet and CORS so that a 429
+  // still carries security and CORS headers; see the ordering note above.
+  registerRateLimiter(server);
+
   // OpenAPI spec at /api/docs. Every route plugin below must be registered
   // after this: registerOpenApi's onRoute hook only sees routes registered
   // after it is attached, so anything registered above it silently disappears
   // from the generated spec (#476).
   registerOpenApi(server);
-
-  registerLeaderboardRoutes(server, databasePool, redis);
-  registerStatsRoutes(server, databasePool, redis);
-  registerOracleRoutes(server, databasePool);
 
   // Routes go in a plugin registered after registerOpenApi, not directly on the
   // root instance: plugins load in registration order, so this guarantees the
@@ -267,6 +295,12 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       }
     );
 
+    registerLeaderboardRoutes(routes, databasePool, redis);
+    registerStatsRoutes(routes, databasePool, redis);
+    if (databasePool) {
+      registerOracleRoutes(routes, databasePool);
+    }
+
     createMarketsRoutes(routes, databasePool, redis);
   });
 
@@ -279,6 +313,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:
   // they are infrastructure, not part of the contract clients code against.
+  server.decorate("pool", databasePool);
   registerApiRoutes(server);
 
 
@@ -390,9 +425,20 @@ export function registerGracefulShutdown(
 
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
   const { pool } = await import("./db/pool.js");
-  const server = buildServer({ corsOrigins: config.corsOrigins, pool });
+  const { getRedisClient } = await import("./db/redis.js");
+  const redis = getRedisClient();
+  const server = buildServer({ corsOrigins: config.corsOrigins, pool, redis });
 
-  registerGracefulShutdown(server);
+  registerGracefulShutdown(server, {
+    shutdownDatabase: true,
+    shutdownDatabaseFn: async () => {
+      // Close Redis first so in-flight cache writes are flushed, then the DB pool.
+      const { closeRedis } = await import("./db/redis.js");
+      await closeRedis();
+      const { shutdown } = await import("./db/pool.js");
+      await shutdown();
+    },
+  });
 
   await server.listen({ port: config.port, host: config.host });
 

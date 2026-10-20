@@ -2,11 +2,11 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import type { Pool } from "pg";
 import { getOrSet } from "../cache/cacheAside.js";
-import { statsKey } from "../cache/cacheKeys.js";
+import { statsKey, CACHE_TTLS } from "../cache/cacheKeys.js";
 import { getGlobalStats, type Queryable } from "../db/stats.js";
 import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
 
-const STATS_CACHE_TTL = 60;
+const STATS_CACHE_TTL = CACHE_TTLS.statsGlobal;
 
 export interface StatsResponse {
   totalMarkets: number;

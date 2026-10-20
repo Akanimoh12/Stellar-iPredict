@@ -1,5 +1,5 @@
 import { invalidateOnMarketResolved } from "../cache.js";
-import { marketResolvedPayloadSchema, type MarketResolvedPayload } from "../schemas.js";
+import { parseEventPayload, type MarketResolvedPayload } from "../schemas.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
 
@@ -16,7 +16,7 @@ export function decodeMarketResolvedEvent(event: Pick<DecodedContractEvent, "top
     throw new Error(`Unexpected event topic: ${String(domain)}:${String(action)}`);
   }
 
-  return marketResolvedPayloadSchema.parse(event.data);
+  return parseEventPayload("market_resolved", event.data);
 }
 
 export async function handleMarketResolvedEvent(

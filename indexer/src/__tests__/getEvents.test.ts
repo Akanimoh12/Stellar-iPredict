@@ -1,14 +1,23 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { rpc } from "@stellar/stellar-sdk";
-import { SorobanRpcClient, LedgerGapError } from "../rpc/getEvents.js";
+import {
+  SorobanRpcClient,
+  LedgerGapError,
+  RetentionExceededError,
+  checkRetentionBoundary,
+  isRetentionExceededError,
+  extractOldestLedger,
+} from "../rpc/getEvents.js";
 import { metrics, resetMetrics } from "../metrics.js";
 
 describe("SorobanRpcClient.getEvents", () => {
   let client: SorobanRpcClient;
 
+  const TEST_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
   beforeEach(() => {
     resetMetrics();
-    client = new SorobanRpcClient("https://mock-rpc-url.stellar.org");
+    client = new SorobanRpcClient("https://mock-rpc-url.stellar.org", [TEST_CONTRACT]);
     vi.restoreAllMocks();
   });
 
@@ -202,4 +211,227 @@ describe("SorobanRpcClient.getEvents", () => {
     expect(result.events).toHaveLength(1);
     expect(result.latestLedger).toBe(2005);
   });
+
+  it("throws RetentionExceededError and specifies unavailable ledger range when startLedger is beyond retention", async () => {
+    const rpcError = new Error("startLedger is less than the oldest ledger stored in this node (100000)");
+
+    vi.spyOn(rpc.Server.prototype, "getEvents").mockRejectedValue(rpcError);
+
+    try {
+      await client.getEvents({
+        startLedger: 5000,
+        contractIds: [TEST_CONTRACT],
+      });
+      expect.fail("Expected getEvents to throw RetentionExceededError");
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(RetentionExceededError);
+      expect(err).toBeInstanceOf(LedgerGapError);
+      expect(err.startLedger).toBe(5000);
+      expect(err.oldestLedger).toBe(100000);
+      expect(err.unavailableRange).toEqual({ fromLedger: 5000, toLedger: 99999 });
+      expect(err.message).toContain("Unavailable ledger range: [5000..99999]");
+      expect(err.message).toContain("95000 ledgers unavailable: 5000 to 99999");
+    }
+  });
+
+  describe("checkRetentionBoundary", () => {
+    it("logs warning alert when indexer position is close to retention boundary", async () => {
+      const mockServer = {
+        getHealth: vi.fn().mockResolvedValue({
+          status: "healthy",
+          latestLedger: 200000,
+          oldestLedger: 100000,
+          ledgerRetentionWindow: 120960,
+        }),
+      };
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // Indexer at 105000, oldestLedger at 100000 -> distance is 5000 (within 17280 threshold)
+      const status = await checkRetentionBoundary(mockServer as any, 105000, 17280);
+
+      expect(status).not.toBeNull();
+      expect(status?.isApproachingRetention).toBe(true);
+      expect(status?.distanceToRetention).toBe(5000);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("ALERT: Approaching Soroban RPC retention boundary!")
+      );
+
+      warnSpy.mockRestore();
+    });
+
+    it("does not alert when indexer position is well ahead of retention boundary", async () => {
+      const mockServer = {
+        getHealth: vi.fn().mockResolvedValue({
+          status: "healthy",
+          latestLedger: 200000,
+          oldestLedger: 100000,
+          ledgerRetentionWindow: 120960,
+        }),
+      };
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // Indexer at 150000, oldestLedger at 100000 -> distance is 50000 (above 17280 threshold)
+      const status = await checkRetentionBoundary(mockServer as any, 150000, 17280);
+
+      expect(status).not.toBeNull();
+      expect(status?.isApproachingRetention).toBe(false);
+      expect(status?.distanceToRetention).toBe(50000);
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe("Multi-endpoint failover & health", () => {
+    it("parses comma-separated URLs or array of URLs in constructor", () => {
+      const clientWithArray = new SorobanRpcClient(
+        ["https://rpc1.stellar.org", "https://rpc2.stellar.org"],
+        [TEST_CONTRACT],
+      );
+      expect(clientWithArray.getEndpoints()).toEqual([
+        "https://rpc1.stellar.org",
+        "https://rpc2.stellar.org",
+      ]);
+
+      const clientWithString = new SorobanRpcClient(
+        "https://rpc1.stellar.org, https://rpc2.stellar.org, https://rpc3.stellar.org",
+        [TEST_CONTRACT],
+      );
+      expect(clientWithString.getEndpoints()).toEqual([
+        "https://rpc1.stellar.org",
+        "https://rpc2.stellar.org",
+        "https://rpc3.stellar.org",
+      ]);
+    });
+
+    it("fails over to secondary endpoint when primary fails", async () => {
+      const mockLogger = {
+        warn: vi.fn(),
+        error: vi.fn(),
+        info: vi.fn(),
+        debug: vi.fn(),
+      };
+
+      const failoverClient = new SorobanRpcClient(
+        ["https://rpc-primary.stellar.org", "https://rpc-secondary.stellar.org"],
+        [TEST_CONTRACT],
+        mockLogger as any,
+      );
+
+      // Primary fails with connection error, secondary succeeds
+      let calls = 0;
+      vi.spyOn(rpc.Server.prototype, "getEvents").mockImplementation(async function (this: any) {
+        calls++;
+        if (this.serverURL.toString().includes("primary")) {
+          throw new Error("connect ECONNREFUSED primary");
+        }
+        return {
+          events: [
+            {
+              contractId: { toString: () => TEST_CONTRACT },
+              ledger: 2000,
+              type: "contract",
+              topic: ["mkt", "created"],
+              value: "VAL",
+            },
+          ],
+          latestLedger: 2005,
+        } as any;
+      });
+
+      const result = await failoverClient.getEvents({
+        startLedger: 2000,
+        contractIds: [TEST_CONTRACT],
+      });
+
+      expect(result.events).toHaveLength(1);
+      expect(failoverClient.getActiveEndpoint()).toBe("https://rpc-secondary.stellar.org");
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        "RPC endpoint failed, failing over to next endpoint",
+        expect.objectContaining({
+          failedUrl: "https://rpc-primary.stellar.org",
+          nextUrl: "https://rpc-secondary.stellar.org",
+        }),
+      );
+
+      const health = failoverClient.getEndpointHealth();
+      expect(health[0].url).toBe("https://rpc-primary.stellar.org");
+      expect(health[0].healthy).toBe(false);
+      expect(health[0].consecutiveFailures).toBe(1);
+
+      expect(health[1].url).toBe("https://rpc-secondary.stellar.org");
+      expect(health[1].healthy).toBe(true);
+      expect(health[1].consecutiveFailures).toBe(0);
+    });
+
+    it("resets endpoint health when resetEndpointHealth is called", () => {
+      const failoverClient = new SorobanRpcClient(
+        ["https://rpc1.stellar.org", "https://rpc2.stellar.org"],
+        [TEST_CONTRACT],
+      );
+
+      const healthBefore = failoverClient.getEndpointHealth();
+      expect(healthBefore[0].healthy).toBe(true);
+
+      failoverClient.resetEndpointHealth();
+      expect(failoverClient.getActiveEndpoint()).toBe("https://rpc1.stellar.org");
+    });
+
+    it("fails over when primary has retention error but secondary succeeds", async () => {
+      const failoverClient = new SorobanRpcClient(
+        ["https://rpc-pruned.stellar.org", "https://rpc-archive.stellar.org"],
+        [TEST_CONTRACT],
+      );
+
+      vi.spyOn(rpc.Server.prototype, "getEvents").mockImplementation(async function (this: any) {
+        if (this.serverURL.toString().includes("pruned")) {
+          throw new Error("startLedger is less than the oldest ledger stored in this node (50000)");
+        }
+        return {
+          events: [
+            {
+              contractId: { toString: () => TEST_CONTRACT },
+              ledger: 1000,
+              type: "contract",
+              topic: ["mkt", "created"],
+              value: "VAL",
+            },
+          ],
+          latestLedger: 55000,
+        } as any;
+      });
+
+      const result = await failoverClient.getEvents({
+        startLedger: 1000,
+        contractIds: [TEST_CONTRACT],
+      });
+
+      expect(result.events).toHaveLength(1);
+      expect(failoverClient.getActiveEndpoint()).toBe("https://rpc-archive.stellar.org");
+    });
+
+    it("throws error when all endpoints fail", async () => {
+      const failoverClient = new SorobanRpcClient(
+        ["https://rpc1.stellar.org", "https://rpc2.stellar.org"],
+        [TEST_CONTRACT],
+      );
+
+      vi.spyOn(rpc.Server.prototype, "getEvents").mockRejectedValue(new Error("network failure"));
+
+      await expect(
+        failoverClient.getEvents({
+          startLedger: 1000,
+          contractIds: [TEST_CONTRACT],
+        }),
+      ).rejects.toThrow("network failure");
+
+      const health = failoverClient.getEndpointHealth();
+      expect(health[0].healthy).toBe(false);
+      expect(health[1].healthy).toBe(false);
+    });
+  });
 });
+
+

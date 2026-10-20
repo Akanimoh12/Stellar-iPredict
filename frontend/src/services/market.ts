@@ -50,7 +50,7 @@ function i128Val(n: bigint): xdr.ScVal {
 }
 
 function boolVal(b: boolean): xdr.ScVal {
-  return nativeToScVal(b, { type: "bool" });
+  return nativeToScVal(b);
 }
 
 function stringVal(s: string): xdr.ScVal {

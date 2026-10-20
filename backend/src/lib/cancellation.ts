@@ -30,7 +30,7 @@ declare module "fastify" {
 }
 
 export function registerCancellationHook(app: FastifyInstance): void {
-  app.decorateRequest("abortSignal", null);
+  app.decorateRequest("abortSignal", null as unknown as AbortSignal);
 
   app.addHook("onRequest", async (request, reply) => {
     const controller = new AbortController();

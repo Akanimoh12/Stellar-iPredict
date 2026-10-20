@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { getMarketById, getMarkets, type MarketRow, type Queryable } from "./markets.js";
+import {
+  getMarketById,
+  getMarkets,
+  type MarketCategory,
+  type MarketFilter,
+  type MarketRow,
+  type MarketSort,
+  type Queryable,
+} from "./markets.js";
 
 describe("getMarkets", () => {
   it("returns paginated markets rows and total count from a single windowed query", async () => {
@@ -351,6 +359,106 @@ describe("getMarkets pagination bind parameters", () => {
     );
     const [, values] = querySpy.mock.calls[0] as [string, unknown[]];
     expect(values).toEqual(["Crypto", 5, 0]);
+  });
+});
+
+describe("getMarkets query builder allowlist (#587)", () => {
+  const FILTERS: MarketFilter[] = ["active", "resolved", "ended", "cancelled", "all"];
+  const SORTS: MarketSort[] = ["newest", "volume", "ending_soon", "bettors"];
+  const CATEGORIES: Array<MarketCategory | undefined> = [undefined, "Crypto"];
+  const PAGE = 3;
+  const LIMIT = 7;
+
+  for (const filter of FILTERS) {
+    for (const sort of SORTS) {
+      for (const category of CATEGORIES) {
+        it(`keeps placeholders aligned with bind values: filter=${filter} sort=${sort} category=${category ?? "none"}`, async () => {
+          const { db } = makeCapture();
+          const querySpy = vi.spyOn(db, "query");
+          await getMarkets({ filter, sort, category, page: PAGE, limit: LIMIT }, db);
+
+          const [sql, values] = querySpy.mock.calls[0] as [string, unknown[]];
+          const offset = (PAGE - 1) * LIMIT;
+          expect(values).toEqual(category ? [category, LIMIT, offset] : [LIMIT, offset]);
+
+          // Every placeholder the SQL uses is 1..n with no gap and no unused slot.
+          const used = [...new Set([...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])))].sort(
+            (a, b) => a - b,
+          );
+          expect(used).toEqual(values.map((_, i) => i + 1));
+          expect(sql).toContain(`LIMIT $${values.length - 1}`);
+          expect(sql).toContain(`OFFSET $${values.length}`);
+        });
+      }
+    }
+  }
+
+  it("binds a hostile category value as a parameter instead of interpolating it", async () => {
+    const { db } = makeCapture();
+    const querySpy = vi.spyOn(db, "query");
+    const hostile = "Crypto' OR '1'='1" as MarketCategory;
+
+    await getMarkets({ category: hostile }, db);
+
+    const [sql, values] = querySpy.mock.calls[0] as [string, unknown[]];
+    expect(sql).not.toContain("OR '1'='1");
+    expect(values[0]).toBe(hostile);
+  });
+
+  it("rejects a sort value outside the allowlist before any query is issued", async () => {
+    const { db } = makeCapture();
+    const querySpy = vi.spyOn(db, "query");
+
+    await expect(
+      getMarkets({ sort: "newest; DROP TABLE markets" as MarketSort }, db),
+    ).rejects.toThrow("unsupported sort");
+    expect(querySpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects prototype-chain names as filter or sort values", async () => {
+    const { db } = makeCapture();
+
+    for (const filter of ["constructor", "__proto__", "toString"]) {
+      await expect(getMarkets({ filter: filter as MarketFilter }, db)).rejects.toThrow(
+        "unsupported filter",
+      );
+    }
+    for (const sort of ["constructor", "__proto__", "hasOwnProperty"]) {
+      await expect(getMarkets({ sort: sort as MarketSort }, db)).rejects.toThrow(
+        "unsupported sort",
+      );
+    }
+  });
+});
+
+describe("getMarkets bet counts (#586)", () => {
+  function fakeDb(rowCount: number): { db: Queryable; query: ReturnType<typeof vi.fn> } {
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: i + 1,
+      bet_count: i,
+      total_count: rowCount,
+    }));
+    const query = vi.fn(async () => ({ rows }));
+    return { db: { query: query as Queryable["query"] }, query };
+  }
+
+  it.each([1, 20, 100])("issues one query for a page of %i markets", async (limit) => {
+    const { db, query } = fakeDb(limit);
+
+    await getMarkets({ limit }, db);
+
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the denormalised bet_count column rather than counting bets per market", async () => {
+    const { db, query } = fakeDb(3);
+
+    const result = await getMarkets({ sort: "bettors", limit: 3 }, db);
+
+    const [sql] = query.mock.calls[0] as unknown as [string];
+    expect(sql).toContain("bet_count");
+    expect(sql).not.toMatch(/\bbets\b/i);
+    expect(result.rows.map((row) => row.bet_count)).toEqual([0, 1, 2]);
   });
 });
 

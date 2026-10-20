@@ -1,7 +1,8 @@
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { loadAggregatorConfig } from "./config.js";
-import { exportCouncilAudit, type AuditFormat, type CouncilAuditRecord } from "./council-audit.js";
+import { streamCouncilAudit, type AuditFormat, type CouncilAuditRecord } from "./council-audit.js";
 
 export interface ReplayArgs {
   input: string;
@@ -123,8 +124,12 @@ async function main(): Promise<void> {
 
   try {
     // Write only the serialised audit to stdout so it can be redirected to a
-    // file (`> audit.csv`) without capturing log noise.
-    process.stdout.write(await exportCouncilAudit(pool, args.format));
+    // file (`> audit.csv`) without capturing log noise. Chunks are written as
+    // they are produced, waiting on `drain` when stdout is backed up, so a large
+    // export is never held in memory whole.
+    for await (const chunk of streamCouncilAudit(pool, args.format)) {
+      if (!process.stdout.write(chunk)) await once(process.stdout, "drain");
+    }
   } finally {
     await pool.end();
   }

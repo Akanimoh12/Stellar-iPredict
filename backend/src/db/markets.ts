@@ -76,20 +76,73 @@ const ORDER_BY: Record<MarketSort, string> = {
   bettors: "bet_count DESC, created_at DESC, id ASC",
 };
 
-function buildFilterClause(filter: MarketFilter): string {
-  switch (filter) {
-    case "active":
-      return "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
-    case "resolved":
-      return "resolved = true";
-    case "ended":
-      return "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT";
-    case "cancelled":
-      return "cancelled = true";
-    case "all":
-    default:
-      return "";
+const ACTIVE_CLAUSE = "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
+
+const FILTER_CLAUSES: Record<MarketFilter, string> = {
+  active: ACTIVE_CLAUSE,
+  resolved: "resolved = true",
+  ended: "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT",
+  cancelled: "cancelled = true",
+  all: "",
+};
+
+/**
+ * Looks `key` up in a fixed allowlist table, rejecting anything that is not
+ * one of its own keys. Own-property lookup matters: a value such as
+ * `constructor` or `__proto__` would otherwise resolve to an
+ * `Object.prototype` member and reach the SQL text.
+ */
+function allowlisted<T>(table: Record<string, T>, key: string, name: string): T {
+  if (!Object.hasOwn(table, key)) {
+    throw new Error(`unsupported ${name}: ${key}`);
   }
+  return table[key];
+}
+
+/**
+ * The ORDER BY expression for `sort`. Only the fixed `ORDER_BY` text ever
+ * reaches SQL, so the sort value is checked here, at construction, rather than
+ * relying on the API layer's zod enum to have run first.
+ */
+export function buildMarketsOrderBy(sort: MarketSort): string {
+  return allowlisted(ORDER_BY, sort, "sort");
+}
+
+/**
+ * Builds the WHERE clause and its bind values. Every user-supplied value is a
+ * `$n` placeholder, and the numbering is derived from the bind values pushed so
+ * far, so `LIMIT`/`OFFSET` placed after it can take `values.length + 1` and
+ * `+ 2` without a separate counter.
+ */
+export function buildMarketsWhere({
+  filter,
+  category,
+  sort,
+}: Required<Pick<GetMarketsInput, "filter" | "sort">> & Pick<GetMarketsInput, "category">): {
+  whereSql: string;
+  values: unknown[];
+} {
+  const filterClause = allowlisted(FILTER_CLAUSES, filter, "filter");
+  allowlisted(ORDER_BY, sort, "sort");
+
+  const values: unknown[] = [];
+  const conditions: string[] = [];
+
+  if (category) {
+    values.push(category);
+    conditions.push(`category = $${values.length}`);
+  }
+
+  if (filterClause) {
+    conditions.push(filterClause);
+  }
+
+  if (sort === "ending_soon") {
+    conditions.push(ACTIVE_CLAUSE);
+  }
+
+  const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  return { whereSql, values };
 }
 
 export async function getMarkets(
@@ -109,27 +162,8 @@ export async function getMarkets(
     throw new Error("limit must be a positive integer");
   }
 
-  const baseValues: unknown[] = [];
-  const whereConditions: string[] = [];
-
-  if (category) {
-    baseValues.push(category);
-    whereConditions.push(`category = $${baseValues.length}`);
-  }
-
-  const filterClause = buildFilterClause(filter);
-  if (filterClause) {
-    whereConditions.push(filterClause);
-  }
-
-  if (sort === "ending_soon") {
-    whereConditions.push(
-      "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT",
-    );
-  }
-
-  const whereSql =
-    whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+  const { whereSql, values: baseValues } = buildMarketsWhere({ filter, category, sort });
+  const orderBy = buildMarketsOrderBy(sort);
   const offset = (page - 1) * limit;
 
   // Fetch the page and its total row count (over the same filtered set) in a
@@ -150,7 +184,7 @@ export async function getMarkets(
       COUNT(*) OVER ()::INT AS total_count
     FROM markets
     ${whereSql}
-    ORDER BY ${ORDER_BY[sort]}
+    ORDER BY ${orderBy}
     LIMIT $${baseValues.length + 1}
     OFFSET $${baseValues.length + 2}
   `;

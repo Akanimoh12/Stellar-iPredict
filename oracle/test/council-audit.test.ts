@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  AUDIT_PAGE_SIZE,
   boundRawPayload,
   buildAuditRecord,
   collectCouncilAudit,
@@ -9,6 +10,7 @@ import {
   MAX_RAW_PAYLOAD_BYTES,
   persistRawPayloads,
   rawPayloadByteLength,
+  streamCouncilAudit,
   toAuditCsv,
   toAuditJson,
   toRawPayloadCsv,
@@ -394,5 +396,108 @@ describe("council audit export includes raw payloads", () => {
     const csv = await exportCouncilAudit(pool, "raw-csv");
     expect(csv.startsWith("market_id,provider,")).toBe(true);
     expect(csv).toContain("binance");
+  });
+});
+
+// ── Streaming export (issue #883) ──────────────────────────────────────────
+
+function finalizedRow(marketId: string) {
+  return { market_id: marketId, decision: "yes", tx_hash: "abc", finalized_at: "2026-07-29T00:00:00.000Z" };
+}
+
+/** Serves one finalized page per call, so paging can be observed. */
+function createPagedPool(pages: unknown[][]): QueryablePool {
+  const query = vi.fn(async (sql: string) => {
+    if (sql.includes("oracle_submissions")) return { rows: pages.shift() ?? [] };
+    return { rows: [] };
+  });
+  return { query } as unknown as QueryablePool;
+}
+
+function finalizedQueryCalls(pool: QueryablePool): unknown[][] {
+  return (pool.query as ReturnType<typeof vi.fn>).mock.calls.filter(
+    ([sql]) => (sql as string).includes("oracle_submissions"),
+  );
+}
+
+describe("council audit pagination", () => {
+  it("reads finalized markets a page at a time, resuming after the last market id", async () => {
+    const firstPage = Array.from({ length: AUDIT_PAGE_SIZE }, (_, i) => finalizedRow(String(i + 1)));
+    const pool = createPagedPool([firstPage, [finalizedRow(String(AUDIT_PAGE_SIZE + 1))]]);
+
+    const records = await collectCouncilAudit(pool);
+
+    expect(records).toHaveLength(AUDIT_PAGE_SIZE + 1);
+    const calls = finalizedQueryCalls(pool);
+    expect(calls).toHaveLength(2);
+    expect(calls[0][1]).toEqual([null, AUDIT_PAGE_SIZE]);
+    expect(calls[1][1]).toEqual([String(AUDIT_PAGE_SIZE), AUDIT_PAGE_SIZE]);
+  });
+
+  it("stops after a short page without issuing another finalized query", async () => {
+    const pool = createPagedPool([[finalizedRow("7")]]);
+
+    await collectCouncilAudit(pool);
+
+    expect(finalizedQueryCalls(pool)).toHaveLength(1);
+  });
+});
+
+describe("streamCouncilAudit", () => {
+  const finalized = [
+    finalizedRow("42"),
+    { market_id: "43", decision: null, tx_hash: null, finalized_at: null },
+  ];
+  const votes = [
+    { market_id: "42", member: "GAAA", outcome: true },
+    { market_id: "42", member: "GBBB", outcome: false },
+  ];
+  const payloads = [
+    {
+      market_id: "42",
+      provider: "binance",
+      raw_request: { url: "https://example.test/price" },
+      raw_response: { price: "64231.87" },
+      response_bytes: 21,
+      truncated: false,
+      outcome: true,
+      confidence: "1.0000",
+      responded_at: "2026-07-29T00:00:00.000Z",
+      received_at: "2026-07-29T00:00:01.000Z",
+    },
+  ];
+
+  it.each(["json", "csv", "raw-csv"] as const)(
+    "%s output is byte-identical to the buffered serialiser",
+    async (format) => {
+      const pool = createPool(finalized, votes, payloads);
+      const records = await collectCouncilAudit(pool);
+      const expected =
+        format === "json"
+          ? toAuditJson(records)
+          : format === "csv"
+            ? toAuditCsv(records)
+            : toRawPayloadCsv(records);
+
+      expect(await exportCouncilAudit(pool, format)).toBe(expected);
+    },
+  );
+
+  it("yields the JSON export in several chunks rather than one string", async () => {
+    const pool = createPool(finalized, votes, payloads);
+
+    const chunks: string[] = [];
+    for await (const chunk of streamCouncilAudit(pool, "json")) chunks.push(chunk);
+
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(JSON.parse(chunks.join(""))).toHaveLength(2);
+  });
+
+  it("emits a valid empty export when no market is finalized", async () => {
+    const pool = createPool([], []);
+
+    expect(await exportCouncilAudit(pool, "json")).toBe(toAuditJson([]));
+    expect(await exportCouncilAudit(pool, "csv")).toBe(toAuditCsv([]));
+    expect(await exportCouncilAudit(pool, "raw-csv")).toBe(toRawPayloadCsv([]));
   });
 });

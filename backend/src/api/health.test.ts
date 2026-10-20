@@ -100,6 +100,18 @@ describe("GET /readyz", () => {
     expect(body.checks.redis.ok).toBe(false);
   });
 
+  it("keeps /healthz liveness at 200 while /readyz reports not ready", async () => {
+    pingDbMock.mockResolvedValue({ ok: false, error: "timeout" });
+    pingRedisMock.mockResolvedValue({ ok: false, error: "no connection" });
+
+    const app = makeServer();
+    const live = await app.inject({ method: "GET", url: "/healthz" });
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(live.statusCode).toBe(200);
+    expect(ready.statusCode).toBe(503);
+  });
+
   it("bounds a hung dependency check with a timeout instead of hanging", async () => {
     pingDbMock.mockImplementation(() => new Promise(() => {})); // never resolves
     pingRedisMock.mockResolvedValue({ ok: true, latencyMs: 1 });

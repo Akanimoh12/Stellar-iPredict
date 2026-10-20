@@ -31,7 +31,7 @@ import {
   oddsKey,
   statsKey,
   statusKey,
-} from "./keys.js";
+} from "./cacheKeys.js";
 
 beforeEach(() => {
   resetCacheStats();
@@ -102,7 +102,7 @@ describe("cache hit-rate accounting", () => {
 // ---------------------------------------------------------------------------
 
 describe("cacheNamespaceOf", () => {
-  it("reads the entity segment out of every key helper in keys.ts", () => {
+  it("reads the entity segment out of every key helper in cacheKeys.ts", () => {
     expect(cacheNamespaceOf(marketKey(7))).toBe("market");
     expect(cacheNamespaceOf(leaderboardKey())).toBe("leaderboard");
     expect(cacheNamespaceOf(statsKey())).toBe("stats");

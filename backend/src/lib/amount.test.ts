@@ -92,6 +92,24 @@ describe("amount conversion", () => {
       );
     });
 
+    it("rejects numeric XLM values whose stroop result exceeds Number.MAX_SAFE_INTEGER", () => {
+      expect(xlmToStroops(900_719_925.474099)).toBe(
+        BigInt(Number.MAX_SAFE_INTEGER) - 1n
+      );
+      expect(() => xlmToStroops(900_719_925.4740992)).toThrow(
+        "xlm must be provided as a string or bigint when the stroop amount exceeds Number.MAX_SAFE_INTEGER"
+      );
+    });
+
+    it("converts those same large values exactly when supplied as strings", () => {
+      expect(xlmToStroops("900719925.4740992")).toBe(
+        BigInt(Number.MAX_SAFE_INTEGER) + 1n
+      );
+      expect(stroopsToXlm(xlmToStroops("900719925.4740992"))).toBe(
+        "900719925.4740992"
+      );
+    });
+
     it("adds XLM amounts exactly without floating point drift via addXlmAmounts", () => {
       const a = "9007199254740992.5000000";
       const b = "1000000000000000.5000000";
@@ -199,4 +217,3 @@ describe("amount conversion", () => {
     });
   });
 });
-

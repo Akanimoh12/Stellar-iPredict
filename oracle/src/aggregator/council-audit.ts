@@ -302,24 +302,26 @@ function providersCell(payloads: readonly RawPayloadRecord[]): string {
   return [...new Set(payloads.map((p) => p.provider))].join("|");
 }
 
+/** One summary row for `record`. Shared by {@link toAuditCsv} and the streaming export. */
+function auditCsvRow(record: CouncilAuditRecord): string {
+  const cells = [
+    record.marketId,
+    record.decision ?? "",
+    record.txHash ?? "",
+    record.finalizedAt ?? "",
+    String(record.yesVotes),
+    String(record.noVotes),
+    String(record.totalVoters),
+    votesCell(record.votes),
+    providersCell(record.rawPayloads),
+    String(record.rawPayloads.length),
+  ];
+  return cells.map((cell) => escapeCsv(cell)).join(",");
+}
+
 /** Serialises audit records to CSV with a stable header row. */
 export function toAuditCsv(records: readonly CouncilAuditRecord[]): string {
-  const rows: string[] = [CSV_COLUMNS.join(",")];
-  for (const record of records) {
-    const cells = [
-      record.marketId,
-      record.decision ?? "",
-      record.txHash ?? "",
-      record.finalizedAt ?? "",
-      String(record.yesVotes),
-      String(record.noVotes),
-      String(record.totalVoters),
-      votesCell(record.votes),
-      providersCell(record.rawPayloads),
-      String(record.rawPayloads.length),
-    ];
-    rows.push(cells.map((cell) => escapeCsv(cell)).join(","));
-  }
+  const rows: string[] = [CSV_COLUMNS.join(","), ...records.map(auditCsvRow)];
   // Trailing newline so appending/concatenating exports stays well-formed.
   return `${rows.join("\n")}\n`;
 }
@@ -345,25 +347,27 @@ const RAW_CSV_COLUMNS = [
  * reviewers who do not want to open JSON. Every payload backing every
  * resolution is represented, including truncated ones (flagged as such).
  */
+/** One row per provider payload of `record`. Shared with the streaming export. */
+function rawPayloadCsvRows(record: CouncilAuditRecord): string[] {
+  return record.rawPayloads.map((payload) => {
+    const cells = [
+      record.marketId,
+      payload.provider,
+      payload.respondedAt ?? "",
+      payload.receivedAt ?? "",
+      payload.outcome === null ? "" : String(payload.outcome),
+      payload.confidence === null ? "" : String(payload.confidence),
+      String(payload.responseBytes),
+      String(payload.truncated),
+      JSON.stringify(payload.request ?? null),
+      JSON.stringify(payload.response ?? null),
+    ];
+    return cells.map((cell) => escapeCsv(cell)).join(",");
+  });
+}
+
 export function toRawPayloadCsv(records: readonly CouncilAuditRecord[]): string {
-  const rows: string[] = [RAW_CSV_COLUMNS.join(",")];
-  for (const record of records) {
-    for (const payload of record.rawPayloads) {
-      const cells = [
-        record.marketId,
-        payload.provider,
-        payload.respondedAt ?? "",
-        payload.receivedAt ?? "",
-        payload.outcome === null ? "" : String(payload.outcome),
-        payload.confidence === null ? "" : String(payload.confidence),
-        String(payload.responseBytes),
-        String(payload.truncated),
-        JSON.stringify(payload.request ?? null),
-        JSON.stringify(payload.response ?? null),
-      ];
-      rows.push(cells.map((cell) => escapeCsv(cell)).join(","));
-    }
-  }
+  const rows: string[] = [RAW_CSV_COLUMNS.join(","), ...records.flatMap(rawPayloadCsvRows)];
   return `${rows.join("\n")}\n`;
 }
 
@@ -395,10 +399,17 @@ interface RawPayloadRow extends Record<string, unknown> {
   received_at: string | null;
 }
 
+/** Finalized markets read per round trip while the audit is produced. */
+export const AUDIT_PAGE_SIZE = 500;
+
 /**
- * Reads finalized decisions, their council votes, and the raw provider
- * payloads backing them from Postgres and builds one audit record per
- * finalized market.
+ * Yields one audit record per finalized market, in `market_id` order.
+ *
+ * Reads finalized decisions a page at a time, then only the council votes and
+ * raw provider payloads for the markets in that page. Memory is therefore
+ * bounded by the page size, not by the size of the whole audit. Pages are
+ * keyset-paginated on `market_id`, so each page starts after the last market
+ * of the previous one and no OFFSET scan is needed.
  *
  * Only finalized markets are exported (`status = 'finalized'`), so the audit
  * reflects committed decisions rather than in-flight submissions.
@@ -407,86 +418,148 @@ interface RawPayloadRow extends Record<string, unknown> {
  * consults several providers, so the join would multiply vote rows and have to
  * be de-duplicated again in application code.
  */
+export async function* iterateCouncilAudit(pool: QueryablePool): AsyncGenerator<CouncilAuditRecord> {
+  let after: string | null = null;
+
+  for (;;) {
+    const finalized = await pool.query<FinalizedMarketRow>(
+      `SELECT market_id::text AS market_id,
+              decision,
+              tx_hash,
+              finalized_at::text AS finalized_at
+         FROM oracle_submissions
+        WHERE status = 'finalized'
+          AND ($1::bigint IS NULL OR market_id > $1::bigint)
+        ORDER BY market_id ASC
+        LIMIT $2`,
+      [after, AUDIT_PAGE_SIZE],
+    );
+    if (finalized.rows.length === 0) return;
+
+    // `market_id` is TEXT on adapter_raw_payloads and BIGINT on the other two
+    // tables, so each lookup casts the id list to match its column.
+    const marketIds = finalized.rows.map((row) => row.market_id);
+
+    const votes = await pool.query<CouncilVoteRow>(
+      `SELECT market_id::text AS market_id, member, outcome
+         FROM council_votes
+        WHERE market_id = ANY($1::bigint[])
+        ORDER BY market_id ASC, member ASC`,
+      [marketIds],
+    );
+
+    const payloads = await pool.query<RawPayloadRow>(
+      `SELECT market_id,
+              provider,
+              raw_request,
+              raw_response,
+              response_bytes,
+              truncated,
+              outcome,
+              confidence,
+              responded_at::text AS responded_at,
+              received_at::text AS received_at
+         FROM adapter_raw_payloads
+        WHERE market_id = ANY($1::text[])
+        ORDER BY market_id ASC, received_at ASC, id ASC`,
+      [marketIds],
+    );
+
+    const votesByMarket = new Map<string, CouncilVote[]>();
+    for (const row of votes.rows) {
+      const bucket = votesByMarket.get(row.market_id) ?? [];
+      bucket.push({ member: row.member, outcome: row.outcome });
+      votesByMarket.set(row.market_id, bucket);
+    }
+
+    const payloadsByMarket = new Map<string, RawPayloadRecord[]>();
+    for (const row of payloads.rows) {
+      const bucket = payloadsByMarket.get(row.market_id) ?? [];
+      bucket.push({
+        provider: row.provider,
+        request: row.raw_request,
+        response: row.raw_response,
+        responseBytes: Number(row.response_bytes),
+        truncated: row.truncated,
+        outcome: row.outcome,
+        // NUMERIC comes back as a string by design (no lossy float parse).
+        confidence: row.confidence === null ? null : Number(row.confidence),
+        respondedAt: row.responded_at,
+        receivedAt: row.received_at,
+      });
+      payloadsByMarket.set(row.market_id, bucket);
+    }
+
+    for (const row of finalized.rows) {
+      yield buildAuditRecord({
+        marketId: row.market_id,
+        votes: votesByMarket.get(row.market_id) ?? [],
+        decision: row.decision,
+        txHash: row.tx_hash,
+        finalizedAt: row.finalized_at,
+        rawPayloads: payloadsByMarket.get(row.market_id) ?? [],
+      });
+    }
+
+    if (finalized.rows.length < AUDIT_PAGE_SIZE) return;
+    after = finalized.rows[finalized.rows.length - 1].market_id;
+  }
+}
+
+/**
+ * Collects every finalized market's audit record into one array. Prefer
+ * {@link iterateCouncilAudit} or {@link streamCouncilAudit} for large audits.
+ */
 export async function collectCouncilAudit(pool: QueryablePool): Promise<CouncilAuditRecord[]> {
-  const finalized = await pool.query<FinalizedMarketRow>(
-    `SELECT market_id::text AS market_id,
-            decision,
-            tx_hash,
-            finalized_at::text AS finalized_at
-       FROM oracle_submissions
-      WHERE status = 'finalized'
-      ORDER BY market_id ASC`,
-  );
-
-  const votes = await pool.query<CouncilVoteRow>(
-    `SELECT market_id::text AS market_id, member, outcome
-       FROM council_votes
-      ORDER BY market_id ASC, member ASC`,
-  );
-
-  const payloads = await pool.query<RawPayloadRow>(
-    `SELECT market_id,
-            provider,
-            raw_request,
-            raw_response,
-            response_bytes,
-            truncated,
-            outcome,
-            confidence,
-            responded_at::text AS responded_at,
-            received_at::text AS received_at
-       FROM adapter_raw_payloads
-      ORDER BY market_id ASC, received_at ASC, id ASC`,
-  );
-
-  const votesByMarket = new Map<string, CouncilVote[]>();
-  for (const row of votes.rows) {
-    const bucket = votesByMarket.get(row.market_id) ?? [];
-    bucket.push({ member: row.member, outcome: row.outcome });
-    votesByMarket.set(row.market_id, bucket);
-  }
-
-  const payloadsByMarket = new Map<string, RawPayloadRecord[]>();
-  for (const row of payloads.rows) {
-    const bucket = payloadsByMarket.get(row.market_id) ?? [];
-    bucket.push({
-      provider: row.provider,
-      request: row.raw_request,
-      response: row.raw_response,
-      responseBytes: Number(row.response_bytes),
-      truncated: row.truncated,
-      outcome: row.outcome,
-      // NUMERIC comes back as a string by design (no lossy float parse).
-      confidence: row.confidence === null ? null : Number(row.confidence),
-      respondedAt: row.responded_at,
-      receivedAt: row.received_at,
-    });
-    payloadsByMarket.set(row.market_id, bucket);
-  }
-
-  return finalized.rows.map((row) =>
-    buildAuditRecord({
-      marketId: row.market_id,
-      votes: votesByMarket.get(row.market_id) ?? [],
-      decision: row.decision,
-      txHash: row.tx_hash,
-      finalizedAt: row.finalized_at,
-      rawPayloads: payloadsByMarket.get(row.market_id) ?? [],
-    }),
-  );
+  const records: CouncilAuditRecord[] = [];
+  for await (const record of iterateCouncilAudit(pool)) records.push(record);
+  return records;
 }
 
 export type AuditFormat = "csv" | "json" | "raw-csv";
 
 /**
- * Collects the council audit and serialises it in the requested format.
+ * Serialises the council audit in the requested format as it is read, yielding
+ * the output in chunks so a large export never has to be held in memory whole.
+ *
+ * The chunks concatenate to exactly what {@link toAuditJson},
+ * {@link toAuditCsv} and {@link toRawPayloadCsv} produce for the same records.
  *
  * `raw-csv` is the long-format payload companion — one row per provider
  * response — for reviewers who need the evidence itself in a spreadsheet.
  */
+export async function* streamCouncilAudit(
+  pool: QueryablePool,
+  format: AuditFormat,
+): AsyncGenerator<string> {
+  if (format === "csv" || format === "raw-csv") {
+    const isRaw = format === "raw-csv";
+    yield `${(isRaw ? RAW_CSV_COLUMNS : CSV_COLUMNS).join(",")}\n`;
+    for await (const record of iterateCouncilAudit(pool)) {
+      const lines = isRaw ? rawPayloadCsvRows(record) : [auditCsvRow(record)];
+      for (const line of lines) yield `${line}\n`;
+    }
+    return;
+  }
+
+  // Matches JSON.stringify(records, null, 2): each record is indented one level
+  // inside the array, and the closing bracket sits on its own line.
+  yield "[";
+  let count = 0;
+  for await (const record of iterateCouncilAudit(pool)) {
+    const entry = JSON.stringify(record, null, 2).replace(/\n/g, "\n  ");
+    yield `${count === 0 ? "\n" : ",\n"}  ${entry}`;
+    count += 1;
+  }
+  yield count === 0 ? "]" : "\n]";
+}
+
+/**
+ * Collects the council audit and serialises it in the requested format.
+ * Buffers the whole output as one string; the CLI uses {@link streamCouncilAudit}.
+ */
 export async function exportCouncilAudit(pool: QueryablePool, format: AuditFormat): Promise<string> {
-  const records = await collectCouncilAudit(pool);
-  if (format === "csv") return toAuditCsv(records);
-  if (format === "raw-csv") return toRawPayloadCsv(records);
-  return toAuditJson(records);
+  let output = "";
+  for await (const chunk of streamCouncilAudit(pool, format)) output += chunk;
+  return output;
 }

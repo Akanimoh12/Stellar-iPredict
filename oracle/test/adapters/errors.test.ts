@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifySourceError, classifySourceResponse } from "../../src/adapters/errors.js";
-import { fetchSourceJson, isRetryableAdapterError } from "../../src/adapters/http.js";
+import {
+  fetchSourceJson,
+  isRetryableAdapterError,
+  retryAfterFromHeaders,
+  retryDelayMs,
+} from "../../src/adapters/http.js";
 import { logAdapterError } from "../../src/adapters/logging.js";
 
 describe("adapter error taxonomy", () => {
@@ -21,6 +26,25 @@ describe("adapter error taxonomy", () => {
     });
     expect(error?.retryAfterMs).toBe(45_000);
     expect(isRetryableAdapterError(error)).toBe(false);
+  });
+
+  it("prefers a provider Retry-After over the fallback delay", () => {
+    const error = classifySourceResponse("fixture-source", {
+      status: 429,
+      headers: new Headers({ "retry-after": "2" }),
+    });
+    expect(retryDelayMs(error, 500)).toBe(2_000);
+    expect(retryDelayMs(new Error("no hint"), 500)).toBe(500);
+    expect(retryDelayMs(undefined, 500)).toBe(500);
+  });
+
+  it("reads Retry-After as delta-seconds or an HTTP date", () => {
+    expect(retryAfterFromHeaders(new Headers({ "retry-after": "1.5" }))).toBe(1_500);
+    const inFuture = new Date(Date.now() + 60_000).toUTCString();
+    expect(retryAfterFromHeaders(new Headers({ "retry-after": inFuture }))).toBeGreaterThan(50_000);
+    expect(retryAfterFromHeaders(new Headers({ "retry-after": "soon" }))).toBeUndefined();
+    expect(retryAfterFromHeaders(new Headers())).toBeUndefined();
+    expect(retryAfterFromHeaders(undefined)).toBeUndefined();
   });
 
   it("classifies malformed provider JSON as data", () => {

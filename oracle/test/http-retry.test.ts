@@ -126,3 +126,64 @@ describe("fetchWithRetry timeouts", () => {
     ).rejects.toBeInstanceOf(AdapterTimeoutError);
   });
 });
+
+describe("fetchWithRetry Retry-After", () => {
+  function rateLimited(status: number, retryAfter: string) {
+    return { ok: false, status, headers: new Headers({ "retry-after": retryAfter }), json: async () => ({}) };
+  }
+
+  it("waits for the provider's Retry-After instead of the fixed backoff", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(rateLimited(429, "0.15"))
+      .mockResolvedValueOnce(jsonResponse(200));
+    const started = Date.now();
+
+    const response = await fetchWithRetry(
+      "https://example.test",
+      {},
+      { fetchFn, retryBackoffMs: 1, totalTimeoutMs: 5_000 },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+  });
+
+  it("honours Retry-After on a 503 as well", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(rateLimited(503, "0.1"))
+      .mockResolvedValueOnce(jsonResponse(200));
+    const started = Date.now();
+
+    await fetchWithRetry("https://example.test", {}, { fetchFn, retryBackoffMs: 1, totalTimeoutMs: 5_000 });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+  });
+
+  it("fails fast with the rate-limit error when Retry-After exceeds the remaining budget", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(rateLimited(429, "120"));
+    const started = Date.now();
+
+    const error = await fetchWithRetry(
+      "https://example.test",
+      {},
+      { fetchFn, retryBackoffMs: 1, totalTimeoutMs: 1_000 },
+    ).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AdapterHttpError);
+    expect(error).toMatchObject({ status: 429, retryAfterMs: 120_000 });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("ignores Retry-After on a non-retryable status", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(rateLimited(404, "1"));
+
+    const error = await fetchWithRetry("https://example.test", {}, { fetchFn }).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ status: 404, retryAfterMs: undefined });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});

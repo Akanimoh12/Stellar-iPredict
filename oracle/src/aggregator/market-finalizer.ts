@@ -5,6 +5,7 @@ import {
   Networks,
   nativeToScVal,
   rpc,
+  scValToNative,
   TransactionBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
@@ -52,11 +53,30 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 function extractSendError(response: rpc.Api.SendTransactionResponse): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const payload = response as any;
-  if (payload.errorResult) return `Error result: ${JSON.stringify(payload.errorResult)}`;
-  if (payload.errorResultXdr) return `Error XDR: ${payload.errorResultXdr}`;
+  if (response.errorResult) {
+    return `Error result: ${response.errorResult.toXDR("base64")}`;
+  }
   return response.status;
+}
+
+interface ContractMarketState {
+  resolved: boolean;
+  outcome: boolean;
+  cancelled: boolean;
+  end_time: bigint | number;
+}
+
+function isContractMarketState(value: unknown): value is ContractMarketState {
+  if (typeof value !== "object" || value === null) return false;
+
+  const market = value as Record<string, unknown>;
+  return (
+    typeof market.resolved === "boolean" &&
+    typeof market.outcome === "boolean" &&
+    typeof market.cancelled === "boolean" &&
+    (typeof market.end_time === "bigint" ||
+      (typeof market.end_time === "number" && Number.isSafeInteger(market.end_time)))
+  );
 }
 
 async function delay(ms: number): Promise<void> {
@@ -248,15 +268,15 @@ export async function queryMarketState(
     throw new Error("Simulation returned no result");
   }
 
-  const market = response.result.retval ? (response.result.retval as any) : undefined;
-  if (!market || typeof market !== "object") {
+  const market: unknown = scValToNative(response.result.retval);
+  if (!isContractMarketState(market)) {
     throw new Error("Malformed market simulation result");
   }
 
   return {
-    resolved: Boolean((market as { resolved?: unknown }).resolved),
-    outcome: Boolean((market as { outcome?: unknown }).outcome),
-    cancelled: Boolean((market as { cancelled?: unknown }).cancelled),
-    endTime: Number((market as { end_time?: unknown }).end_time ?? 0),
+    resolved: market.resolved,
+    outcome: market.outcome,
+    cancelled: market.cancelled,
+    endTime: Number(market.end_time),
   };
 }

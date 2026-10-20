@@ -51,12 +51,15 @@ export function stroopsToXlm(stroops: AmountInput): string {
  * Converts an XLM amount to stroops exactly.
  *
  * XLM values must contain no more than seven decimal places. Rounding is not
- * performed because silently changing a payment amount is unsafe.
+ * performed because silently changing a payment amount is unsafe. Numeric
+ * inputs are accepted only when the resulting stroop amount is a safe integer;
+ * use a string or bigint for larger amounts.
  */
 export function xlmToStroops(xlm: AmountInput): bigint {
   let text: string;
+  const isNumberInput = typeof xlm === "number";
 
-  if (typeof xlm === "number") {
+  if (isNumberInput) {
     if (!Number.isFinite(xlm) || Math.abs(xlm) > Number.MAX_SAFE_INTEGER) {
       throw new TypeError(
         "xlm must be a non-negative decimal with at most 7 decimal places"
@@ -81,8 +84,15 @@ export function xlmToStroops(xlm: AmountInput): bigint {
 
   const whole = BigInt(match[1]);
   const fraction = (match[2] ?? "").padEnd(DECIMAL_PLACES, "0");
+  const stroops = whole * STROOPS_PER_XLM_BIGINT + BigInt(fraction || "0");
 
-  return whole * STROOPS_PER_XLM_BIGINT + BigInt(fraction || "0");
+  if (isNumberInput && stroops > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new TypeError(
+      "xlm must be provided as a string or bigint when the stroop amount exceeds Number.MAX_SAFE_INTEGER"
+    );
+  }
+
+  return stroops;
 }
 
 /**
@@ -121,4 +131,3 @@ export function xlmToStroopsNumber(xlm: AmountInput): number {
 
   return Number(stroops);
 }
-

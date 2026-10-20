@@ -32,6 +32,39 @@ PostgreSQL copy of on-chain state (written by the
 - The markets routes (`/api/markets*`), leaderboard, and stats are currently
   registered at their **unversioned** paths as shown below.
 
+#### Versioning and compatibility policy
+
+- The version in the URL is the API's major version. New versioned feature
+  routes use `/api/vN`; the OpenAPI `info.version` value describes the
+  specification and is not a substitute for the URL version.
+- Backward-compatible additions, such as new endpoints and optional request or
+  response fields, stay in the current version. Clients should ignore unknown
+  response fields.
+- Removing or renaming an endpoint or field, changing a field's type or
+  meaning, making an optional input required, or otherwise changing existing
+  behavior incompatibly requires a new major version. A new version is mounted
+  alongside the old one; existing versioned paths are not silently redirected
+  to or changed into the new version.
+- The unversioned feature routes listed in this reference remain at their
+  current paths. They are not implicitly part of `/api/v1`; any replacement or
+  retirement of those routes will be announced under the same deprecation
+  policy.
+
+#### Deprecation policy
+
+- A version or endpoint will be deprecated only after its replacement is
+  available. The deprecation notice will identify the affected routes, the
+  replacement, migration guidance, and the planned retirement date in this
+  reference and the generated OpenAPI document.
+- Deprecated responses will include the standard `Deprecation` and `Sunset`
+  headers, and a `Link` header pointing to the successor when one is available.
+- At least **six months' notice** will be given between the replacement becoming
+  available and the planned retirement. A security, legal, or data-integrity
+  issue may require a shorter period; in that case, notice and migration
+  guidance will be provided as early as practical.
+- No API version or endpoint is currently announced as deprecated, and no
+  retirement date has been set.
+
 ### Authentication
 
 There is **no authentication** on the read endpoints documented here. The

@@ -52,6 +52,7 @@ const cases: { method: "GET" | "POST"; url: string; path: string; status: number
   ...["/api/docs", "/healthz", "/readyz", "/resolution-status", "/status", "/api/markets", "/api/markets/resolution-status", "/api/markets/unmappable", "/api/leaderboard", "/api/stats"].map(path => ({ method: "GET" as const, url: path, path, status: 200 })),
   ...["", "/bets", "/odds"].map(suffix => ({ method: "GET" as const, url: `/api/markets/1${suffix}`, path: `/api/markets/{id}${suffix}`, status: 200 })),
   { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
+  { method: "GET", url: `/api/v1/profile/${address}/bets?page=1&limit=20`, path: "/api/v1/profile/{address}/bets", status: 200 },
   ...["/api/oracle/submit", "/api/v1/oracle/submit"].map(path => ({ method: "POST" as const, url: path, path, status: 401 })),
 ];
 let app: FastifyInstance;
@@ -100,6 +101,9 @@ describe("OpenAPI contracts on the production server", () => {
     ["/api/markets/999", "/api/markets/{id}", 404],
     ["/api/markets/999/bets", "/api/markets/{id}/bets", 404],
     ["/api/v1/profile/invalid", "/api/v1/profile/{address}", 400],
+    ["/api/v1/profile/invalid/bets", "/api/v1/profile/{address}/bets", 400],
+    [`/api/v1/profile/${address}/bets?page=10002&limit=1`, "/api/v1/profile/{address}/bets", 400],
+    [`/api/v1/profile/${address}/bets?limit=101`, "/api/v1/profile/{address}/bets", 400],
   ] as const)("validates real error response %s", async (url, path, status) => {
     await assertContract({ method: "GET", url }, path, status);
   });
@@ -212,4 +216,3 @@ describe("Route authentication registry and enforcement (#548)", () => {
     }
   });
 });
-

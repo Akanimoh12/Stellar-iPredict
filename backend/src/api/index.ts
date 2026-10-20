@@ -178,6 +178,12 @@ export const PUBLIC_ROUTES: readonly PublicRouteDefinition[] = Object.freeze([
     auth: "public",
     reason: "Public player profile and bet history by Stellar public key address",
   },
+  {
+    method: "GET",
+    url: "/api/v1/profile/:address/bets",
+    auth: "public",
+    reason: "Public read-only paginated bet history for a Stellar address",
+  },
 ]);
 
 /** Complete route authentication registry combining protected and public classifications. */

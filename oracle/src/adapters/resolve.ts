@@ -145,11 +145,12 @@ export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, PassedThroughOptions
 
 /**
  * Category-specific default resolution configurations.
+ * Crypto markets require 2+ provider agreement (issue #903) because bonded markets have financial stakes.
  * Political markets use conservative confidence gating (higher agreement, higher confidence threshold, lower conflict tolerance).
  */
 export const DEFAULT_CATEGORY_CONFIG: Record<MarketCategory, Required<CategoryResolutionConfig>> = {
   crypto: {
-    minAgreement: 1,
+    minAgreement: 2,
     maxSources: Infinity,
     conflictThreshold: 0.3,
     minConfidence: 0.7,
@@ -214,8 +215,9 @@ function fetchSource(
  *
  * Falls back on primary failure. Requires agreement among sources or flags for manual review.
  *
- * Adapters are tried in registration order, so register primary sources before fallbacks
- * (see the source priority table in docs/ORACLE_AND_BACKEND.md).
+ * Adapters are tried in registration order, so register primary sources before fallbacks.
+ * For crypto markets, the recommended fallback chain is: Binance → CoinGecko → CoinMarketCap (issue #902).
+ * Bonded markets require minAgreement ≥ 2 to prevent single-provider resolution (issue #903).
  */
 export async function resolveMarket(
   market: Market,

@@ -70,7 +70,8 @@ export function classifySourceError(source: string, error: unknown): AdapterErro
   return new AdapterError(source, "network", "Data source request failed", { cause: error });
 }
 
-function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
+/** Parses a `Retry-After` header (delta-seconds or HTTP date) into a delay in ms. */
+export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);

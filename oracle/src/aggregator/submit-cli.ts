@@ -2,21 +2,27 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadCouncilConfig } from "../config/council.js";
 import { loadAggregatorConfig } from "./config.js";
-import { createPostgresSubmissionStore, SubmissionTracker } from "./tally.js";
+import { computeTally, createPostgresSubmissionStore, SubmissionTracker, type MarketTally } from "./tally.js";
+import { selectThresholdOutcome } from "./threshold.js";
 
 export interface ParsedSubmitArgs {
   marketId: string;
   outcome: boolean;
+  /** Simulate the submission and report its effect without writing the vote. */
+  dryRun?: boolean;
 }
 
-/** Parses `--market <id> --outcome <yes|no>` from CLI argv. */
+/** Parses `--market <id> --outcome <yes|no> [--dry-run]` from CLI argv. */
 export function parseSubmitArgs(argv: readonly string[]): ParsedSubmitArgs {
   let marketId: string | undefined;
   let outcome: boolean | undefined;
+  let dryRun = false;
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (flag === "--market") {
+    if (flag === "--dry-run") {
+      dryRun = true;
+    } else if (flag === "--market") {
       marketId = argv[++i];
     } else if (flag === "--outcome") {
       const raw = argv[++i];
@@ -29,7 +35,9 @@ export function parseSubmitArgs(argv: readonly string[]): ParsedSubmitArgs {
 
   if (!marketId?.trim()) throw new Error("--market <id> is required");
   if (outcome === undefined) throw new Error("--outcome <yes|no> is required");
-  return { marketId: marketId.trim(), outcome };
+  const parsed: ParsedSubmitArgs = { marketId: marketId.trim(), outcome };
+  if (dryRun) parsed.dryRun = true;
+  return parsed;
 }
 
 export interface SubmitCliDependencies {
@@ -37,12 +45,28 @@ export interface SubmitCliDependencies {
   memberSecret: string;
   councilMembers: readonly string[];
   tracker: SubmissionTracker;
+  /** Votes needed to decide a market; used to report the projected outcome of a dry run. */
+  threshold?: number;
 }
 
 export interface SubmitCliResult {
   member: string;
   marketId: string;
   outcome: boolean;
+}
+
+export interface DryRunSimulation {
+  /** The member's currently recorded outcome, which this vote would replace. */
+  previousOutcome: boolean | null;
+  /** The market's tally as it would be after this vote. */
+  projectedTally: MarketTally;
+  /** The outcome the council would reach after this vote, or null if undecided. */
+  projectedOutcome: boolean | null;
+}
+
+export interface SubmitCliDryRunResult extends SubmitCliResult {
+  dryRun: true;
+  simulation: DryRunSimulation;
 }
 
 /**
@@ -57,11 +81,14 @@ export interface SubmitCliResult {
  * cannot itself cause a double finalization. Finalization (and its
  * once-only guarantee) is handled separately by `FinalizationGuard` /
  * `CancellationAwareFinalizer`.
+ *
+ * With `dryRun` the same checks run and the market's current tally is read,
+ * but nothing is written: the result reports what the vote would change.
  */
 export async function submitCouncilVote(
   deps: SubmitCliDependencies,
   args: ParsedSubmitArgs,
-): Promise<SubmitCliResult> {
+): Promise<SubmitCliResult | SubmitCliDryRunResult> {
   const keypair = Keypair.fromSecret(deps.memberSecret);
   const member = keypair.publicKey();
 
@@ -69,8 +96,46 @@ export async function submitCouncilVote(
     throw new Error("This key is not a registered council member");
   }
 
+  if (args.dryRun) {
+    const simulation = await simulateCouncilVote(deps, args.marketId, member, args.outcome);
+    return { member, marketId: args.marketId, outcome: args.outcome, dryRun: true, simulation };
+  }
+
   await deps.tracker.submit(args.marketId, member, args.outcome);
   return { member, marketId: args.marketId, outcome: args.outcome };
+}
+
+async function simulateCouncilVote(
+  deps: SubmitCliDependencies,
+  marketId: string,
+  member: string,
+  outcome: boolean,
+): Promise<DryRunSimulation> {
+  const current = await deps.tracker.getTally(marketId);
+  const previousOutcome = current.votes.find((vote) => vote.member === member)?.outcome ?? null;
+  const projectedTally = computeTally(marketId, [...current.votes, { member, outcome }]);
+  const projectedOutcome =
+    deps.threshold === undefined ? null : selectThresholdOutcome(projectedTally.votes, deps.threshold);
+  return { previousOutcome, projectedTally, projectedOutcome };
+}
+
+function formatOutcome(outcome: boolean | null): string {
+  if (outcome === null) return "none";
+  return outcome ? "YES" : "NO";
+}
+
+/** Human-readable report of a dry run, printed by the CLI. */
+export function formatDryRun(result: SubmitCliDryRunResult, threshold: number): string {
+  const { simulation } = result;
+  const { projectedTally } = simulation;
+  return [
+    `[dry-run] Would record ${formatOutcome(result.outcome)} for market ${result.marketId} as ${result.member}`,
+    `[dry-run] Current vote from this member: ${formatOutcome(simulation.previousOutcome)}`,
+    `[dry-run] Tally after vote: ${projectedTally.yesVotes} YES / ${projectedTally.noVotes} NO ` +
+      `(${projectedTally.totalVoters} voters, threshold ${threshold})`,
+    `[dry-run] Council outcome after vote: ${formatOutcome(simulation.projectedOutcome)}`,
+    "[dry-run] No vote was written.",
+  ].join("\n");
 }
 
 async function main(): Promise<void> {
@@ -86,10 +151,14 @@ async function main(): Promise<void> {
   try {
     const tracker = new SubmissionTracker(createPostgresSubmissionStore(pool));
     const result = await submitCouncilVote(
-      { memberSecret, councilMembers: councilConfig.members, tracker },
+      { memberSecret, councilMembers: councilConfig.members, tracker, threshold: councilConfig.threshold },
       args,
     );
-    console.log(`Recorded ${result.outcome ? "YES" : "NO"} for market ${result.marketId} as ${result.member}`);
+    if ("dryRun" in result) {
+      console.log(formatDryRun(result, councilConfig.threshold));
+    } else {
+      console.log(`Recorded ${result.outcome ? "YES" : "NO"} for market ${result.marketId} as ${result.member}`);
+    }
   } finally {
     await pool.end();
   }

@@ -33,9 +33,13 @@ export function computeBackoffDelayMs(
 
 /**
  * Retries a single market's on-chain submission with exponential backoff.
- * `isAlreadyFinalized` is re-checked between attempts so a submission that
- * actually succeeded on-chain but timed out on the response is not retried
- * into a duplicate finalization.
+ *
+ * On-chain state is checked after every failure and again immediately before
+ * every retry, so a submission that actually landed (e.g. it timed out on the
+ * response, or was still in flight during the backoff sleep) is never resent
+ * as a duplicate bond. If that check itself fails the state is unknown, so the
+ * retry is skipped rather than risking a second submission; the next attempt
+ * checks again before sending anything.
  */
 export async function submitWithRetry(
   marketId: string,
@@ -48,7 +52,33 @@ export async function submitWithRetry(
   const logger = options.logger;
   let lastError: unknown;
 
+  /** `undefined` means the on-chain state could not be determined. */
+  const checkFinalized = async (attempt: number): Promise<boolean | undefined> => {
+    try {
+      return await isAlreadyFinalized(marketId);
+    } catch (error) {
+      lastError = error;
+      logger?.warn("on-chain state check failed", { marketId, attempt, error });
+      return undefined;
+    }
+  };
+
   for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
+    if (attempt > 0) {
+      const delayMs = computeBackoffDelayMs(attempt - 1, options.baseDelayMs, options.maxDelayMs, random);
+      await sleep(delayMs);
+
+      const finalized = await checkFinalized(attempt);
+      if (finalized) {
+        logger?.info("submit already finalized on-chain before retry", { marketId, attempt });
+        return true;
+      }
+      if (finalized === undefined) {
+        logger?.warn("skipping retry: on-chain state unknown", { marketId, attempt });
+        continue;
+      }
+    }
+
     try {
       await submit(marketId);
       logger?.info("submit succeeded", { marketId, attempt });
@@ -57,15 +87,10 @@ export async function submitWithRetry(
       lastError = error;
       logger?.warn("submit failed", { marketId, attempt, error });
 
-      if (await isAlreadyFinalized(marketId)) {
+      if (await checkFinalized(attempt)) {
         logger?.info("submit already finalized on-chain despite error", { marketId, attempt });
         return true;
       }
-
-      if (attempt >= options.maxRetries) break;
-
-      const delayMs = computeBackoffDelayMs(attempt, options.baseDelayMs, options.maxDelayMs, random);
-      await sleep(delayMs);
     }
   }
 

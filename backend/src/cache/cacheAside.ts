@@ -42,6 +42,36 @@ import { getCircuitBreaker } from "./circuitBreaker.js";
 import { logCacheFailure } from "./invalidate.js";
 
 // ---------------------------------------------------------------------------
+// TTL jitter
+// ---------------------------------------------------------------------------
+
+/**
+ * Fraction of a key's TTL that random jitter may add on top of it.
+ *
+ * Keys written in the same burst (a cold start, a flush, a deploy that warms
+ * several endpoints) would otherwise all expire on the same tick and send the
+ * next wave of requests to the database together. Spreading expiry across
+ * `[ttl, ttl * (1 + TTL_JITTER_RATIO))` breaks that synchrony.
+ *
+ * Jitter only ever lengthens a TTL, so no value is served staler than its
+ * configured TTL and the freshness targets in `CACHE_TTLS` still hold.
+ */
+export const TTL_JITTER_RATIO = 0.1;
+
+/**
+ * The TTL, in whole seconds, to store a value under: the configured `ttlSec`
+ * plus up to {@link TTL_JITTER_RATIO} of it, chosen at random.
+ *
+ * @param random Source of `[0, 1)` values. Injectable so tests can pin it.
+ */
+export function jitteredTtl(
+  ttlSec: number,
+  random: () => number = Math.random
+): number {
+  return ttlSec + Math.floor(ttlSec * TTL_JITTER_RATIO * random());
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -139,7 +169,7 @@ export async function getOrSet<T>(
     const serialised = JSON.stringify(value);
     if (serialised !== undefined) {
       try {
-        await redis.setex(key, ttlSec, serialised);
+        await redis.setex(key, jitteredTtl(ttlSec), serialised);
         circuit.recordSuccess();
       } catch (error) {
         circuit.recordFailure();

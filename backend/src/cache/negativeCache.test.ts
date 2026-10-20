@@ -7,7 +7,7 @@ import {
   resetNegativeCacheStats,
   serializeNegativeCacheMetrics,
 } from "../cache/negativeCache.js";
-import { marketKey } from "../cache/keys.js";
+import { marketKey } from "../cache/cacheKeys.js";
 
 let cache: NegativeCache;
 

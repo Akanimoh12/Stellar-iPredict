@@ -13,6 +13,8 @@ const options: RedisOptions = {
   },
   // Prevent unbounded queues if redis goes down hard
   maxRetriesPerRequest: 3,
+  // Fail a stalled handshake instead of hanging the first request on it
+  connectTimeout: 5000,
   // Connect lazily so importing this module never opens a socket — important
   // for test environments without a running Redis (see src/test/fakeRedis.ts).
   lazyConnect: true,
@@ -32,6 +34,10 @@ const circuit = getCircuitBreaker();
  * module therefore opens no connection, which keeps tests fast and
  * deterministic without a running Redis server.
  *
+ * This module is the only owner of the connection: `db/redis.ts` (health
+ * checks) and the cache helpers share this instance, so the server holds one
+ * Redis connection and {@link closeRedis} shuts all of it down.
+ *
  * DO NOT instantiate `new Redis()` elsewhere — use this function or
  * {@link setRedisClient} to inject a test double.
  */
@@ -48,6 +54,21 @@ export function getRedisClient(): Redis {
  */
 export function setRedisClient(fake: Redis): void {
   client = fake;
+}
+
+/**
+ * Quits the shared client and forgets it, so the next {@link getRedisClient}
+ * call builds a fresh one. A no-op when no client was ever created.
+ *
+ * The reference is cleared before `quit()` so a failed quit cannot leave a
+ * dead client behind for later callers to reuse.
+ */
+export async function closeRedis(): Promise<void> {
+  const current = client;
+  client = null;
+  if (current) {
+    await current.quit();
+  }
 }
 
 /**
@@ -164,8 +185,6 @@ export const cache = {
    * Gracefully close the Redis connection.
    */
   async close(): Promise<void> {
-    if (client) {
-      await client.quit();
-    }
+    await closeRedis();
   },
 };

@@ -30,6 +30,7 @@ import {
   resetDbQueryHistogram,
   serializeDbQueryMetrics,
   serializeMetrics,
+  serializePoolMetrics,
   isMetricsRequestAuthorized,
   METRICS_TOKEN_HEADER,
 } from "./metrics.js";
@@ -594,6 +595,27 @@ describe("serializeDbQueryMetrics", () => {
     expect(samples['db_query_duration_ms_bucket{le="+Inf"}']).toBe("3");
     expect(samples.db_query_duration_ms_count).toBe("3");
     expect(samples.db_query_duration_ms_sum).toBe("614");
+  });
+});
+
+describe("serializePoolMetrics", () => {
+  it("exports occupancy and the configured pool ceiling", async () => {
+    const body = await serializePoolMetrics();
+
+    expect(body).toContain("# TYPE db_pool_connections gauge");
+    expect(body).toMatch(/^db_pool_connections_total \d+$/m);
+    expect(body).toMatch(/^db_pool_connections_idle \d+$/m);
+    expect(body).toMatch(/^db_pool_connections_waiting \d+$/m);
+    expect(body).toContain("# TYPE db_pool_connections_max gauge");
+    expect(body).toMatch(/^db_pool_connections_max [1-9]\d*$/m);
+  });
+
+  it("reports zero occupancy before the first query, so scraping never creates a pool", async () => {
+    const body = await serializePoolMetrics();
+
+    expect(body).toContain("db_pool_connections_total 0");
+    expect(body).toContain("db_pool_connections_idle 0");
+    expect(body).toContain("db_pool_connections_waiting 0");
   });
 });
 

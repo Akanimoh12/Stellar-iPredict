@@ -577,10 +577,14 @@ export function serializeMetrics(): string {
  * The pool module is imported lazily so that loading the metrics serialiser
  * never forces a `DATABASE_URL`/pool to be created in tests or other contexts
  * that never touch the metrics endpoint.
+ *
+ * `db_pool_connections_max` is the configured ceiling, so saturation reads as
+ * `total / max` on a dashboard. Query latency is exported separately as the
+ * `db_query_duration_ms` histogram (see {@link serializeDbQueryMetrics}).
  */
 export async function serializePoolMetrics(): Promise<string> {
   const { getPoolMetrics } = await import("./db/pool.js");
-  const { total, idle, waiting } = getPoolMetrics();
+  const { total, idle, waiting, max } = getPoolMetrics();
 
   return [
     "# HELP db_pool_connections Database connection pool occupancy",
@@ -588,6 +592,9 @@ export async function serializePoolMetrics(): Promise<string> {
     `db_pool_connections_total ${total}`,
     `db_pool_connections_idle ${idle}`,
     `db_pool_connections_waiting ${waiting}`,
+    "# HELP db_pool_connections_max Configured maximum size of the database connection pool",
+    "# TYPE db_pool_connections_max gauge",
+    `db_pool_connections_max ${max}`,
   ].join("\n");
 }
 

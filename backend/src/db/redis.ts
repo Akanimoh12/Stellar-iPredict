@@ -1,20 +1,9 @@
-import Redis from "ioredis";
-import { config } from "../config/index.js";
 import type { HealthCheckResult } from "./health.js";
+import { getRedisClient } from "../cache/redis.js";
 
-let client: Redis | null = null;
-
-export function getRedisClient(): Redis {
-  if (!client) {
-    client = new Redis(config.REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      connectTimeout: 5000,
-      lazyConnect: true,
-      enableReadyCheck: true,
-    });
-  }
-  return client;
-}
+// The connection is owned by `cache/redis.ts`; these are re-exported so existing
+// callers (server startup and shutdown) keep importing from `db/redis`.
+export { closeRedis, getRedisClient } from "../cache/redis.js";
 
 export async function pingRedis(): Promise<HealthCheckResult> {
   const start = Date.now();
@@ -32,12 +21,5 @@ export async function pingRedis(): Promise<HealthCheckResult> {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
-  }
-}
-
-export async function closeRedis(): Promise<void> {
-  if (client) {
-    await client.quit();
-    client = null;
   }
 }

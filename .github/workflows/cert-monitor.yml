@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Restore monitor state (alert de-duplication)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: infra/cert-monitor/.state.json
           key: cert-monitor-state-${{ github.run_id }}
@@ -79,7 +79,7 @@ jobs:
 
       - name: Save monitor state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: infra/cert-monitor/.state.json
           key: cert-monitor-state-${{ github.run_id }}

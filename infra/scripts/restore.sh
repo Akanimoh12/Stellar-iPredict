@@ -4,9 +4,10 @@
 #
 # Loads a dump produced by backup.sh back into a database. This DROPS AND
 # REPLACES every object the dump contains, so it refuses to run without an
-# explicit confirmation.
+# explicit confirmation. Supports both plain and AES-256 encrypted dumps (.dump.enc).
 #
 #   infra/scripts/restore.sh infra/backups/ipredict-20260101T000000Z.dump
+#   infra/scripts/restore.sh infra/backups/ipredict-20260101T000000Z.dump.enc
 #   infra/scripts/restore.sh --list <dump>            # inspect, change nothing
 #   infra/scripts/restore.sh --yes -d "$STAGING_URL" <dump>
 #
@@ -23,6 +24,10 @@ USE_DOCKER="auto"
 JOBS="${RESTORE_JOBS:-4}"
 DUMP=""
 
+DECRYPT="auto"
+ENCRYPTION_KEY="${BACKUP_ENCRYPTION_KEY:-${BACKUP_PASSPHRASE:-}}"
+ENCRYPTION_KEY_FILE="${BACKUP_PASSPHRASE_FILE:-${BACKUP_ENCRYPTION_KEY_FILE:-}}"
+
 log() { printf '[restore] %s\n' "$*" >&2; }
 die() { printf '[restore] error: %s\n' "$*" >&2; exit 1; }
 
@@ -31,13 +36,21 @@ usage() {
 Usage: restore.sh [options] <dump-file>
 
 Options:
-  -d, --database URL   Target Postgres connection string (default: $DATABASE_URL)
-  -j, --jobs N         Parallel restore workers (default: 4, or $RESTORE_JOBS)
-  -l, --list           Print the archive's contents and exit. Changes nothing.
-  -y, --yes            Skip the interactive confirmation (for automation)
-      --docker         Run pg_restore inside the compose postgres service
-      --local          Run the pg_restore binary on this machine
-  -h, --help           Show this help
+  -d, --database URL        Target Postgres connection string (default: $DATABASE_URL)
+  -j, --jobs N              Parallel restore workers (default: 4, or $RESTORE_JOBS)
+  -l, --list                Print the archive's contents and exit. Changes nothing.
+  -y, --yes                 Skip the interactive confirmation (for automation)
+      --docker              Run pg_restore inside the compose postgres service
+      --local               Run the pg_restore binary on this machine
+
+Decryption options:
+  -e, --decrypt             Explicitly decrypt an AES-256 encrypted archive
+      --encryption-key KEY  Passphrase for AES-256 decryption
+                            (default: $BACKUP_ENCRYPTION_KEY or $BACKUP_PASSPHRASE)
+      --key-file FILE       File containing passphrase for AES-256 decryption
+                            (default: $BACKUP_PASSPHRASE_FILE)
+
+  -h, --help                Show this help
 
 The restore is destructive: objects in the dump are dropped and recreated in
 the target database. Point -d at the database you mean to overwrite.
@@ -46,15 +59,20 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -d|--database) DATABASE_URL="${2:?--database needs a URL}"; shift 2 ;;
-    -j|--jobs)     JOBS="${2:?--jobs needs a number}"; shift 2 ;;
-    -l|--list)     LIST_ONLY="yes"; shift ;;
-    -y|--yes)      ASSUME_YES="yes"; shift ;;
-    --docker)      USE_DOCKER="yes"; shift ;;
-    --local)       USE_DOCKER="no"; shift ;;
-    -h|--help)     usage; exit 0 ;;
-    -*)            usage >&2; die "unknown option: $1" ;;
-    *)             [[ -z "$DUMP" ]] || die "only one dump file may be given"; DUMP="$1"; shift ;;
+    -d|--database)         DATABASE_URL="${2:?--database needs a URL}"; shift 2 ;;
+    -j|--jobs)             JOBS="${2:?--jobs needs a number}"; shift 2 ;;
+    -l|--list)             LIST_ONLY="yes"; shift ;;
+    -y|--yes)              ASSUME_YES="yes"; shift ;;
+    --docker)              USE_DOCKER="yes"; shift ;;
+    --local)               USE_DOCKER="no"; shift ;;
+    -e|--decrypt)          DECRYPT="yes"; shift ;;
+    --encryption-key|--passphrase)
+                           ENCRYPTION_KEY="${2:?--encryption-key needs a passphrase}"; shift 2 ;;
+    --key-file|--passphrase-file)
+                           ENCRYPTION_KEY_FILE="${2:?--key-file needs a file path}"; shift 2 ;;
+    -h|--help)             usage; exit 0 ;;
+    -*)                    usage >&2; die "unknown option: $1" ;;
+    *)                     [[ -z "$DUMP" ]] || die "only one dump file may be given"; DUMP="$1"; shift ;;
   esac
 done
 
@@ -87,6 +105,49 @@ verify_checksum() {
 
 verify_checksum
 
+# ── Decryption (if encrypted) ────────────────────────────────────────────────
+DECRYPTED_TEMP=""
+cleanup_temp() {
+  if [[ -n "$DECRYPTED_TEMP" && -f "$DECRYPTED_TEMP" ]]; then
+    rm -f -- "$DECRYPTED_TEMP" 2>/dev/null || true
+  fi
+}
+trap cleanup_temp EXIT
+
+RESTORE_INPUT="$DUMP"
+
+if [[ "$DUMP" == *.enc || "$DECRYPT" == "yes" ]]; then
+  command -v openssl >/dev/null 2>&1 || die "openssl is required to decrypt $DUMP"
+  if [[ -z "$ENCRYPTION_KEY" && -z "$ENCRYPTION_KEY_FILE" ]]; then
+    if [[ -t 0 ]]; then
+      read -s -r -p "[restore] Enter decryption passphrase: " ENCRYPTION_KEY
+      echo "" >&2
+    else
+      die "dump is encrypted but no passphrase was provided (use --encryption-key or \$BACKUP_ENCRYPTION_KEY)"
+    fi
+  fi
+  if [[ -n "$ENCRYPTION_KEY_FILE" && ! -f "$ENCRYPTION_KEY_FILE" ]]; then
+    die "encryption key file not found: $ENCRYPTION_KEY_FILE"
+  fi
+
+  DECRYPTED_TEMP="$(mktemp "${TMPDIR:-/tmp}/ipredict-restore-XXXXXX.dump")"
+  chmod 600 "$DECRYPTED_TEMP"
+
+  log "decrypting $DUMP..."
+  if [[ -n "$ENCRYPTION_KEY_FILE" ]]; then
+    openssl enc -d -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+      -in "$DUMP" -out "$DECRYPTED_TEMP" \
+      -pass "file:$ENCRYPTION_KEY_FILE"
+  else
+    openssl enc -d -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+      -in "$DUMP" -out "$DECRYPTED_TEMP" \
+      -pass "pass:$ENCRYPTION_KEY"
+  fi
+  [[ -s "$DECRYPTED_TEMP" ]] || die "decryption produced an empty file"
+  log "decryption successful"
+  RESTORE_INPUT="$DECRYPTED_TEMP"
+fi
+
 compose() {
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "$COMPOSE_FILE" "$@"
@@ -96,8 +157,6 @@ compose() {
 }
 
 if [[ "$USE_DOCKER" == "auto" ]]; then
-  # Without a URL there is nothing for a local client to dial: the compose
-  # stack keeps Postgres on the internal network with no published port.
   if [[ -n "$DATABASE_URL" ]] && command -v pg_restore >/dev/null 2>&1; then
     USE_DOCKER="no"
   else
@@ -107,18 +166,16 @@ fi
 
 if [[ "$LIST_ONLY" == "yes" ]]; then
   if [[ "$USE_DOCKER" == "no" ]]; then
-    pg_restore --list "$DUMP"
+    pg_restore --list "$RESTORE_INPUT"
   else
     compose exec -T postgres sh -c \
       'cat > /tmp/list.dump && pg_restore --list /tmp/list.dump; rc=$?; rm -f /tmp/list.dump; exit $rc' \
-      < "$DUMP"
+      < "$RESTORE_INPUT"
   fi
   exit 0
 fi
 
 # ── Confirm ──────────────────────────────────────────────────────────────────
-# Show the target without its password: the point is to let the operator catch
-# "wrong database", not to print a credential into a terminal log.
 redact() { printf '%s' "$1" | sed -E 's#(://[^:/@]+):[^@]*@#\1:****@#'; }
 
 if [[ "$USE_DOCKER" == "no" ]]; then
@@ -139,11 +196,6 @@ if [[ "$ASSUME_YES" != "yes" ]]; then
 fi
 
 # ── Restore ──────────────────────────────────────────────────────────────────
-# --clean --if-exists   drop each object first, tolerating a fresh database
-# --no-owner/-privileges  the dump is portable across environments whose role
-#                        names differ; ownership is set by the target's role
-# --exit-on-error        stop at the first failure instead of leaving a
-#                        half-restored schema that looks like it worked
 log "restoring $DUMP into $target"
 
 if [[ "$USE_DOCKER" == "no" ]]; then
@@ -153,14 +205,14 @@ if [[ "$USE_DOCKER" == "no" ]]; then
     --no-owner --no-privileges \
     --exit-on-error \
     --jobs="$JOBS" \
-    "$DUMP"
+    "$RESTORE_INPUT"
 else
   compose exec -T postgres sh -c \
     "cat > /tmp/restore.dump && \
      pg_restore --username='$POSTGRES_USER' --dbname='$POSTGRES_DB' \
        --clean --if-exists --no-owner --no-privileges --exit-on-error \
        --jobs='$JOBS' /tmp/restore.dump; rc=\$?; rm -f /tmp/restore.dump; exit \$rc" \
-    < "$DUMP"
+    < "$RESTORE_INPUT"
 fi
 
 log "restore complete"

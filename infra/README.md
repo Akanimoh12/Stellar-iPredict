@@ -737,3 +737,61 @@ CLI flags: `--dry-run`, `--force` (re-send everything currently in alert),
 | Alerts repeat every run | state file was deleted or the job runs on ephemeral runners without cache — restore `SYNTHETIC_MONITOR_STATE_FILE`, or accept re-alerts on a clean runner |
 | `WATCHDOG: monitor did not run …` | timer/cron disabled, host was down, or CI schedule paused — fix the schedule, then `--force` |
 | No alerts at all but nothing ran | check `systemctl list-timers ipredict-synthetic-monitor.timer` / crontab, and point `SYNTHETIC_MONITOR_HEARTBEAT_URL` at a dead-man's-switch |
+
+## Database Backup, Encryption, and Off-Site Replication (`scripts/backup.sh`, `scripts/restore.sh`)
+
+PostgreSQL database dumps are taken with `infra/scripts/backup.sh` and restored with `infra/scripts/restore.sh`.
+
+```
+infra/scripts/
+├── backup.sh        PostgreSQL custom-format dump, verification, encryption, shipping, and pruning
+├── restore.sh       Integrity check, decryption (if encrypted), interactive confirmation, and pg_restore
+└── verify-backup.sh Automated restore verification into a scratch container
+```
+
+### Encryption at rest and in transit
+
+Dumps can be encrypted using standard AES-256-CBC with PBKDF2 (100,000 iterations):
+
+```bash
+# Encrypt using a passphrase
+infra/scripts/backup.sh --encrypt --encryption-key "secret-passphrase"
+
+# Encrypt using a key file (e.g., Docker / Kubernetes secret mount)
+infra/scripts/backup.sh --encrypt --key-file /run/secrets/backup_passphrase
+
+# Via environment variable
+BACKUP_ENCRYPTION_KEY="secret-passphrase" infra/scripts/backup.sh
+```
+
+Encrypted dumps are written to `${PREFIX}-${STAMP}.dump.enc` alongside a SHA-256 sidecar `${PREFIX}-${STAMP}.dump.enc.sha256`. The unencrypted partial dump is wiped immediately upon successful encryption.
+
+### Off-site replication
+
+To protect against catastrophic host loss, backups can be shipped to off-site object storage (AWS S3, Cloudflare R2, MinIO) or a remote SSH/rsync server:
+
+```bash
+# Ship to S3 / R2
+infra/scripts/backup.sh --s3-uri s3://my-backup-bucket/ipredict
+
+# Ship to a remote host via rsync
+infra/scripts/backup.sh --remote-dest backupuser@backup.internal:/srv/backups/ipredict
+
+# Combined encryption and off-site shipping via environment variables
+BACKUP_ENCRYPTION_KEY="..." BACKUP_S3_URI="s3://..." infra/scripts/backup.sh
+```
+
+Both the dump archive and its `.sha256` sidecar are shipped to the remote target.
+
+### Restoring from encrypted backups
+
+`restore.sh` automatically detects `.dump.enc` archives and decrypts them into a restricted temporary file (`0600`) before running `pg_restore`:
+
+```bash
+# Interactive restore (prompts for passphrase if not supplied)
+infra/scripts/restore.sh infra/backups/ipredict-20261021T000000Z.dump.enc
+
+# Non-interactive automated restore
+infra/scripts/restore.sh --yes --encryption-key "secret" infra/backups/ipredict-20261021T000000Z.dump.enc
+```
+

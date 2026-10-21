@@ -1,0 +1,25 @@
+# ==============================================================================
+# GitHub CODEOWNERS
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# These owners will be automatically requested for review when someone opens a
+# pull request that modifies the corresponding files.
+# ==============================================================================
+
+# Default fallback owner for the entire repository
+* @Akanimoh12
+
+# Smart contracts (Soroban Rust contracts, WASM build, verification)
+/contracts/ @Akanimoh12
+
+# Oracle (price feeds, market resolution, aggregator, disputes)
+/oracle/ @Akanimoh12
+
+# Infrastructure (deployments, compose configs, scripts, monitoring, backups)
+/infra/ @Akanimoh12
+
+# Database migrations and schema definitions
+/db/ @Akanimoh12
+
+# GitHub Actions workflows and repository automation
+/.github/ @Akanimoh12

@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload build artifact
         if: matrix.node-version == 22
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: frontend-build
           path: frontend/.next
@@ -185,7 +185,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload backend coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: backend-coverage
@@ -236,7 +236,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload oracle coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: oracle-coverage
@@ -297,7 +297,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload indexer coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: indexer-coverage

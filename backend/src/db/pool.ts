@@ -1,5 +1,5 @@
 import { Pool, types, type PoolClient, type QueryResult } from "pg";
-import { logSlowQuery } from "../lib/log.js";
+import { logSlowQuery, redactDatabaseUrl } from "../lib/log.js";
 import { observeDbQuery, recordAbandonedQuery } from "../metrics.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
@@ -56,7 +56,8 @@ function getPool(): Pool {
     });
 
     _pool.on("error", (err) => {
-      console.error("Unexpected pool error:", err);
+      const message = err instanceof Error ? redactDatabaseUrl(err.message) : redactDatabaseUrl(String(err));
+      console.error("Unexpected pool error:", message);
     });
   }
   return _pool;

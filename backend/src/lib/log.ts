@@ -74,6 +74,17 @@ export const DEFAULT_ALLOWED_QUERY_PARAMS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Redacts database connection credentials matching postgres://user:password@host:port/db
+ */
+export function redactDatabaseUrl(text: string): string {
+  if (!text) return text;
+  return text.replace(
+    /(postgres(?:ql)?:\/\/[^:]+:)([^@]+)(@)/gi,
+    "$1[redacted]$3"
+  );
+}
+
+/**
  * Redact sensitive query parameters in a URL using an allowlist strategy.
  *
  * Any query parameter whose name (case-insensitive) is not in `allowedParams`

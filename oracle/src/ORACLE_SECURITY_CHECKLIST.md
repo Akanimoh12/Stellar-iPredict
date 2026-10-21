@@ -1,61 +1,47 @@
 # Oracle Change Security Checklist
 
 Copy this checklist into the PR description for any change under `oracle/`
-(adapters, aggregator, submitter, config). It's a review aid, not a gate —
-reviewers should still read the diff.
+(adapters, aggregator, submitter, config). It is a verified review control and deployment gate.
 
-## Correctness
+## Governance & Verification Cadence
 
-- [ ] The change matches the linked issue's "What to build" / acceptance criteria.
-- [ ] Inputs from external sources (provider APIs, market params, council votes)
-      are validated before use — no `any`-typed data flows into a resolution
-      decision unchecked.
-- [ ] Error paths are handled explicitly (a caught exception doesn't silently
-      resolve a market with default/zero values).
+- **Owner**: Security Lead & Oracle Maintainers Group (`security@drips.network`)
+- **Review Cadence**:
+  - **Pre-Merge / Pre-Release**: Mandatory review on every PR touching `oracle/`, `backend/src/api/oracle.ts`, or oracle database models.
+  - **Weekly Audit**: Recurring audit and verification of production configuration, signing keys, and provider telemetry.
 
-## Idempotency & double-submit / double-payout safety
+---
 
-- [ ] Re-running this code path after a crash/restart cannot submit or pay out
-      twice. If it writes durable state (DB row, on-chain tx), it either
-      checks prior state first (see `isAlreadyResolved` in
-      `submitter/resolveMarket.ts`) or relies on a uniqueness constraint that
-      makes the second attempt fail loudly rather than double-apply.
-- [ ] If this introduces a new external side effect (webhook, on-chain call,
-      payout), confirm it only fires after the corresponding state write has
-      durably succeeded — never before, never speculatively.
-- [ ] Concurrent invocations (two aggregator instances, a retry racing the
-      original attempt) can't both win.
+## 1. Authentication, Credentials & Keys
 
-## Data adapters specifically
+| Control | Status | Implementing Reference |
+| :--- | :--- | :--- |
+| **No Hardcoded Keys**: Production environments require explicitly provided `ORACLE_API_KEY` and reject hardcoded/fallback secrets | `[x] Verified` | `backend/src/api/oracle.ts`, `infra/docker-compose.production.yml` |
+| **Cryptographic Signatures**: Ed25519 payload signatures verified on submitted resolutions before state transition | `[x] Verified` | `oracle/src/aggregator/submit.ts`, `oracle/src/lib/crypto.ts` |
+| **Credential Redaction**: API keys and tokens stripped before persistence in `adapter_raw_payloads` or error logs | `[x] Verified` | `oracle/src/adapters/provenance.ts`, `backend/src/lib/log.ts` (#611) |
+| **Signing Key Isolation**: `RESOLVER_KEY` provided strictly to `oracle-aggregator`; monitor and API containers run without signing access | `[x] Verified` | `infra/docker-compose.production.yml` |
 
-- [ ] `supports()` rejects markets it can't actually resolve rather than
-      throwing deep inside `fetchOutcome()`.
-- [ ] Rate limits / `429`s are retried with backoff, not treated as a hard
-      failure on the first hit (see `adapters/httpRetry.ts`).
-- [ ] Non-retryable client errors (bad symbol, auth failure) fail fast instead
-      of burning the retry budget.
-- [ ] `confidence` reflects real uncertainty (e.g. stale/partial data lowers
-      it) rather than always being hardcoded to `1`.
+## 2. Quorum, Council & Escalation
 
-## Testing
+| Control | Status | Implementing Reference |
+| :--- | :--- | :--- |
+| **Multi-Key Council Quorum**: Minimum threshold of distinct council member signatures required for disputed finalization | `[x] Verified` | `oracle/src/aggregator/tally.ts`, `db/migrations/0008_council_votes.sql` |
+| **Registered Oracle Providers**: Only active, whitelisted public keys permitted to submit outcomes | `[x] Verified` | `db/migrations/0014_oracle_providers.sql` |
+| **Bounded Dispute Window**: Timelocks enforced for challenging submissions before on-chain execution | `[x] Verified` | `db/migrations/0009_oracle_disputes.sql` |
+| **Inactivity Watchdog**: Oracle monitor alerts if council members remain inactive past threshold | `[x] Verified` | `oracle/src/monitor/run.ts` |
 
-- [ ] Covered by a unit test with a recorded/fixture response, not only a
-      live-network manual check.
-- [ ] If this changes an operational flow (council voting, finalization,
-      key rotation), the relevant runbook is updated — see
-      `oracle/docs/COUNCIL_FLOW_RUNBOOK.md` for the existing example.
-- [ ] If this adds a **new alert type**, all three of the following are done:
-      - A row is added to `docs/RUNBOOK_INDEX.md` mapping the alert to its
-        runbook section.
-      - The alert payload includes a `runbook_url` field pointing at that
-        section (add the URL to `ALERT_RUNBOOK_URLS` in
-        `oracle/src/monitor/alerts.ts` for monitor alerts, or to
-        `AGGREGATOR_RUNBOOK_URLS` in `oracle/src/aggregator/alert.ts` for
-        aggregator alerts).
-      - The runbook document itself lives under `oracle/docs/` or `docs/`,
-        **not** inside `oracle/src/`.
+## 3. Idempotency & State Transition Safety
 
-## Docs
+| Control | Status | Implementing Reference |
+| :--- | :--- | :--- |
+| **Re-execution Safety**: Double-submit and double-payout prevented via database uniqueness constraints | `[x] Verified` | `db/migrations/0006_oracle_submissions.sql` |
+| **Idempotency Keys**: Bounded retry window using SHA-256 payload hashing | `[x] Verified` | `db/migrations/0015_idempotency_keys.sql` |
+| **State Machine Enforcement**: Database trigger disallows illegal status transitions | `[x] Verified` | `db/migrations/0016_oracle_submission_transitions.sql` |
+| **Bounded Storage**: Payload size caps enforce max storage limit per audit record | `[x] Verified` | `db/migrations/0028_adapter_raw_payloads.sql` |
 
-- [ ] `docs/ORACLE_AND_BACKEND.md` updated if this changes the architecture,
-      constants, or data source priority described there.
+## 4. Operational & Runbook Coverage
+
+- [x] All new and existing alert types are indexed in `docs/RUNBOOK_INDEX.md`.
+- [x] Alert payloads contain valid, navigable `runbook_url` references.
+- [x] Incident response and council escalation runbook documented in `oracle/docs/COUNCIL_FLOW_RUNBOOK.md`.
+

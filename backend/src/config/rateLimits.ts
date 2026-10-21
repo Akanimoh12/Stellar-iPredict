@@ -21,6 +21,11 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
   "GET /api/markets/:id": { requests: 120, window: 60 },
   "POST /api/oracle/*": { requests: 10, window: 60 },
   "POST /api/v1/oracle/submit": { requests: 10, window: 60 },
+  "GET /readyz": { requests: 120, window: 60 },
+  "GET /healthz": { requests: 300, window: 60 },
+  "GET /resolution-status": { requests: 60, window: 60 },
+  "GET /api/docs": { requests: 60, window: 60 },
+  "GET /api/docs/json": { requests: 60, window: 60 },
   default: { requests: 30, window: 60 },
 };
 /**

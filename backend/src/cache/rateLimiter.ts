@@ -369,6 +369,14 @@ export function registerRateLimiter(
   server.addHook(
     "onRequest",
     async (request: FastifyRequest, reply: FastifyReply) => {
+      // Internal loopback probes (e.g., Docker / Kubernetes orchestrators) are exempt
+      // on health checks to avoid false-positive restart loops (#608).
+      const isLoopback = request.ip === "127.0.0.1" || request.ip === "::1" || request.ip === "localhost";
+      const isHealthProbe = request.url.startsWith("/readyz") || request.url.startsWith("/healthz");
+      if (isLoopback && isHealthProbe) {
+        return;
+      }
+
       // Determine whether the request carries an authenticated identity.
       // Authenticated callers get the higher per-identity budget from
       // RATE_LIMITS_AUTHENTICATED and are keyed by identity, not IP (#485).

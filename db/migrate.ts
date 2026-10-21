@@ -114,6 +114,7 @@ export interface RunMigrationsOptions {
    * the case the check exists to catch.
    */
   allowChecksumUpdate?: boolean;
+  dryRun?: boolean;
 }
 
 export async function runMigrations(
@@ -123,21 +124,25 @@ export async function runMigrations(
   let lockAcquired = false;
 
   try {
-    // Attempt non-blocking lock first to log if another process holds it
-    const tryLockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1::bigint)',
-      [MIGRATION_ADVISORY_LOCK_KEY]
-    );
+    if (!options.dryRun) {
+      // Attempt non-blocking lock first to log if another process holds it
+      const tryLockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint)',
+        [MIGRATION_ADVISORY_LOCK_KEY]
+      );
 
-    lockAcquired = tryLockRes.rows[0]?.pg_try_advisory_lock ?? false;
+      lockAcquired = tryLockRes.rows[0]?.pg_try_advisory_lock ?? false;
 
-    if (!lockAcquired) {
-      console.log('Migration lock is currently held by another process. Waiting for lock release...');
-      await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
-      lockAcquired = true;
+      if (!lockAcquired) {
+        console.log('Migration lock is currently held by another process. Waiting for lock release...');
+        await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
+        lockAcquired = true;
+      }
+
+      console.log('Acquired migration advisory lock.');
+    } else {
+      console.log('[DRY-RUN] Running in dry-run mode. No DDL will be executed.');
     }
-
-    console.log('Acquired migration advisory lock.');
 
     await ensureMigrationsTable(client);
 
@@ -154,7 +159,9 @@ export async function runMigrations(
           // Pre-checksum row (#406): trust it once and backfill the
           // checksum now, rather than failing on every row that predates
           // this feature. Drift is caught from this run onward.
-          await recordChecksum(client, file, checksum);
+          if (!options.dryRun) {
+            await recordChecksum(client, file, checksum);
+          }
           console.log(`Skipping ${file} (already applied; backfilling checksum)`);
         } else if (applied.checksum !== checksum) {
           if (options.allowChecksumUpdate) {
@@ -162,7 +169,9 @@ export async function runMigrations(
               `Checksum for ${file} changed since it was applied; accepting the new checksum ` +
               `(--allow-checksum-update).`
             );
-            await recordChecksum(client, file, checksum);
+            if (!options.dryRun) {
+              await recordChecksum(client, file, checksum);
+            }
           } else {
             throw new Error(
               `Migration checksum mismatch for ${file}: its contents have changed since it was ` +
@@ -184,10 +193,17 @@ export async function runMigrations(
         continue;
       }
 
-      await applyMigration(client, file, sql, checksum);
+      if (options.dryRun) {
+        console.log(`[DRY-RUN] Pending migration: ${file}`);
+        console.log(`--- BEGIN ${file} ---`);
+        console.log(sql.trim());
+        console.log(`--- END ${file} ---`);
+      } else {
+        await applyMigration(client, file, sql, checksum);
+      }
     }
 
-    console.log('Migrations complete');
+    console.log(options.dryRun ? '[DRY-RUN] Migrations dry run complete' : 'Migrations complete');
   } finally {
     if (lockAcquired) {
       try {
@@ -205,8 +221,9 @@ async function run() {
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
   const allowChecksumUpdate = process.argv.includes('--allow-checksum-update');
+  const dryRun = process.argv.includes('--dry-run');
   try {
-    await runMigrations(client, { allowChecksumUpdate });
+    await runMigrations(client, { allowChecksumUpdate, dryRun });
   } finally {
     await client.end();
   }

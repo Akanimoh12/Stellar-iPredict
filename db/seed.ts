@@ -670,6 +670,10 @@ async function seedCouncilVotes(db: Queryable): Promise<void> {
 }
 
 export async function runSeed(db: Queryable): Promise<void> {
+  const isProduction = process.env.NODE_ENV === "production" || process.env.APP_ENV === "production";
+  if (isProduction && process.env.ALLOW_PRODUCTION_SEED !== "true") {
+    throw new Error("Refusing to run seed in production environment! Set ALLOW_PRODUCTION_SEED=true to override.");
+  }
   await db.query("BEGIN");
   try {
     await ensureSchema(db);

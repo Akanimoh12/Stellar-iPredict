@@ -31,7 +31,7 @@ name: ipredict
 x-oracle-image: &oracle-image
   build:
     context: ..
-    dockerfile: oracle/src/aggregator/Dockerfile
+    dockerfile: oracle/Dockerfile.aggregator
   image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-oracle:${ORACLE_IMAGE_TAG:-local}"
 
 x-logging: &logging
@@ -146,6 +146,12 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -202,6 +208,12 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -303,6 +315,12 @@ services:
   oracle-aggregator:
     <<: *oracle-image
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -358,6 +376,12 @@ services:
   oracle-monitor:
     <<: *oracle-image
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:

@@ -1,0 +1,14 @@
+[Unit]
+Description=Run iPredict automated backup restore verification daily
+Documentation=file:///opt/ipredict/infra/README.md
+
+[Timer]
+# Run daily at 03:15 UTC, with a 15-minute randomized delay to avoid thundering herds
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15m
+Persistent=true
+AccuracySec=1min
+Unit=ipredict-verify-backup.service
+
+[Install]
+WantedBy=timers.target

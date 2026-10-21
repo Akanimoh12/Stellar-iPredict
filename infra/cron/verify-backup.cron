@@ -1,0 +1,11 @@
+# /etc/cron.d/ipredict-verify-backup: run backup verification daily at 03:15 UTC
+#
+# Environment configuration can be set in /etc/ipredict/verify-backup.env:
+#   BACKUP_DIR=/srv/backups/ipredict
+#   BACKUP_ALERT_WEBHOOK_URL=https://hooks.slack.com/...
+#   BACKUP_ENCRYPTION_KEY=...
+#
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+15 3 * * * root [ -f /etc/ipredict/verify-backup.env ] && . /etc/ipredict/verify-backup.env; /opt/ipredict/infra/scripts/verify-backup.sh >> /var/log/ipredict-verify-backup.log 2>&1

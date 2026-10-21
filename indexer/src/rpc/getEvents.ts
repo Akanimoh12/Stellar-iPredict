@@ -2,6 +2,7 @@ import { rpc } from "@stellar/stellar-sdk";
 import type { RpcClient, RpcEvent } from "../poll-loop.js";
 import { metrics } from "../metrics.js";
 import { makeContractFilter } from "../contract-filter.js";
+import { PermanentError, unwrapError } from "@ipredict/shared";
 import type { Logger } from "../log.js";
 
 export interface UnavailableLedgerRange {
@@ -9,7 +10,15 @@ export interface UnavailableLedgerRange {
   toLedger: number;
 }
 
-export class LedgerGapError extends Error {
+/**
+ * A gap in the node's event history.
+ *
+ * Extends {@link PermanentError} so the shared retry utility classifies it as
+ * permanent by *type* — retrying a gap would only waste time and hammer the
+ * node, and a message-sniffing check would break the moment the SDK rewords
+ * its error.
+ */
+export class LedgerGapError extends PermanentError {
   public readonly oldestLedger?: number | null;
   public readonly unavailableRange?: UnavailableLedgerRange | null;
 
@@ -43,16 +52,22 @@ export const DEFAULT_RETENTION_ALERT_THRESHOLD = 17280; // ~24 hours of ledgers 
 export function isRetentionExceededError(err: unknown): boolean {
   if (!err) return false;
   if (err instanceof RetentionExceededError) return true;
-  const msg = err instanceof Error ? err.message : String(err);
+  // The error may arrive wrapped by the retry utility, so look through the
+  // cause chain before reading the message.
+  const target = unwrapError(err);
+  if (target instanceof RetentionExceededError) return true;
+  const msg = target instanceof Error ? target.message : String(target);
   return (
-    /startLedger/i.test(msg) &&
-    (/oldest/i.test(msg) ||
-      /less than/i.test(msg) ||
-      /too old/i.test(msg) ||
-      /retention/i.test(msg) ||
-      /boundary/i.test(msg) ||
-      /history/i.test(msg))
-  ) || /retention window/i.test(msg) || /ledger retention/i.test(msg);
+    (/startLedger/i.test(msg) &&
+      (/oldest/i.test(msg) ||
+        /less than/i.test(msg) ||
+        /too old/i.test(msg) ||
+        /retention/i.test(msg) ||
+        /boundary/i.test(msg) ||
+        /history/i.test(msg))) ||
+    /retention window/i.test(msg) ||
+    /ledger retention/i.test(msg)
+  );
 }
 
 export function extractOldestLedger(message: string): number | null {

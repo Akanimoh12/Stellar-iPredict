@@ -18,6 +18,10 @@ export interface HealthCheckDeps {
   logger?: Logger;
 }
 
+export const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5;
+export const DEFAULT_MAX_LAG_LEDGERS = 1000;
+export const DEFAULT_MAX_LAG_SECONDS = DEFAULT_MAX_LAG_LEDGERS * STELLAR_LEDGER_CLOSE_TIME_SECONDS;
+
 export interface HealthStatus {
   status: "ok" | "degraded" | "unhealthy";
   timestamp: string;
@@ -25,13 +29,22 @@ export interface HealthStatus {
     pollLoop?: { status: "ok" | "stalled"; lastLedger: number; stalledForMs?: number };
     database?: { status: "ok" | "unreachable"; error?: string };
     rpc?: { status: "ok" | "unreachable"; error?: string };
-    lag?: { status: "ok" | "high"; ledgersBehind: number; threshold: number };
+    lag?: {
+      status: "ok" | "high";
+      ledgersBehind: number;
+      secondsBehind: number;
+      threshold: number;
+      thresholdSeconds?: number;
+    };
   };
 }
 
-
 function getMaxLagLedgers(): number {
-  return Number(process.env.MAX_LAG_LEDGERS ?? 1000);
+  return Number(process.env.MAX_LAG_LEDGERS ?? DEFAULT_MAX_LAG_LEDGERS);
+}
+
+function getMaxLagSeconds(): number {
+  return Number(process.env.MAX_LAG_SECONDS ?? getMaxLagLedgers() * STELLAR_LEDGER_CLOSE_TIME_SECONDS);
 }
 
 function getPollLoopStallThresholdMs(): number {
@@ -108,22 +121,23 @@ export async function checkReadiness(deps: HealthCheckDeps): Promise<HealthStatu
   // Lag check (only if RPC is reachable)
   if (latestLedger > 0) {
     const currentLedger = deps.getLastProcessedLedger();
-    const lag = latestLedger - currentLedger;
+    const lag = Math.max(0, latestLedger - currentLedger);
+    const secondsBehind = lag * STELLAR_LEDGER_CLOSE_TIME_SECONDS;
     const maxLag = getMaxLagLedgers();
+    const maxLagSeconds = getMaxLagSeconds();
 
-    if (lag > maxLag) {
-      checks.lag = {
-        status: "high",
-        ledgersBehind: lag,
-        threshold: maxLag,
-      };
+    const isHigh = lag > maxLag || secondsBehind > maxLagSeconds;
+
+    checks.lag = {
+      status: isHigh ? "high" : "ok",
+      ledgersBehind: lag,
+      secondsBehind,
+      threshold: maxLag,
+      thresholdSeconds: maxLagSeconds,
+    };
+
+    if (isHigh) {
       overallStatus = overallStatus === "unhealthy" ? "unhealthy" : "degraded";
-    } else {
-      checks.lag = {
-        status: "ok",
-        ledgersBehind: lag,
-        threshold: maxLag,
-      };
     }
   }
 

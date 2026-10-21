@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveMarket } from "../src/adapters/resolve.js";
 import type { DataAdapter, Market } from "../src/adapters/index.js";
+import type { SourceResult } from "../src/adapters/resolve.js";
 
 function createMarket(overrides: Partial<Market> = {}): Market {
   return {
@@ -195,5 +196,78 @@ describe("resolveMarket", () => {
     const dualResult = await resolveMarket(politicsMarket, [primary, secondary]);
     expect(dualResult.status).toBe("resolved");
     expect(dualResult.outcome).toBe(true);
+  });
+
+  // ── Raw payload persistence (rawPayloadSink) ─────────────────────────────
+  describe("rawPayloadSink", () => {
+    it("persists payloads with provider attribution on a resolved market", async () => {
+      const sink = vi.fn(async () => {});
+      const adapter: DataAdapter = {
+        id: "binance",
+        supports: () => true,
+        fetchOutcome: async () => ({
+          outcome: true,
+          confidence: 1,
+          raw: { symbol: "BTCUSDT", price: "64231.87" },
+          provenance: { request: { url: "https://api.binance.com/ticker" }, respondedAt: "2026-07-29T00:00:00.000Z" },
+        }),
+      };
+
+      const result = await resolveMarket(createMarket(), [adapter], { rawPayloadSink: sink });
+
+      expect(result.status).toBe("resolved");
+      expect(sink).toHaveBeenCalledTimes(1);
+      const [marketId, sources] = sink.mock.calls[0] as unknown as [string, SourceResult[]];
+      expect(marketId).toBe("market-1");
+      // Attribution is filled in from the adapter id when the adapter omits it.
+      expect(sources[0].provider).toBe("binance");
+      expect(sources[0].raw).toEqual({ symbol: "BTCUSDT", price: "64231.87" });
+      expect(sources[0].request).toEqual({ url: "https://api.binance.com/ticker" });
+      expect(sources[0].respondedAt).toBe("2026-07-29T00:00:00.000Z");
+    });
+
+    it("stamps a response time when the adapter supplies none", async () => {
+      const sink = vi.fn(async () => {});
+      await resolveMarket(createMarket(), [createStubAdapter("a", true)], { rawPayloadSink: sink });
+      const [, sources] = sink.mock.calls[0] as unknown as [string, SourceResult[]];
+      expect(sources[0].respondedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("persists payloads even when the market is unresolvable", async () => {
+      // "unresolvable" and "review" are precisely the outcomes a dispute later
+      // asks about, so the evidence must not be dropped on those paths.
+      const sink = vi.fn(async () => {});
+      const failing = createStubAdapter("a", null, "Data source is unavailable");
+
+      const result = await resolveMarket(createMarket(), [failing], { rawPayloadSink: sink });
+
+      expect(result.status).toBe("unresolvable");
+      expect(sink).toHaveBeenCalledTimes(1);
+    });
+
+    it("redacts credentials from the persisted request", async () => {
+      const sink = vi.fn(async () => {});
+      const adapter: DataAdapter = {
+        id: "coinmarketcap",
+        supports: () => true,
+        fetchOutcome: async () => ({
+          outcome: true,
+          confidence: 1,
+          raw: {},
+          // A request URL carries the API key in its query string.
+          provenance: { request: { url: "https://pro.test/v2/quotes?api_key=SUPERSECRET" } },
+        }),
+      };
+
+      await resolveMarket(createMarket(), [adapter], { rawPayloadSink: sink });
+
+      const [, sources] = sink.mock.calls[0] as unknown as [string, SourceResult[]];
+      expect(JSON.stringify(sources[0].request)).not.toContain("SUPERSECRET");
+    });
+
+    it("resolves normally when no sink is configured", async () => {
+      const result = await resolveMarket(createMarket(), [createStubAdapter("a", true)]);
+      expect(result.status).toBe("resolved");
+    });
   });
 });

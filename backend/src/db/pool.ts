@@ -1,6 +1,6 @@
 import { Pool, types, type PoolClient, type QueryResult } from "pg";
 import { logSlowQuery } from "../lib/log.js";
-import { recordAbandonedQuery } from "../metrics.js";
+import { observeDbQuery, recordAbandonedQuery } from "../metrics.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
 types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
@@ -66,9 +66,36 @@ function getPool(): Pool {
 // the underlying pool is only constructed on first property access. Every
 // property (query, connect, end, on, ...) is forwarded to the lazily-created
 // `Pool`.
+//
+// `query` is also timed: each statement that goes through the shared pool is
+// recorded into the `db_query_duration_ms` histogram (`metrics.ts`), which is
+// the database-load series the cache/DB dashboard plots against hit rate and
+// the `DatabaseSlow` alert evaluates. `queryWithCancel` runs its statement on
+// a checked-out client and times it at its own call site instead; only
+// statements issued on a client from `getClient()` — i.e. inside
+// `withTransaction` — stay out of the histogram. Callers must use the promise
+// form of `query`: the callback form is not used anywhere in this codebase and
+// would not be timed correctly.
 export const pool: Pool = new Proxy({} as Pool, {
   get(_target, prop) {
-    return Reflect.get(getPool(), prop);
+    const instance = getPool();
+    const value = Reflect.get(instance, prop);
+
+    if (prop === "query" && typeof value === "function") {
+      return async (...args: unknown[]) => {
+        const startedAt = performance.now();
+        try {
+          return await (
+            value as (...queryArgs: unknown[]) => Promise<unknown>
+          ).apply(instance, args);
+        } finally {
+          // A statement that rejects still cost the database the round trip.
+          observeDbQuery(performance.now() - startedAt);
+        }
+      };
+    }
+
+    return value;
   },
 });
 
@@ -79,19 +106,30 @@ export const pool: Pool = new Proxy({} as Pool, {
  * `total` is the number of connections currently held by the pool, `idle` how
  * many are available for immediate reuse, and `waiting` how many requests are
  * queued because all connections are checked out. A rising `waiting` count is
- * the first sign of exhaustion.
+ * the first sign of exhaustion. `max` is the configured ceiling, so `total`
+ * can be read as a fraction of capacity.
  */
 export interface PoolMetrics {
   total: number;
   idle: number;
   waiting: number;
+  max: number;
 }
 
+/**
+ * Current pool occupancy. Reads the pool only if it already exists: a metrics
+ * scrape must not be the thing that constructs a pool, or fails when
+ * `DATABASE_URL` is unset. Before the first query the gauges are zero.
+ */
 export function getPoolMetrics(): PoolMetrics {
+  if (!_pool) {
+    return { total: 0, idle: 0, waiting: 0, max: DEFAULT_POOL_SIZE };
+  }
   return {
-    total: pool.totalCount,
-    idle: pool.idleCount,
-    waiting: pool.waitingCount,
+    total: _pool.totalCount,
+    idle: _pool.idleCount,
+    waiting: _pool.waitingCount,
+    max: DEFAULT_POOL_SIZE,
   };
 }
 
@@ -119,7 +157,8 @@ export async function getClient(): Promise<PoolClient> {
 }
 
 export async function shutdown(): Promise<void> {
-  await getPool().end();
+  // Shutdown must not create a lazy pool (or require configuration) just to close it.
+  await _pool?.end();
 }
 
 process.on("SIGTERM", shutdown);
@@ -231,8 +270,17 @@ export async function queryWithCancel<Row extends object>(
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    const result = await client.query<Row>(text, params);
-    return result;
+    // Time the statement itself — this is the workload query; the pid lookup
+    // above and `pg_cancel_backend` below are bookkeeping and are not part of
+    // `db_query_duration_ms`. Recording in a `finally` keeps a cancelled or
+    // failed statement counted: it still ran against the database.
+    const startedAt = performance.now();
+    try {
+      const result = await client.query<Row>(text, params);
+      return result;
+    } finally {
+      observeDbQuery(performance.now() - startedAt);
+    }
   } catch (error) {
     if (cancelled) {
       recordAbandonedQuery(route);

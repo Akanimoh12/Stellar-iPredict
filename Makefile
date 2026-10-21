@@ -181,7 +181,7 @@ build: ## Build every workspace
 typecheck: ## Typecheck every workspace
 	$(NPM) run typecheck
 
-test: test-shared test-backend test-indexer test-oracle test-db ## Run every Node suite
+test: test-shared test-backend test-indexer test-oracle test-db test-cross ## Run every Node suite
 
 test-shared: ## @ipredict/shared (node:test)
 	$(NPM) test --workspace=@ipredict/shared
@@ -198,11 +198,20 @@ test-oracle: ## Oracle suite
 test-db: ## Migration and seed suite (needs a running Postgres)
 	cd db && $(NPM) test
 
+test-cross: ## Cross-package suite — spans backend + indexer (amount precision, smoke suite)
+	$(NPM) run test:cross
+
 test-frontend: ## Frontend suite
 	cd frontend && $(NPM) test
 
 test-contracts: ## Soroban contract suite
 	cd contracts && cargo test --workspace
+
+smoke: ## Post-deployment smoke suite. BASE_URL=https://… make smoke
+	$(NPM) run smoke -- --base-url "$(BASE_URL)" $(SMOKE_ARGS)
+
+smoke-list: ## List the smoke suite's checks and which of them write state
+	$(NPM) run smoke:list
 
 verify: typecheck test ## Typecheck, then run every Node suite
 

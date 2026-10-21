@@ -49,3 +49,62 @@ export function detectConflict(
 
   return { marketId, yesVotes: yes, noVotes: no, totalVoters, conflicting, disagreementRatio };
 }
+
+export interface AdapterConflictSourceInfo {
+  adapterId: string;
+  outcome: boolean;
+  confidence: number;
+  provider?: string;
+  error?: string;
+}
+
+export interface AdapterConflictReport {
+  marketId: string;
+  conflicting: boolean;
+  yesCount: number;
+  noCount: number;
+  totalSuccessful: number;
+  disagreementRatio: number;
+  sources: AdapterConflictSourceInfo[];
+}
+
+/**
+ * Detects when data adapters for the same market return conflicting outcomes.
+ *
+ * `conflictThreshold` is the fraction of dissenting weighted votes that triggers a conflict.
+ * If two or more adapters disagree on the outcome, automatic resolution is refused.
+ */
+export function detectAdapterConflict(
+  marketId: string,
+  sources: readonly { adapterId: string; outcome: boolean; confidence: number; provider?: string; error?: string }[],
+  conflictThreshold = 0.3,
+): AdapterConflictReport {
+  const successful = sources.filter((s) => s.error === undefined);
+  const yesCount = successful.filter((s) => s.outcome).length;
+  const noCount = successful.length - yesCount;
+  const totalSuccessful = successful.length;
+
+  const weightOf = (s: { confidence: number }) => Math.max(0, Math.min(1, s.confidence));
+  const rawYesWeight = successful.filter((s) => s.outcome).reduce((sum, s) => sum + weightOf(s), 0);
+  const rawNoWeight = successful.filter((s) => !s.outcome).reduce((sum, s) => sum + weightOf(s), 0);
+  const totalWeight = rawYesWeight + rawNoWeight;
+
+  const disagreementRatio = totalWeight > 0 ? Math.min(rawYesWeight, rawNoWeight) / totalWeight : 0;
+  const conflicting = totalSuccessful >= 2 && yesCount > 0 && noCount > 0 && (disagreementRatio >= conflictThreshold || yesCount === noCount);
+
+  return {
+    marketId,
+    conflicting,
+    yesCount,
+    noCount,
+    totalSuccessful,
+    disagreementRatio,
+    sources: sources.map((s) => ({
+      adapterId: s.adapterId,
+      outcome: s.outcome,
+      confidence: s.confidence,
+      provider: s.provider,
+      error: s.error,
+    })),
+  };
+}

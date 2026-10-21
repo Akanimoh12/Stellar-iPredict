@@ -15,12 +15,15 @@
  *   - disputes escalated to council
  *   - submissions posted with a bond below the minimum
  *   - escalated markets the council has not voted on / has run the clock out on
+ *   - escalated markets with zero council votes close to the deadline (SEV1 page)
  */
 
 import { Pool } from "pg";
-import { checkBondMinimumFromDb } from "../aggregator/bond-monitor.js";
+import { checkBondMinimumFromDb, checkBondSpendFromDb } from "../aggregator/bond-monitor.js";
 import {
+  checkCouncilDeadlineApproachingFromDb,
   checkCouncilInactivityFromDb,
+  checkCouncilNoVotesBeforeDeadlineFromDb,
   checkCouncilWindowExceededFromDb,
 } from "../aggregator/council-inactivity-monitor.js";
 import { DisputeEscalationWatcher } from "../aggregator/dispute-escalation-watcher.js";
@@ -39,8 +42,11 @@ export interface MonitorCycleResult {
   newSubmissions: number;
   disputeEscalations: number;
   lowBonds: number;
+  bondSpend: number;
   councilInactive: number;
   councilWindowExceeded: number;
+  councilDeadlineApproaching: number;
+  councilNoVotesPage: number;
 }
 
 export function totalAlerts(result: MonitorCycleResult): number {
@@ -49,8 +55,11 @@ export function totalAlerts(result: MonitorCycleResult): number {
     result.newSubmissions +
     result.disputeEscalations +
     result.lowBonds +
+    result.bondSpend +
     result.councilInactive +
-    result.councilWindowExceeded
+    result.councilWindowExceeded +
+    result.councilDeadlineApproaching +
+    result.councilNoVotesPage
   );
 }
 
@@ -89,6 +98,11 @@ export interface MonitorCycleDependencies {
   emit: AlertEmitter;
   submissionWatcher: SubmissionWatcher;
   disputeWatcher: DisputeEscalationWatcher;
+  /**
+   * Markets already paged for zero council votes. Kept across cycles so each
+   * dispute pages once instead of once per cycle; omit to page every cycle.
+   */
+  councilNoVotePaged?: Set<string>;
 }
 
 export interface MonitorWatermarks {
@@ -146,7 +160,7 @@ export async function runMonitorCycle(
   config: MonitorConfig,
   now: Date = new Date(),
 ): Promise<MonitorCycleResult> {
-  const { pool, emit, submissionWatcher, disputeWatcher } = dependencies;
+  const { pool, emit, submissionWatcher, disputeWatcher, councilNoVotePaged } = dependencies;
   const nowSeconds = Math.floor(now.getTime() / 1_000);
 
   const emitAll = async (type: Alert["type"], payloads: readonly object[]) => {
@@ -156,29 +170,65 @@ export async function runMonitorCycle(
     return payloads.length;
   };
 
+  // The no-vote check updates a working copy of the paged set; it is only
+  // committed after the pages are emitted, so a cycle that fails part-way
+  // (another check rejecting) cannot swallow a page that was never sent.
+  const nextNoVotePaged = councilNoVotePaged ? new Set(councilNoVotePaged) : undefined;
+
   const markets = await listExpiredUnresolvedMarkets(pool, nowSeconds);
   const stuck = detectStuckMarkets(markets, nowSeconds, config.STUCK_MARKET_HOURS);
 
-  const [newSubmissions, escalations, lowBonds, inactive, windowExceeded] = await Promise.all([
+  const [
+    newSubmissions,
+    escalations,
+    lowBonds,
+    bondSpend,
+    inactive,
+    windowExceeded,
+    deadlineApproaching,
+    noVotesPage,
+  ] = await Promise.all([
     submissionWatcher.poll(),
     disputeWatcher.poll(),
     checkBondMinimumFromDb(pool, {
       requiredMinimumBond: xlmToStroops(config.SUBMITTER_BOND_XLM),
     }),
+    checkBondSpendFromDb(pool, {
+      hourlySpendLimit: xlmToStroops(config.HOURLY_BOND_SPEND_LIMIT_XLM),
+      alertThresholdPercent: config.BOND_SPEND_ALERT_THRESHOLD_PERCENT,
+    }, now),
     checkCouncilInactivityFromDb(pool, now, {
       inactivityThresholdHours: config.COUNCIL_INACTIVITY_HOURS,
     }),
     checkCouncilWindowExceededFromDb(pool, now),
+    checkCouncilDeadlineApproachingFromDb(pool, now, config.COUNCIL_DEADLINE_WARNING_HOURS),
+    checkCouncilNoVotesBeforeDeadlineFromDb(pool, now, {
+      pageBeforeDeadlineHours: config.COUNCIL_NO_VOTE_PAGE_HOURS,
+      pagedMarketIds: nextNoVotePaged,
+    }),
   ]);
 
-  return {
+  const result: MonitorCycleResult = {
     stuckMarkets: await emitAll("oracle.monitor.market_stuck", stuck),
     newSubmissions: await emitAll("oracle.monitor.submission_new", newSubmissions),
     disputeEscalations: await emitAll("oracle.monitor.dispute_escalated", escalations),
     lowBonds: await emitAll("oracle.monitor.bond_below_minimum", lowBonds),
+    bondSpend: await emitAll(
+      "oracle.monitor.bond_spend_approaching",
+      bondSpend.limitApproached ? [bondSpend] : [],
+    ),
     councilInactive: await emitAll("oracle.monitor.council_inactive", inactive),
     councilWindowExceeded: await emitAll("oracle.monitor.council_window_exceeded", windowExceeded),
+    councilDeadlineApproaching: await emitAll("oracle.monitor.council_deadline_approaching", deadlineApproaching),
+    councilNoVotesPage: await emitAll("oracle.monitor.council_no_votes_page", noVotesPage),
   };
+
+  if (councilNoVotePaged && nextNoVotePaged) {
+    councilNoVotePaged.clear();
+    for (const marketId of nextNoVotePaged) councilNoVotePaged.add(marketId);
+  }
+
+  return result;
 }
 
 export interface RunMonitorOptions {
@@ -258,6 +308,7 @@ export async function startMonitor(env: NodeJS.ProcessEnv = process.env): Promis
         pool: database,
         emit: createAlertEmitter(config.ALERT_WEBHOOK_URL, logger),
         ...createMonitorWatchers(database, await readWatermarks(database)),
+        councilNoVotePaged: new Set<string>(),
       },
       config,
       { signal: controller.signal, intervalMs: config.MONITOR_INTERVAL_MS, logger },

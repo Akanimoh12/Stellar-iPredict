@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the iPredict TLS certificate expiry monitor once a day
+Documentation=file:///opt/ipredict/infra/README.md
+
+[Timer]
+# Daily at 06:17 UTC, jittered so it never lands on the hour with everything
+# else. Persistent=true catches up after downtime, then the monitor's own
+# watchdog reports the gap.
+OnCalendar=*-*-* 06:17:00
+RandomizedDelaySec=20m
+Persistent=true
+AccuracySec=1min
+Unit=ipredict-cert-monitor.service
+
+[Install]
+WantedBy=timers.target

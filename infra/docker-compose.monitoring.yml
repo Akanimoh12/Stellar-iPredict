@@ -14,6 +14,12 @@ services:
       - '--web.enable-lifecycle'
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     extra_hosts:
       # Map host.docker.internal to the host gateway so Prometheus can scrape
       # app services running on the host during local development (backend
@@ -36,6 +42,12 @@ services:
       - '--config.expand-env=true'
     ports:
       - "9093:9093"
+    healthcheck:
+      test: ["wget", "--spider", "-q", "http://localhost:9093/api/v2/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     environment:
       # Default to a no-op local sink so the stack starts without secrets; set
       # these in infra/.env for real deliveries (see .env.monitoring.example).
@@ -54,6 +66,12 @@ services:
     container_name: ipredict-grafana
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -67,6 +85,7 @@ services:
       # Desktop (virtiofs) and is fragile elsewhere. dashboards.yml points its
       # file provider at this directory.
       - ./grafana/business.json:/etc/grafana/provisioning/dashboards-json/business.json:ro
+      - ./grafana/cache.json:/etc/grafana/provisioning/dashboards-json/cache.json:ro
       - ./grafana/oracle.json:/etc/grafana/provisioning/dashboards-json/oracle.json:ro
       - ./grafana/system.json:/etc/grafana/provisioning/dashboards-json/system.json:ro
     networks:

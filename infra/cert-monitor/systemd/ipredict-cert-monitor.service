@@ -1,0 +1,34 @@
+[Unit]
+Description=iPredict TLS certificate expiry monitor
+Documentation=file:///opt/ipredict/infra/README.md
+# Optional: fan out a failed run (exit 2) to your on-call unit, e.g.
+#   OnFailure=notify-oncall@%n.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Repository checkout location — adjust if you deploy it elsewhere.
+ExecStart=/usr/bin/python3 /opt/ipredict/infra/cert-monitor/check-certs.py --fail-on critical
+# Optional per-host configuration (webhook, email, internal CA bundle):
+#   /etc/ipredict/cert-monitor.env
+EnvironmentFile=-/etc/ipredict/cert-monitor.env
+StateDirectory=ipredict-cert-monitor
+Environment=CERT_MONITOR_STATE_FILE=/var/lib/ipredict-cert-monitor/state.json
+# Exit 2 (<=7 days, expired, check failed, watchdog gap) fails the unit so
+# systemd's OnFailure= / mail-on-failure picks it up. 30d/14d warnings exit 0
+# and are delivered through the alert channels instead.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — the monitor only needs to read the repo and write its state dir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ipredict-cert-monitor
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

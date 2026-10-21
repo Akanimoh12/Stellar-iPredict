@@ -32,14 +32,16 @@ function fakePool(tables: Partial<Record<string, Row[]>> = {}): QueryablePool & 
     calls,
     async query<T extends Row = Row>(text: string): Promise<{ rows: T[] }> {
       calls.push(text);
+      if (/AS hourly_spend/.test(text)) {
+        return { rows: (tables.hourlySpend ?? [{ hourly_spend: "0" }]) as T[] };
+      }
       if (/FROM markets/.test(text)) return { rows: (tables.markets ?? []) as T[] };
       if (/MAX\(id\) AS max_id/.test(text)) return { rows: (tables.submissionWatermark ?? [{ max_id: null }]) as T[] };
       if (/MAX\(escalated_at\)/.test(text)) return { rows: (tables.disputeWatermark ?? [{ max_escalated_at: null }]) as T[] };
+      // Council inactivity queries now use oracle_disputes table with council_votes join
+      if (/LEFT JOIN council_votes/.test(text)) return { rows: (tables.escalated ?? []) as T[] };
       if (/FROM oracle_disputes/.test(text)) return { rows: (tables.disputes ?? []) as T[] };
       if (/bond_amount, status/.test(text)) return { rows: (tables.bonds ?? []) as T[] };
-      // Checked before the bare `oracle_submissions` match: the council
-      // queries join the two tables and would otherwise be routed to it.
-      if (/council_votes/.test(text)) return { rows: (tables.escalated ?? []) as T[] };
       if (/FROM oracle_submissions/.test(text)) return { rows: (tables.submissions ?? []) as T[] };
       return { rows: [] as T[] };
     },
@@ -58,6 +60,8 @@ function deps(
 }
 
 const baseConfig = loadMonitorConfig({
+  HOURLY_BOND_SPEND_LIMIT_XLM: "1000",
+  BOND_SPEND_ALERT_THRESHOLD_PERCENT: "80",
   DATABASE_URL: "postgres://ipredict:ipredict@localhost:5432/ipredict",
 });
 
@@ -66,24 +70,37 @@ describe("loadMonitorConfig", () => {
     expect(() => loadMonitorConfig({})).toThrow();
   });
 
-  it("applies documented defaults", () => {
+  it("requires operators to configure the rolling spend ceiling and alert threshold", () => {
+    expect(() => loadMonitorConfig({ DATABASE_URL: "postgres://localhost/ipredict" })).toThrow();
+  });
+
+  it("applies documented defaults while requiring spend policy values", () => {
     expect(baseConfig.MONITOR_INTERVAL_MS).toBe(60_000);
     expect(baseConfig.STUCK_MARKET_HOURS).toBe(6);
     expect(baseConfig.COUNCIL_INACTIVITY_HOURS).toBe(48);
     expect(baseConfig.SUBMITTER_BOND_XLM).toBe(100);
     expect(baseConfig.ALERT_WEBHOOK_URL).toBeUndefined();
+    expect(baseConfig.HOURLY_BOND_SPEND_LIMIT_XLM).toBe(1000);
+    expect(baseConfig.BOND_SPEND_ALERT_THRESHOLD_PERCENT).toBe(80);
   });
 
   it("coerces numeric env strings and rejects a non-URL webhook", () => {
     const config = loadMonitorConfig({
       DATABASE_URL: "postgres://localhost/ipredict",
+      HOURLY_BOND_SPEND_LIMIT_XLM: "500",
+      BOND_SPEND_ALERT_THRESHOLD_PERCENT: "75",
       MONITOR_INTERVAL_MS: "15000",
       STUCK_MARKET_HOURS: "2.5",
     });
     expect(config.MONITOR_INTERVAL_MS).toBe(15_000);
     expect(config.STUCK_MARKET_HOURS).toBe(2.5);
     expect(() =>
-      loadMonitorConfig({ DATABASE_URL: "postgres://localhost/ipredict", ALERT_WEBHOOK_URL: "nope" }),
+      loadMonitorConfig({
+        DATABASE_URL: "postgres://localhost/ipredict",
+        HOURLY_BOND_SPEND_LIMIT_XLM: "500",
+        BOND_SPEND_ALERT_THRESHOLD_PERCENT: "75",
+        ALERT_WEBHOOK_URL: "nope",
+      }),
     ).toThrow();
   });
 });
@@ -103,6 +120,8 @@ describe("serializeAlert", () => {
     };
     expect(JSON.parse(serializeAlert(alert))).toEqual({
       type: "oracle.monitor.bond_below_minimum",
+      runbook_url:
+        "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md#part-4--monitoring",
       marketId: "7",
       currentBond: "1",
       requiredMinimum: "1000000000",
@@ -242,6 +261,29 @@ describe("runMonitorCycle", () => {
     });
   });
 
+  it("alerts when rolling challenger bond spend reaches the configured threshold", async () => {
+    const emit = vi.fn(async () => {});
+    const pool = fakePool();
+    vi.spyOn(pool, "query").mockImplementation(async (text: string) => {
+      pool.calls.push(text);
+      if (/AS hourly_spend/.test(text)) return { rows: [{ hourly_spend: "8000000000" }] };
+      return { rows: [] };
+    });
+
+    const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
+
+    expect(result.bondSpend).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.bond_spend_approaching",
+      payload: expect.objectContaining({
+        hourlySpend: 8_000_000_000n,
+        hourlySpendLimit: 10_000_000_000n,
+        limitApproached: true,
+        limitExceeded: false,
+      }),
+    });
+  });
+
   it("alerts once per new submission and never re-alerts the same row", async () => {
     const emit = vi.fn(async () => {});
     const pool = fakePool({
@@ -265,14 +307,95 @@ describe("runMonitorCycle", () => {
   it("alerts on council inactivity and on an exceeded council window", async () => {
     const emit = vi.fn(async () => {});
     const escalatedAt = new Date(NOW.getTime() - 80 * HOUR).toISOString();
+    const councilDeadline = new Date(NOW.getTime() - 8 * HOUR).toISOString();
     const pool = fakePool({
-      escalated: [{ market_id: "8", escalated_at: escalatedAt, status: "escalated", vote_count: "0" }],
+      escalated: [
+        {
+          market_id: "8",
+          escalated_at: escalatedAt,
+          council_deadline: councilDeadline,
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
     });
 
     const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
 
     expect(result.councilInactive).toBe(1);
     expect(result.councilWindowExceeded).toBe(1);
+  });
+
+  it("alerts when council deadline is approaching", async () => {
+    const emit = vi.fn(async () => {});
+    const escalatedAt = new Date(NOW.getTime() - 60 * HOUR).toISOString();
+    const councilDeadline = new Date(NOW.getTime() + 10 * HOUR).toISOString();
+    const pool = fakePool({
+      escalated: [
+        {
+          market_id: "9",
+          escalated_at: escalatedAt,
+          council_deadline: councilDeadline,
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
+    });
+
+    const result = await runMonitorCycle(deps(pool, emit), baseConfig, NOW);
+
+    expect(result.councilDeadlineApproaching).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.council_deadline_approaching",
+      payload: expect.objectContaining({ marketId: "9" }),
+    });
+  });
+});
+
+describe("runMonitorCycle — council no-vote page (#917)", () => {
+  function noVotePool() {
+    return fakePool({
+      escalated: [
+        {
+          market_id: "10",
+          escalated_at: new Date(NOW.getTime() - 68 * HOUR).toISOString(),
+          council_deadline: new Date(NOW.getTime() + 4 * HOUR).toISOString(),
+          status: "escalated",
+          vote_count: "0",
+        },
+      ],
+    });
+  }
+
+  it("defaults COUNCIL_NO_VOTE_PAGE_HOURS to 6", () => {
+    expect(baseConfig.COUNCIL_NO_VOTE_PAGE_HOURS).toBe(6);
+  });
+
+  it("pages SEV1 when no council member has voted close to the deadline", async () => {
+    const emit = vi.fn(async () => {});
+    const result = await runMonitorCycle(deps(noVotePool(), emit), baseConfig, NOW);
+
+    expect(result.councilNoVotesPage).toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      type: "oracle.monitor.council_no_votes_page",
+      payload: expect.objectContaining({ marketId: "10", severity: "SEV1", hoursRemaining: 4 }),
+    });
+  });
+
+  it("pages once per dispute across cycles when a paged set is supplied", async () => {
+    const emit = vi.fn(async () => {});
+    const pool = noVotePool();
+    const dependencies = { ...deps(pool, emit), councilNoVotePaged: new Set<string>() };
+
+    expect((await runMonitorCycle(dependencies, baseConfig, NOW)).councilNoVotesPage).toBe(1);
+    expect((await runMonitorCycle(dependencies, baseConfig, NOW)).councilNoVotesPage).toBe(0);
+  });
+
+  it("includes a runbook link in the serialized page", () => {
+    const body = JSON.parse(
+      serializeAlert({ type: "oracle.monitor.council_no_votes_page", payload: { marketId: "10" } }),
+    );
+    expect(body.runbook_url).toContain("COUNCIL_RUNBOOK.md");
   });
 });
 

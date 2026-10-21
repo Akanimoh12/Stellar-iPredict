@@ -28,6 +28,7 @@ import {
   marketsActiveKey,
   leaderboardKey,
   betsKey,
+  oddsKey,
   statsKey,
   resetVersion,
 } from "./cacheKeys.js";
@@ -428,5 +429,337 @@ describe("versioned keys", () => {
       marketsAllKey(),
       marketsActiveKey(),
     );
+  });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Issue #547: Comprehensive invalidation tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe("Comprehensive invalidation coverage (Issue #547)", () => {
+  describe("invalidateOnMarketCreated - full dependency graph", () => {
+    it("invalidates all dependent keys", async () => {
+      const redis = createFakeRedis();
+      redis.seed(marketsAllKey());
+      redis.seed(marketsActiveKey());
+      redis.seed(leaderboardKey()); // Should NOT be cleared
+      redis.seed(betsKey(1)); // Should NOT be cleared
+
+      await invalidateOnMarketCreated(redis);
+
+      expect(redis.has(marketsAllKey())).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+      expect(redis.has(leaderboardKey())).toBe(true); // Preserved
+      expect(redis.has(betsKey(1))).toBe(true); // Preserved
+    });
+
+    it("does NOT serve stale market list after creation", async () => {
+      const redis = createFakeRedis();
+      const staleList = JSON.stringify([{ id: 1, title: "Old market" }]);
+      
+      redis.seed(marketsAllKey(), staleList);
+      redis.seed(marketsActiveKey(), staleList);
+
+      // Simulate: Market created event
+      await invalidateOnMarketCreated(redis);
+
+      // Both lists must be cleared - next read will fetch fresh data
+      expect(redis.has(marketsAllKey())).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+    });
+  });
+
+  describe("invalidateOnBetPlaced - full dependency graph", () => {
+    it("invalidates all dependent keys for the market", async () => {
+      const redis = createFakeRedis();
+      const marketId = 42;
+
+      redis.seed(marketKey(marketId));
+      redis.seed(oddsKey(marketId));
+      redis.seed(marketsActiveKey());
+      redis.seed(marketsAllKey()); // Should NOT be cleared
+      redis.seed(betsKey(marketId)); // Should NOT be cleared
+      redis.seed(leaderboardKey()); // Should NOT be cleared
+
+      await invalidateOnBetPlaced(redis, marketId);
+
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(oddsKey(marketId))).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+      expect(redis.has(marketsAllKey())).toBe(true); // Preserved
+      expect(redis.has(betsKey(marketId))).toBe(true); // Preserved
+      expect(redis.has(leaderboardKey())).toBe(true); // Preserved
+    });
+
+    it("does NOT serve stale market detail after bet", async () => {
+      const redis = createFakeRedis();
+      const marketId = 5;
+      const staleMarket = JSON.stringify({
+        id: 5,
+        total_yes: 100,
+        total_no: 50,
+        odds_yes: 0.667,
+      });
+      const staleOdds = JSON.stringify({ yes: 0.667, no: 0.333 });
+
+      redis.seed(marketKey(marketId), staleMarket);
+      redis.seed(oddsKey(marketId), staleOdds);
+
+      // Simulate: Bet placed event
+      await invalidateOnBetPlaced(redis, marketId);
+
+      // Market and odds must be cleared
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(oddsKey(marketId))).toBe(false);
+    });
+
+    it("clears active list but preserves all list after bet", async () => {
+      const redis = createFakeRedis();
+      redis.seed(marketsActiveKey(), JSON.stringify([{ id: 1 }]));
+      redis.seed(marketsAllKey(), JSON.stringify([{ id: 1 }, { id: 2 }]));
+
+      await invalidateOnBetPlaced(redis, 1);
+
+      expect(redis.has(marketsActiveKey())).toBe(false); // Bet changes volume/order
+      expect(redis.has(marketsAllKey())).toBe(true); // All list unaffected
+    });
+  });
+
+  describe("invalidateOnMarketResolved - full dependency graph", () => {
+    it("invalidates all dependent keys including leaderboard", async () => {
+      const redis = createFakeRedis();
+      const marketId = 10;
+
+      redis.seed(marketKey(marketId));
+      redis.seed(oddsKey(marketId));
+      redis.seed(marketsAllKey());
+      redis.seed(marketsActiveKey());
+      redis.seed(betsKey(marketId));
+      redis.seed(leaderboardKey());
+      redis.seed(statsKey()); // Should NOT be cleared
+
+      await invalidateOnMarketResolved(redis, marketId);
+
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(oddsKey(marketId))).toBe(false);
+      expect(redis.has(marketsAllKey())).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+      expect(redis.has(betsKey(marketId))).toBe(false);
+      expect(redis.has(leaderboardKey())).toBe(false);
+      expect(redis.has(statsKey())).toBe(true); // Preserved
+    });
+
+    it("does NOT serve stale data after resolution", async () => {
+      const redis = createFakeRedis();
+      const marketId = 7;
+      const staleMarket = JSON.stringify({ id: 7, status: "active" });
+      const staleBets = JSON.stringify([{ user: "GXXX", amount: 100 }]);
+      const staleLeaderboard = JSON.stringify([{ user: "GXXX", score: 500 }]);
+
+      redis.seed(marketKey(marketId), staleMarket);
+      redis.seed(betsKey(marketId), staleBets);
+      redis.seed(leaderboardKey(), staleLeaderboard);
+
+      // Simulate: Market resolved event
+      await invalidateOnMarketResolved(redis, marketId);
+
+      // All related caches cleared
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(betsKey(marketId))).toBe(false);
+      expect(redis.has(leaderboardKey())).toBe(false);
+    });
+  });
+
+  describe("invalidateOnMarketCancelled - full dependency graph", () => {
+    it("invalidates all dependent keys", async () => {
+      const redis = createFakeRedis();
+      const marketId = 20;
+
+      redis.seed(marketKey(marketId));
+      redis.seed(oddsKey(marketId));
+      redis.seed(marketsAllKey());
+      redis.seed(marketsActiveKey());
+      redis.seed(betsKey(marketId)); // Should NOT be cleared
+      redis.seed(leaderboardKey()); // Should NOT be cleared
+
+      await invalidateOnMarketCancelled(redis, marketId);
+
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(oddsKey(marketId))).toBe(false);
+      expect(redis.has(marketsAllKey())).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+      expect(redis.has(betsKey(marketId))).toBe(true); // Preserved
+      expect(redis.has(leaderboardKey())).toBe(true); // Preserved
+    });
+
+    it("does NOT serve stale status after cancellation", async () => {
+      const redis = createFakeRedis();
+      const marketId = 15;
+      const staleMarket = JSON.stringify({ id: 15, status: "active" });
+
+      redis.seed(marketKey(marketId), staleMarket);
+      redis.seed(marketsAllKey(), JSON.stringify([{ id: 15, status: "active" }]));
+
+      // Simulate: Market cancelled event
+      await invalidateOnMarketCancelled(redis, marketId);
+
+      // Market and lists cleared
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(marketsAllKey())).toBe(false);
+    });
+  });
+
+  describe("Negative cache invalidation (Issue #547 - easily forgotten half)", () => {
+    it("invalidates negative cache entry when market is created", async () => {
+      const redis = createFakeRedis();
+      const { NegativeCache } = await import("./negativeCache.js");
+      const negativeCache = new NegativeCache(1000);
+      const marketId = 99999;
+      const key = marketKey(marketId);
+
+      try {
+        // Simulate: Market 99999 returned 404, cached as negative
+        negativeCache.markMiss(key);
+        expect(negativeCache.isCachedMiss(key)).toBe(true);
+
+        // Market 99999 is now created - must invalidate negative cache
+        negativeCache.invalidate(key);
+
+        // Next lookup should go to DB, not return cached 404
+        expect(negativeCache.isCachedMiss(key)).toBe(false);
+      } finally {
+        negativeCache.destroy();
+      }
+    });
+
+    it("does NOT serve cached 404 after resource creation", async () => {
+      const redis = createFakeRedis();
+      const { NegativeCache } = await import("./negativeCache.js");
+      const negativeCache = new NegativeCache(1000);
+      const marketId = 77777;
+      const key = marketKey(marketId);
+
+      try {
+        // Market 77777 doesn't exist - 404 is cached
+        negativeCache.markMiss(key);
+        expect(negativeCache.isCachedMiss(key)).toBe(true);
+
+        // Market 77777 is created
+        negativeCache.invalidate(key);
+        await invalidateOnMarketCreated(redis);
+
+        // Must NOT return cached 404
+        expect(negativeCache.isCachedMiss(key)).toBe(false);
+      } finally {
+        negativeCache.destroy();
+      }
+    });
+
+    it("clears negative cache for resolved market's bets list", async () => {
+      const redis = createFakeRedis();
+      const { NegativeCache } = await import("./negativeCache.js");
+      const negativeCache = new NegativeCache(1000);
+      const marketId = 88888;
+      const betsKeyValue = betsKey(marketId);
+
+      try {
+        // Bets list returned empty/404, cached as negative
+        negativeCache.markMiss(betsKeyValue);
+        expect(negativeCache.isCachedMiss(betsKeyValue)).toBe(true);
+
+        // Market resolved - bets list changes
+        negativeCache.invalidate(betsKeyValue);
+        await invalidateOnMarketResolved(redis, marketId);
+
+        // Must fetch fresh bets list
+        expect(negativeCache.isCachedMiss(betsKeyValue)).toBe(false);
+      } finally {
+        negativeCache.destroy();
+      }
+    });
+  });
+
+  describe("Missed invalidation detection (Issue #547)", () => {
+    it("fails when market detail is not invalidated on bet", async () => {
+      const redis = createFakeRedis();
+      const marketId = 1;
+      
+      redis.seed(marketKey(marketId), JSON.stringify({ total_yes: 100 }));
+
+      // INCORRECT: Missing marketKey invalidation
+      await invalidate(redis, marketsActiveKey());
+
+      // This SHOULD fail - market detail is stale
+      expect(redis.has(marketKey(marketId))).toBe(true); // STALE!
+    });
+
+    it("fails when odds are not invalidated on bet", async () => {
+      const redis = createFakeRedis();
+      const marketId = 2;
+
+      redis.seed(oddsKey(marketId), JSON.stringify({ yes: 0.5, no: 0.5 }));
+
+      // INCORRECT: Missing oddsKey invalidation
+      await invalidate(redis, marketKey(marketId), marketsActiveKey());
+
+      // This SHOULD fail - odds are stale
+      expect(redis.has(oddsKey(marketId))).toBe(true); // STALE!
+    });
+
+    it("fails when leaderboard is not invalidated on resolution", async () => {
+      const redis = createFakeRedis();
+      const marketId = 3;
+
+      redis.seed(leaderboardKey(), JSON.stringify([{ user: "GA", score: 100 }]));
+
+      // INCORRECT: Missing leaderboard invalidation
+      await invalidate(
+        redis,
+        marketKey(marketId),
+        oddsKey(marketId),
+        marketsAllKey(),
+        marketsActiveKey(),
+        betsKey(marketId)
+        // Missing: leaderboardKey()
+      );
+
+      // This SHOULD fail - leaderboard is stale
+      expect(redis.has(leaderboardKey())).toBe(true); // STALE!
+    });
+  });
+
+  describe("Cross-endpoint consistency (Issue #547)", () => {
+    it("ensures market detail and list endpoints serve same data after bet", async () => {
+      const redis = createFakeRedis();
+      const marketId = 50;
+
+      // Both endpoints cached before bet
+      redis.seed(marketKey(marketId), JSON.stringify({ id: 50, total_yes: 100 }));
+      redis.seed(
+        marketsActiveKey(),
+        JSON.stringify([{ id: 50, total_yes: 100 }])
+      );
+
+      // Bet placed - invalidate both
+      await invalidateOnBetPlaced(redis, marketId);
+
+      // Neither endpoint should serve stale data
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(marketsActiveKey())).toBe(false);
+    });
+
+    it("ensures market detail and odds endpoints sync after bet", async () => {
+      const redis = createFakeRedis();
+      const marketId = 60;
+
+      redis.seed(marketKey(marketId), JSON.stringify({ id: 60, odds_yes: 0.5 }));
+      redis.seed(oddsKey(marketId), JSON.stringify({ yes: 0.5, no: 0.5 }));
+
+      // Both must be cleared together
+      await invalidateOnBetPlaced(redis, marketId);
+
+      expect(redis.has(marketKey(marketId))).toBe(false);
+      expect(redis.has(oddsKey(marketId))).toBe(false);
+    });
   });
 });

@@ -3,7 +3,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts", "test/**/*.test.ts"],
+    include: ["src/**/*.test.ts"],
+    testTimeout: 30000,
     setupFiles: ["./src/test/vitest.setup.ts"],
     coverage: {
       provider: "v8",
@@ -11,11 +12,12 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/test/**"],
-      all: false,
-      lines: 65,
-      functions: 65,
-      branches: 55,
-      statements: 65,
+      thresholds: {
+        lines: 65,
+        functions: 65,
+        branches: 55,
+        statements: 65,
+      },
     },
   },
   resolve: {

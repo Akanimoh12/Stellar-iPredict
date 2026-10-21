@@ -534,7 +534,7 @@ impl PredictionMarketContract {
     pub fn add_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        let key = DataKey::Resolver(resolver);
+        let key = DataKey::Resolver(resolver.clone());
         let mut resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
         if !resolvers.iter().any(|current| current == resolver) {
             resolvers.push_back(resolver.clone());
@@ -549,7 +549,7 @@ impl PredictionMarketContract {
     pub fn remove_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        env.storage().persistent().remove(&DataKey::Resolver(resolver));
+        env.storage().persistent().remove(&DataKey::Resolver(resolver.clone()));
         let resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
         let mut remaining = Vec::new(&env);
         for current in resolvers.iter() {
@@ -770,7 +770,7 @@ impl PredictionMarketContract {
     ) -> Result<(), MarketError> {
         submitter.require_auth();
 
-        let min_bond = Self::get_submitter_bond(&env);
+        let min_bond = Self::get_submitter_bond(env.clone());
         if bond < min_bond { return Err(MarketError::OracleBondTooSmall); }
 
         let market = Self::load_market(&env, market_id)?;
@@ -789,7 +789,7 @@ impl PredictionMarketContract {
             .transfer(&submitter, &env.current_contract_address(), &bond);
 
         let now = env.ledger().timestamp();
-        let challenge_window = Self::get_challenge_window(&env);
+        let challenge_window = Self::get_challenge_window(env.clone());
         let challenge_deadline = now + challenge_window;
 
         let submission = OracleSubmission {
@@ -846,7 +846,7 @@ impl PredictionMarketContract {
             return Err(MarketError::OracleWindowClosed);
         }
 
-        let min_disputer_bond = Self::get_disputer_bond(&env);
+        let min_disputer_bond = Self::get_disputer_bond(env.clone());
         if bond < min_disputer_bond || bond <= submission.bond {
             return Err(MarketError::OracleBondTooSmall);
         }
@@ -860,7 +860,7 @@ impl PredictionMarketContract {
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&challenger, &env.current_contract_address(), &bond);
 
-        let council_window = Self::get_council_window(&env);
+        let council_window = Self::get_council_window(env.clone());
         let council_deadline = now + council_window;
         submission.state = OracleState::Escalated;
         submission.challenger = Some(challenger.clone());
@@ -1021,7 +1021,7 @@ impl PredictionMarketContract {
         let count_key = DataKey::CouncilVoteCount(market_id);
         let vote_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
-        let council_size = Self::get_resolvers(&env).len() as u32;
+        let council_size = Self::get_resolvers(env.clone()).len() as u32;
         let threshold = if council_size > 0 { (council_size / 2) + 1 } else { 1 };
 
         if vote_count < threshold {
@@ -1341,7 +1341,7 @@ impl PredictionMarketContract {
     /// Read the optimistic-oracle submission for a market, if one exists.
     /// Returns `None` while the market is still in the `Open` (no submission)
     /// state. Used by the off-chain indexer/aggregator to track lifecycle.
-    pub fn get_submission(env: Env, market_id: u64) -> Option<Submission> {
+    pub fn get_submission(env: Env, market_id: u64) -> Option<OracleSubmission> {
         env.storage().persistent().get(&DataKey::Submission(market_id))
     }
 

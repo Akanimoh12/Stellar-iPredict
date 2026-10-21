@@ -34,7 +34,7 @@ step by hand.
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - Docker and Docker Compose
 - Rust 1.85+ only if you need to rebuild the contracts
 

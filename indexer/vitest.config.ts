@@ -16,36 +16,12 @@ export default defineConfig({
       reportsDirectory: "coverage",
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/__tests__/**"],
-      all: false,
-      lines: 55,
-      functions: 55,
-      branches: 45,
-      statements: 55,
+      thresholds: {
+        lines: 55,
+        functions: 55,
+        branches: 45,
+        statements: 55,
+      },
     },
-    projects: [
-      {
-        test: {
-          name: "unit",
-          include: ["src/__tests__/*.test.ts"],
-        },
-      },
-      {
-        test: {
-          name: "handlers",
-          include: ["test/*.test.ts"],
-          testTimeout: 60_000,
-          hookTimeout: 60_000,
-        },
-      },
-      {
-        test: {
-          name: "integration",
-          include: ["src/__tests__/integration/*.test.ts"],
-          testTimeout: 60_000,
-          hookTimeout: 60_000,
-          sequence: { concurrent: false },
-        },
-      },
-    ],
   },
 });

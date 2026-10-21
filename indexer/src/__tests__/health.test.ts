@@ -65,6 +65,9 @@ describe("health", () => {
       expect(result.checks.rpc?.status).toBe("ok");
       expect(result.checks.lag?.status).toBe("ok");
       expect(result.checks.lag?.ledgersBehind).toBe(10);
+      expect(result.checks.lag?.secondsBehind).toBe(50);
+      expect(result.checks.lag?.threshold).toBe(1000);
+      expect(result.checks.lag?.thresholdSeconds).toBe(5000);
     });
 
     it("returns unhealthy when database is unreachable", async () => {
@@ -122,12 +125,43 @@ describe("health", () => {
       expect(result.status).toBe("degraded");
       expect(result.checks.lag?.status).toBe("high");
       expect(result.checks.lag?.ledgersBehind).toBe(200);
+      expect(result.checks.lag?.secondsBehind).toBe(1000);
       expect(result.checks.lag?.threshold).toBe(100);
+      expect(result.checks.lag?.thresholdSeconds).toBe(500);
 
       if (originalEnv) {
         process.env.MAX_LAG_LEDGERS = originalEnv;
       } else {
         delete process.env.MAX_LAG_LEDGERS;
+      }
+    });
+
+    it("returns degraded when seconds lag exceeds MAX_LAG_SECONDS threshold", async () => {
+      const originalSecondsEnv = process.env.MAX_LAG_SECONDS;
+      process.env.MAX_LAG_SECONDS = "40";
+
+      const deps: HealthCheckDeps = {
+        db: {
+          query: vi.fn().mockResolvedValue({ rows: [{ result: 1 }] }),
+        },
+        rpc: {
+          getLatestLedger: vi.fn().mockResolvedValue({ sequence: 210 }),
+        },
+        getLastProcessedLedger: () => 200, // Lag of 10 ledgers = 50s > 40s
+      };
+
+      const result = await checkReadiness(deps);
+
+      expect(result.status).toBe("degraded");
+      expect(result.checks.lag?.status).toBe("high");
+      expect(result.checks.lag?.ledgersBehind).toBe(10);
+      expect(result.checks.lag?.secondsBehind).toBe(50);
+      expect(result.checks.lag?.thresholdSeconds).toBe(40);
+
+      if (originalSecondsEnv) {
+        process.env.MAX_LAG_SECONDS = originalSecondsEnv;
+      } else {
+        delete process.env.MAX_LAG_SECONDS;
       }
     });
   });

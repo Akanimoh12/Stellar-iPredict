@@ -313,6 +313,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
 
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:
   // they are infrastructure, not part of the contract clients code against.
+  server.decorate("pool", databasePool);
   registerApiRoutes(server);
 
 

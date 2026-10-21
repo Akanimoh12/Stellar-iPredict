@@ -1,0 +1,94 @@
+name: Disk-space monitor
+
+# External watchdog for the disk-space monitor:
+#  * runs daily and after manual dispatch,
+#  * sends the 14/7/3-day alerts through the configured webhook,
+#  * fails the run on a critical finding (<=3 days, full, check failed or
+#    monitor gap) — a failed scheduled workflow is itself an alert, because
+#    GitHub notifies everyone who watches the repository.
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-disk:
+    name: Check disk space and DB growth
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore monitor state (alert de-duplication)
+        uses: actions/cache/restore@v4
+        with:
+          path: infra/disk-monitor/.state.json
+          key: disk-monitor-state-${{ github.run_id }}
+          restore-keys: |
+            disk-monitor-state-
+
+      - name: Self-test the monitor
+        run: python3 infra/disk-monitor/check-disk.py --self-test
+
+      - name: Check every service
+        id: check
+        env:
+          DISK_MONITOR_WEBHOOK_URL: ${{ secrets.DISK_MONITOR_WEBHOOK_URL }}
+          DISK_MONITOR_WEBHOOK_FORMAT: ${{ vars.DISK_MONITOR_WEBHOOK_FORMAT || 'slack' }}
+          DISK_MONITOR_HEARTBEAT_URL: ${{ secrets.DISK_MONITOR_HEARTBEAT_URL }}
+        run: |
+          python3 infra/disk-monitor/check-disk.py \
+            --state-file infra/disk-monitor/.state.json \
+            --fail-on critical \
+            --json > disk-report.json
+
+      - name: Publish report to the job summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = "disk-report.json"
+          if not os.path.exists(path):
+            print("no report produced", file=sys.stderr)
+            raise SystemExit(0)
+          rep = json.load(open(path))
+          lines = ["## Disk-space report", ""]
+          lines += ["| service | type | target | used% | free GB | growth MB/d | days | status |",
+                    "|---|---|---|---|---|---|---|---|"]
+          for r in rep["results"]:
+              free = "-" if r["free_gb"] is None else r["free_gb"]
+              growth = "-" if r["growth_rate_mb_per_day"] is None else r["growth_rate_mb_per_day"]
+              days = "-" if r["days_to_full"] is None else r["days_to_full"]
+              lines.append(f"| {r['service']} | {r['type']} | `{r['target']}` | {r['used_pct']}% "
+                           f"| {free} | {growth} | {days} | {r['status']} |")
+          if rep.get("tables"):
+              lines += ["", "### Largest tables", "",
+                        "| table | size MB | growth MB/d | days to full | status |",
+                        "|---|---|---|---|---|"]
+              for t in rep["tables"][:10]:
+                  growth = "-" if t["growth_rate_mb_per_day"] is None else t["growth_rate_mb_per_day"]
+                  days = "-" if t["days_to_full"] is None else t["days_to_full"]
+                  lines.append(f"| {t['table']} | {t['size_mb']} | {growth} | {days} | {t['status']} |")
+          if rep["pending"]:
+              lines += ["", "**Pending (not yet deployed, not checked):** "
+                        + ", ".join(rep["pending"])]
+          if rep["watchdog"]:
+              lines += ["", f"> **Watchdog:** {rep['watchdog']}"]
+          alerts = rep["alerts"]
+          lines += ["", f"**{len(alerts)} alert(s)** this run."]
+          for a in alerts:
+              lines.append(f"- `{a['service']}` — **{a['level']}** — {a['reason']}")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          PY
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: infra/disk-monitor/.state.json
+          key: disk-monitor-state-${{ github.run_id }}

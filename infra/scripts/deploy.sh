@@ -13,6 +13,8 @@
 #      application service starts. This is the point of the script: api and
 #      indexer must never boot against a half-migrated schema.
 #   3. Starts the application services (api, indexer, oracle-*).
+#   4. Runs the post-deployment smoke suite as a gate. A deploy that does not
+#      pass it has not succeeded, however clean `docker compose ps` looks.
 #
 # Migrations go through the compose `migrate` profile, which runs
 # scripts/init-db.sh against the running database. That path is idempotent:
@@ -26,12 +28,17 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly INFRA_DIR="$(dirname -- "$SCRIPT_DIR")"
+# The smoke suite is a Node script at the repository root.
+readonly REPO_ROOT="$(dirname -- "$INFRA_DIR")"
 readonly COMPOSE_FILE="${COMPOSE_FILE:-$INFRA_DIR/docker-compose.production.yml}"
 readonly DEFAULT_ENV_FILE="$INFRA_DIR/.env"
 
 ENV_FILE="$DEFAULT_ENV_FILE"
 SERVICES=()
 SKIP_MIGRATE="no"
+SKIP_SMOKE="no"
+SMOKE_URL="${SMOKE_URL:-}"
+SMOKE_ARGS=""
 BUILD_FLAG=()
 
 log() { printf '[deploy] %s\n' "$*" >&2; }
@@ -51,6 +58,10 @@ Options:
                        (migrations still run first unless --skip-migrate)
       --env-file PATH  Environment file for compose interpolation
                        (default: infra/.env, or $ENV_FILE)
+      --skip-smoke     Do not run the post-deployment smoke gate
+      --smoke-url URL  Base URL the smoke suite targets
+                       (default: $SMOKE_BASE_URL, then $API_PUBLIC_URL)
+      --smoke-args A   Extra arguments passed to the smoke suite
   -h, --help           Show this help
 
 Positional:
@@ -71,6 +82,9 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-migrate) SKIP_MIGRATE="yes"; shift ;;
+    --skip-smoke) SKIP_SMOKE="yes"; shift ;;
+    --smoke-url) SMOKE_URL="$2"; shift 2 ;;
+    --smoke-args) SMOKE_ARGS="$2"; shift 2 ;;
     --no-build)     BUILD_FLAG=(--no-build); shift ;;
     --services)     IFS=',' read -r -a SERVICES <<< "${2:?--services needs a comma-separated list}"; shift 2 ;;
     --env-file)     ENV_FILE="${2:?--env-file needs a path}"; shift 2 ;;
@@ -128,6 +142,38 @@ if [[ "${#SERVICES[@]}" -eq 0 ]]; then
 else
   log "starting services: ${SERVICES[*]}..."
   "${COMPOSE[@]}" up -d "${BUILD_FLAG[@]}" "${SERVICES[@]}"
+fi
+
+# ── 4. Post-deployment smoke gate ───────────────────────────────────────────
+# Everything above this point can succeed while the release is broken: an API
+# that starts without its DATABASE_URL, a NUMERIC parser that starts returning
+# numbers, an oracle auth check that stops rejecting unsigned submissions. All
+# three serve traffic and look healthy from `docker compose ps`.
+#
+# The suite is read-only by default and safe against production. It exits
+# non-zero on failure, and so does this script — a deploy that does not pass
+# the gate is a failed deploy, and `set -e` turns that into a non-zero exit
+# for whatever called us.
+if [[ "$SKIP_SMOKE" == "yes" ]]; then
+  log "skipping the post-deployment smoke suite (--skip-smoke)"
+else
+  readonly SMOKE_TARGET="${SMOKE_URL:-${SMOKE_BASE_URL:-${API_PUBLIC_URL:-}}}"
+  if [[ -z "$SMOKE_TARGET" ]]; then
+    die "no smoke target. Set SMOKE_BASE_URL, pass --smoke-url, or use --skip-smoke.
+       (see docs/DEPLOYMENT-GUIDE.md § Post-deployment smoke suite)"
+  fi
+
+  log "running the post-deployment smoke suite against $SMOKE_TARGET..."
+  # `command` splitting on $SMOKE_ARGS is deliberate: it is a word list the
+  # operator controls, not a single opaque value.
+  # shellcheck disable=SC2086
+  if ! (cd "$REPO_ROOT" && npm run --silent smoke -- --base-url "$SMOKE_TARGET" $SMOKE_ARGS); then
+    die "post-deployment smoke suite failed against $SMOKE_TARGET.
+       The deployment is up but not verified — do not proceed.
+       See docs/DEPLOYMENT-GUIDE.md § Post-deployment smoke suite for what each
+       failure means."
+  fi
+  log "smoke suite passed"
 fi
 
 log "deploy complete"

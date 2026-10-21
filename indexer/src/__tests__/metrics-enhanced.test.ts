@@ -75,6 +75,7 @@ describe("enhanced metrics", () => {
       // Check for gauge
       expect(output).toContain("# TYPE indexer_lag_ledgers gauge");
       expect(output).toContain("indexer_lag_ledgers 42");
+      expect(output).toContain("# TYPE indexer_lag_seconds gauge");
 
       // Check for counters
       expect(output).toContain("# TYPE events_processed_total counter");

@@ -16,8 +16,15 @@
  * absent — or present but corrupt, because the caller still had to run the
  * loader, which is what the metric is measuring.
  *
- * A Redis *error* is neither. It is already counted as a 5xx or handled by the
- * caller, and folding it in here would make an outage look like a cold cache.
+ * Two lookups are deliberately *not* in these counters:
+ *
+ * - a value that parses to `null` — a cached "not found" — belongs to the
+ *   negative cache and is counted in `negativeCache.ts`. Folding it in here
+ *   would let a burst of 404s inflate the hit rate and mask a real cache
+ *   regression, and it would make the negative cache's own behaviour
+ *   invisible;
+ * - a Redis *error*, which is already counted as a 5xx or handled by the
+ *   caller. Folding it in here would make an outage look like a cold cache.
  *
  * ## Counters and a gauge
  *
@@ -36,42 +43,29 @@
  * NaN are false, so the alert stays quiet until there is real traffic.
  */
 
+import {
+  CACHE_ENTITIES,
+  cacheNamespaceOf,
+  type CacheNamespace,
+} from "./cacheKeys.js";
+
 // ---------------------------------------------------------------------------
 // Namespaces
 // ---------------------------------------------------------------------------
 
 /**
- * Cache key entities from `keys.ts`, used as the `namespace` label.
+ * Cache key entities used as the `namespace` label.
  *
- * The list is closed on purpose. The label is derived from the key, and keys
- * embed market ids — labelling by anything less constrained would put one
- * Prometheus series per market into the backend's metrics.
+ * Re-exported from `cacheKeys.ts`, which owns the list because it owns the
+ * key format. Every namespace in {@link CACHE_ENTITIES} gets its own
+ * `cache_namespace_*` series, which is what makes a hit-rate drop
+ * actionable: the aggregate tells you something changed, the per-namespace
+ * breakdown tells you *which key structure* changed.
  */
-export const CACHE_NAMESPACES = [
-  "market",
-  "markets",
-  "leaderboard",
-  "stats",
-  "bets",
-] as const;
+export const CACHE_NAMESPACES = CACHE_ENTITIES;
 
-export type CacheNamespace = (typeof CACHE_NAMESPACES)[number] | "other";
-
-const KNOWN_NAMESPACES = new Set<string>(CACHE_NAMESPACES);
-
-/**
- * Extract the namespace from a cache key.
- *
- * `cacheKey()` builds `ipredict:v<n>:<entity>:<parts…>` (see `keys.ts`), so the
- * entity is the third segment. Anything not on the known list — a key built by
- * hand, or one from a module that predates `cacheKeys.ts` — is bucketed as
- * `other` rather than becoming its own series.
- */
-export function cacheNamespaceOf(key: string): CacheNamespace {
-  const segments = key.split(":", 3);
-  const entity = segments.length === 3 ? segments[2] : "";
-  return KNOWN_NAMESPACES.has(entity) ? (entity as CacheNamespace) : "other";
-}
+export type { CacheNamespace };
+export { cacheNamespaceOf };
 
 // ---------------------------------------------------------------------------
 // Registry

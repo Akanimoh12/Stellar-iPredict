@@ -43,7 +43,17 @@ reviewers should still read the diff.
       live-network manual check.
 - [ ] If this changes an operational flow (council voting, finalization,
       key rotation), the relevant runbook is updated — see
-      `aggregator/COUNCIL_FLOW_RUNBOOK.md` for the existing example.
+      `oracle/docs/COUNCIL_FLOW_RUNBOOK.md` for the existing example.
+- [ ] If this adds a **new alert type**, all three of the following are done:
+      - A row is added to `docs/RUNBOOK_INDEX.md` mapping the alert to its
+        runbook section.
+      - The alert payload includes a `runbook_url` field pointing at that
+        section (add the URL to `ALERT_RUNBOOK_URLS` in
+        `oracle/src/monitor/alerts.ts` for monitor alerts, or to
+        `AGGREGATOR_RUNBOOK_URLS` in `oracle/src/aggregator/alert.ts` for
+        aggregator alerts).
+      - The runbook document itself lives under `oracle/docs/` or `docs/`,
+        **not** inside `oracle/src/`.
 
 ## Docs
 

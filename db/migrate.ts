@@ -3,10 +3,41 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { Client } from 'pg';
+import { LEGACY_MIGRATION_GROUPS, REDUNDANT_MIGRATIONS } from './migration-names.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MIGRATIONS_DIR = path.resolve(__dirname, 'migrations');
+
+function listMigrationFiles(): string[] {
+  const files = fs.readdirSync(MIGRATIONS_DIR)
+    .filter(f => f.endsWith('.sql') && !f.endsWith('.down.sql'))
+    .sort();
+  const byPrefix = new Map<string, string[]>();
+
+  for (const file of files) {
+    const match = file.match(/^(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/);
+    if (!match) {
+      throw new Error(`Invalid migration filename "${file}"; expected NNNN_lowercase_name.sql`);
+    }
+    const prefix = match[1];
+    byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), file]);
+  }
+
+  for (const [prefix, names] of byPrefix) {
+    if (names.length > 1 && JSON.stringify(names) !== JSON.stringify(LEGACY_MIGRATION_GROUPS[prefix] ?? [])) {
+      throw new Error(`Duplicate migration prefix ${prefix}: ${names.join(', ')}`);
+    }
+  }
+
+  const numbers = [...byPrefix.keys()].map(Number).sort((a, b) => a - b);
+  for (let index = 0; index < numbers.length; index++) {
+    if (numbers[index] !== index + 1) {
+      throw new Error(`Migration numbering must be sequential; expected ${String(index + 1).padStart(4, '0')}`);
+    }
+  }
+  return files;
+}
 
 /**
  * Constant key for session-level PostgreSQL advisory locking.
@@ -83,6 +114,7 @@ export interface RunMigrationsOptions {
    * the case the check exists to catch.
    */
   allowChecksumUpdate?: boolean;
+  dryRun?: boolean;
 }
 
 export async function runMigrations(
@@ -92,27 +124,29 @@ export async function runMigrations(
   let lockAcquired = false;
 
   try {
-    // Attempt non-blocking lock first to log if another process holds it
-    const tryLockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
-      'SELECT pg_try_advisory_lock($1::bigint)',
-      [MIGRATION_ADVISORY_LOCK_KEY]
-    );
+    if (!options.dryRun) {
+      // Attempt non-blocking lock first to log if another process holds it
+      const tryLockRes = await client.query<{ pg_try_advisory_lock: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint)',
+        [MIGRATION_ADVISORY_LOCK_KEY]
+      );
 
-    lockAcquired = tryLockRes.rows[0]?.pg_try_advisory_lock ?? false;
+      lockAcquired = tryLockRes.rows[0]?.pg_try_advisory_lock ?? false;
 
-    if (!lockAcquired) {
-      console.log('Migration lock is currently held by another process. Waiting for lock release...');
-      await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
-      lockAcquired = true;
+      if (!lockAcquired) {
+        console.log('Migration lock is currently held by another process. Waiting for lock release...');
+        await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
+        lockAcquired = true;
+      }
+
+      console.log('Acquired migration advisory lock.');
+    } else {
+      console.log('[DRY-RUN] Running in dry-run mode. No DDL will be executed.');
     }
-
-    console.log('Acquired migration advisory lock.');
 
     await ensureMigrationsTable(client);
 
-    const files = fs.readdirSync(MIGRATIONS_DIR)
-      .filter(f => f.endsWith('.sql') && !f.endsWith('.down.sql'))
-      .sort();
+    const files = listMigrationFiles();
 
     for (const file of files) {
       const fullPath = path.join(MIGRATIONS_DIR, file);
@@ -125,7 +159,9 @@ export async function runMigrations(
           // Pre-checksum row (#406): trust it once and backfill the
           // checksum now, rather than failing on every row that predates
           // this feature. Drift is caught from this run onward.
-          await recordChecksum(client, file, checksum);
+          if (!options.dryRun) {
+            await recordChecksum(client, file, checksum);
+          }
           console.log(`Skipping ${file} (already applied; backfilling checksum)`);
         } else if (applied.checksum !== checksum) {
           if (options.allowChecksumUpdate) {
@@ -133,7 +169,9 @@ export async function runMigrations(
               `Checksum for ${file} changed since it was applied; accepting the new checksum ` +
               `(--allow-checksum-update).`
             );
-            await recordChecksum(client, file, checksum);
+            if (!options.dryRun) {
+              await recordChecksum(client, file, checksum);
+            }
           } else {
             throw new Error(
               `Migration checksum mismatch for ${file}: its contents have changed since it was ` +
@@ -149,10 +187,23 @@ export async function runMigrations(
         continue;
       }
 
-      await applyMigration(client, file, sql, checksum);
+      const duplicateOf = REDUNDANT_MIGRATIONS[file];
+      if (duplicateOf) {
+        console.log(`Skipping ${file}; its DDL is already applied by ${duplicateOf}.`);
+        continue;
+      }
+
+      if (options.dryRun) {
+        console.log(`[DRY-RUN] Pending migration: ${file}`);
+        console.log(`--- BEGIN ${file} ---`);
+        console.log(sql.trim());
+        console.log(`--- END ${file} ---`);
+      } else {
+        await applyMigration(client, file, sql, checksum);
+      }
     }
 
-    console.log('Migrations complete');
+    console.log(options.dryRun ? '[DRY-RUN] Migrations dry run complete' : 'Migrations complete');
   } finally {
     if (lockAcquired) {
       try {
@@ -170,8 +221,9 @@ async function run() {
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
   const allowChecksumUpdate = process.argv.includes('--allow-checksum-update');
+  const dryRun = process.argv.includes('--dry-run');
   try {
-    await runMigrations(client, { allowChecksumUpdate });
+    await runMigrations(client, { allowChecksumUpdate, dryRun });
   } finally {
     await client.end();
   }

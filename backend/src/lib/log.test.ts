@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import { Keypair } from "@stellar/stellar-sdk";
 import {
   REQUEST_ID_HEADER,
   MAX_REQUEST_ID_LENGTH,
@@ -180,6 +181,21 @@ describe("sanitizeUrl", () => {
       "/api?custom_param=ok&page=[redacted]",
     );
   });
+
+  it("redacts Stellar addresses from allowed query parameters", () => {
+    const address = Keypair.random().publicKey();
+    expect(sanitizeUrl(`/api/markets?q=${address}`)).toBe("/api/markets?q=[redacted]");
+  });
+
+  it("redacts URL-encoded Stellar addresses from allowed query parameters", () => {
+    const address = Keypair.random().publicKey();
+    const encodedAddress = Array.from(address, (char) =>
+      `%${char.charCodeAt(0).toString(16)}`,
+    ).join("");
+    expect(sanitizeUrl(`/api/markets?search=${encodedAddress}`)).toBe(
+      "/api/markets?search=[redacted]",
+    );
+  });
 });
 
 describe("resolveRoutePattern", () => {
@@ -328,6 +344,28 @@ describe("structured access logging over HTTP", () => {
 
     expect(log.url).toBe("/api/markets/99?limit=10&apiKey=[redacted]&page=3");
     expect(JSON.stringify(log)).not.toContain("super-secret-key-12345");
+  });
+
+  it("does not log Stellar addresses supplied in allowed query parameters", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const stream = {
+      write(line: string) {
+        lines.push(JSON.parse(line) as Record<string, unknown>);
+      },
+    };
+    const address = Keypair.random().publicKey();
+
+    server = buildTestApp({ logger: { level: "info", stream } });
+
+    await server.inject({
+      method: "GET",
+      url: `/api/markets/99?q=${address}`,
+      headers: { [REQUEST_ID_HEADER]: "address-query-test" },
+    });
+
+    const completed = lines.find((line) => line.requestId === "address-query-test");
+    expect(completed?.url).toBe("/api/markets/99?q=[redacted]");
+    expect(JSON.stringify(completed)).not.toContain(address);
   });
 
   it("never includes authorization headers or api keys in the access log", async () => {

@@ -1,5 +1,6 @@
 import { Redis, RedisOptions } from 'ioredis';
 import { recordCacheHit, recordCacheMiss } from './hitRate.js';
+import { recordNegativeCacheHit } from './negativeCache.js';
 import { getCircuitBreaker } from './circuitBreaker.js';
 import { config } from '../config/index.js';
 import { logCacheFailure } from './invalidate.js';
@@ -12,6 +13,8 @@ const options: RedisOptions = {
   },
   // Prevent unbounded queues if redis goes down hard
   maxRetriesPerRequest: 3,
+  // Fail a stalled handshake instead of hanging the first request on it
+  connectTimeout: 5000,
   // Connect lazily so importing this module never opens a socket — important
   // for test environments without a running Redis (see src/test/fakeRedis.ts).
   lazyConnect: true,
@@ -30,6 +33,10 @@ const circuit = getCircuitBreaker();
  * from the validated config module — see `config/index.ts`.  Importing this
  * module therefore opens no connection, which keeps tests fast and
  * deterministic without a running Redis server.
+ *
+ * This module is the only owner of the connection: `db/redis.ts` (health
+ * checks) and the cache helpers share this instance, so the server holds one
+ * Redis connection and {@link closeRedis} shuts all of it down.
  *
  * DO NOT instantiate `new Redis()` elsewhere — use this function or
  * {@link setRedisClient} to inject a test double.
@@ -50,6 +57,21 @@ export function setRedisClient(fake: Redis): void {
 }
 
 /**
+ * Quits the shared client and forgets it, so the next {@link getRedisClient}
+ * call builds a fresh one. A no-op when no client was ever created.
+ *
+ * The reference is cleared before `quit()` so a failed quit cannot leave a
+ * dead client behind for later callers to reuse.
+ */
+export async function closeRedis(): Promise<void> {
+  const current = client;
+  client = null;
+  if (current) {
+    await current.quit();
+  }
+}
+
+/**
  * Typed JSON helper for caching.
  *
  * Every method is circuit-breaker aware: when the breaker is OPEN the
@@ -66,6 +88,13 @@ export const cache = {
    * unavailable (circuit open or command rejected).  A `null` return is
    * treated as a cache miss by callers, so the loader / database path
    * runs transparently.
+   *
+   * Accounting matches `getOrSet`: a stored `null` is a negative-cache hit
+   * (the key exists and says "not found"), everything else that has to be
+   * reloaded is an ordinary miss. Unlike `getOrSet`, an *absent* key cannot
+   * be classified here — this helper has no loader whose answer would say
+   * whether the resource is missing or merely uncached — so it counts as an
+   * ordinary miss.
    */
   async get<T>(key: string): Promise<T | null> {
     if (!circuit.canAttempt()) {
@@ -82,7 +111,11 @@ export const cache = {
       }
       try {
         const value = JSON.parse(data) as T;
-        recordCacheHit(key);
+        if (value === null) {
+          recordNegativeCacheHit(key);
+        } else {
+          recordCacheHit(key);
+        }
         return value;
       } catch {
         // Unparseable entry: the caller gets null and goes to its source, so
@@ -152,8 +185,6 @@ export const cache = {
    * Gracefully close the Redis connection.
    */
   async close(): Promise<void> {
-    if (client) {
-      await client.quit();
-    }
+    await closeRedis();
   },
 };

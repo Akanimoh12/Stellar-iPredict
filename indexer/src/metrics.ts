@@ -48,6 +48,14 @@ export class Gauge {
   }
 }
 
+/** Operational thresholds mirrored by infra/prometheus/alerts.yml. */
+export const DEFAULT_INDEXER_LAG_WARNING_LEDGERS = 100;
+export const DEFAULT_INDEXER_LAG_CRITICAL_LEDGERS = 500;
+export const DEFAULT_INDEXER_STALL_THRESHOLD_SECONDS = 60;
+export const DEFAULT_DEAD_LETTER_ALERT_THRESHOLD = 100;
+/** Rows at or above this attempt count are exhausted, not pending work. */
+export const DEFAULT_DEAD_LETTER_MAX_ATTEMPTS = 10;
+
 export interface RpcErrorLabels {
   /** Process making the RPC call (for example `indexer` or `oracle`). */
   service: string;
@@ -174,18 +182,31 @@ export class EventCounter {
  * `indexerLag` corresponds to the `indexer_lag_ledgers` gauge documented in
  * `docs/ORACLE_AND_BACKEND.md`; it represents the difference between the
  * latest ledger from the RPC and the indexer's checkpoint ledger.
+ * `indexerChainTip` and `indexerCursor` make the two sides of that calculation
+ * independently visible. `indexerCursorLastAdvanced` is a Unix timestamp and
+ * is intentionally only updated when the persisted cursor moves.
  *
  * `eventsByType`: Counter for events processed, broken down by event type.
  * `eventsDeadLettered`: Counter for events that failed processing.
  * `pollDuration`: Histogram tracking poll iteration duration in seconds.
+ * `deadLetterQueueDepth`: Gauge tracking the current count of pending
+ *   dead-letter events (unresolved and below the retry cap; issue #496).
+ *   Updated by refreshDeadLetterQueueDepth.
+ *   Alerts when the value exceeds DEAD_LETTER_ALERT_THRESHOLD.
  */
 export const metrics = {
   eventsProcessed: new Counter(),
   indexerLag: new Gauge(),
+  indexerLagSeconds: new Gauge(),
+  indexerChainTip: new Gauge(),
+  indexerCursor: new Gauge(),
+  indexerCursorLastAdvanced: new Gauge(),
   rpcErrors: new RpcErrorCounter(),
   eventsByType: new EventCounter(),
   eventsDeadLettered: new Counter(),
   pollDuration: new Histogram([0.1, 0.5, 1, 2.5, 5, 10, 30, 60]),
+  deadLetterQueueDepth: new Gauge(),
+  deadLetterQueueRefreshFailures: new Counter(),
 };
 
 function escapeLabel(value: string): string {
@@ -213,6 +234,7 @@ export function serializeRpcErrors(): string {
  * - events_processed_total: counter of successfully processed events
  * - events_by_type_total: counter of events by type
  * - events_dead_lettered_total: counter of failed events
+ * - dead_letter_queue_depth: gauge of current retryable dead-letter rows
  * - poll_duration_seconds: histogram of poll iteration duration
  * - rpc_errors_total: counter of failed RPC calls (by service + operation)
  */
@@ -223,6 +245,20 @@ export function serializeMetrics(): string {
   lines.push("# HELP indexer_lag_ledgers The difference between the latest ledger and the indexer checkpoint");
   lines.push("# TYPE indexer_lag_ledgers gauge");
   lines.push(`indexer_lag_ledgers ${metrics.indexerLag.get()}`);
+
+  lines.push("# HELP indexer_lag_seconds Estimated time lag in seconds based on ledger difference");
+  lines.push("# TYPE indexer_lag_seconds gauge");
+  lines.push(`indexer_lag_seconds ${metrics.indexerLagSeconds.get()}`);
+
+  lines.push("# HELP indexer_chain_tip_ledger Latest chain ledger observed by the indexer");
+  lines.push("# TYPE indexer_chain_tip_ledger gauge");
+  lines.push(`indexer_chain_tip_ledger ${metrics.indexerChainTip.get()}`);
+  lines.push("# HELP indexer_cursor_ledger Last ledger durably processed by the indexer");
+  lines.push("# TYPE indexer_cursor_ledger gauge");
+  lines.push(`indexer_cursor_ledger ${metrics.indexerCursor.get()}`);
+  lines.push("# HELP indexer_cursor_last_advanced_timestamp_seconds Unix time when the cursor last advanced");
+  lines.push("# TYPE indexer_cursor_last_advanced_timestamp_seconds gauge");
+  lines.push(`indexer_cursor_last_advanced_timestamp_seconds ${metrics.indexerCursorLastAdvanced.get()}`);
 
   // Events processed counter
   lines.push("# HELP events_processed_total Total number of contract events successfully processed");
@@ -243,6 +279,15 @@ export function serializeMetrics(): string {
   lines.push("# HELP events_dead_lettered_total Total number of events that failed processing");
   lines.push("# TYPE events_dead_lettered_total counter");
   lines.push(`events_dead_lettered_total ${metrics.eventsDeadLettered.get()}`);
+
+  // Dead-letter queue depth gauge (issue #496)
+  lines.push("# HELP dead_letter_queue_depth Current number of retryable dead-letter events");
+  lines.push("# TYPE dead_letter_queue_depth gauge");
+  lines.push(`dead_letter_queue_depth ${metrics.deadLetterQueueDepth.get()}`);
+
+  lines.push("# HELP dead_letter_queue_refresh_failures_total Total number of failed dead-letter queue depth refreshes");
+  lines.push("# TYPE dead_letter_queue_refresh_failures_total counter");
+  lines.push(`dead_letter_queue_refresh_failures_total ${metrics.deadLetterQueueRefreshFailures.get()}`);
 
   // Poll duration histogram
   const pollHist = metrics.pollDuration.snapshot();
@@ -274,8 +319,105 @@ export function serializeMetrics(): string {
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
   metrics.indexerLag.reset();
+  metrics.indexerLagSeconds.reset();
+  metrics.indexerChainTip.reset();
+  metrics.indexerCursor.reset();
+  metrics.indexerCursorLastAdvanced.reset();
   metrics.rpcErrors.reset();
   metrics.eventsByType.reset();
   metrics.eventsDeadLettered.reset();
   metrics.pollDuration.reset();
+  metrics.deadLetterQueueDepth.reset();
+  metrics.deadLetterQueueRefreshFailures.reset();
+}
+
+/** Record one chain-tip/cursor observation and preserve cursor-advance time. */
+export function recordIndexerPosition(chainTip: number, cursor: number): number {
+  const safeChainTip = Math.max(0, chainTip);
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+  const lag = Math.max(0, safeChainTip - safeCursor);
+
+  metrics.indexerChainTip.set(safeChainTip);
+  metrics.indexerCursor.set(safeCursor);
+  metrics.indexerLag.set(lag);
+  metrics.indexerLagSeconds.set(lag * 5);
+
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
+  return metrics.indexerLag.get();
+}
+
+/** Record a successful durable cursor advance without replacing the lag sample. */
+export function recordIndexerCursorAdvance(cursor: number): void {
+  const safeCursor = Math.max(0, cursor);
+  const previousCursor = metrics.indexerCursor.get();
+  metrics.indexerCursor.set(safeCursor);
+  if (metrics.indexerCursorLastAdvanced.get() === 0 || safeCursor > previousCursor) {
+    metrics.indexerCursorLastAdvanced.set(Date.now() / 1000);
+  }
+}
+
+/**
+ * Query the current unresolved dead-letter queue depth, update the
+ * `dead_letter_queue_depth` gauge, and log a warning when the depth exceeds
+ * `alertThreshold` (default: DEAD_LETTER_ALERT_THRESHOLD from deadLetter.ts).
+ *
+ * Call this from the poll loop or the reprocess runner so the gauge stays
+ * fresh without requiring a live Postgres connection in the metrics module
+ * itself (the module stays dependency-free; callers own the DB reference).
+ *
+ * Returns the current depth so callers can act on it directly, or null when
+ * the refresh fails. Failures retain the last successful gauge value.
+ */
+export async function refreshDeadLetterQueueDepth(
+  countFn: () => Promise<number>,
+  alertThreshold = DEFAULT_DEAD_LETTER_ALERT_THRESHOLD,
+  logger?: { warn(msg: string, meta?: Record<string, unknown>): void },
+): Promise<number | null> {
+  try {
+    const depth = await countFn();
+    if (!Number.isSafeInteger(depth) || depth < 0) {
+      throw new TypeError(`invalid dead-letter queue depth: ${depth}`);
+    }
+    metrics.deadLetterQueueDepth.set(depth);
+    if (depth > alertThreshold) {
+      logger?.warn("dead-letter queue depth exceeds alert threshold", {
+        depth,
+        threshold: alertThreshold,
+      });
+    }
+    return depth;
+  } catch (error) {
+    metrics.deadLetterQueueRefreshFailures.inc();
+    logger?.warn("failed to refresh dead-letter queue depth; retaining last known value", {
+      error: error instanceof Error ? error.message : String(error),
+      lastKnownDepth: metrics.deadLetterQueueDepth.get(),
+    });
+    return null;
+  }
+}
+
+interface DeadLetterCountQueryable {
+  query<T = unknown>(sql: string, params?: readonly unknown[]): Promise<{ rows: T[] }>;
+}
+
+/** Refresh the queue-depth gauge from the authoritative retryable-row count. */
+export function refreshDeadLetterQueueDepthFromDb(
+  db: DeadLetterCountQueryable,
+  logger?: { warn(msg: string, meta?: Record<string, unknown>): void },
+  alertThreshold = DEFAULT_DEAD_LETTER_ALERT_THRESHOLD,
+  maxAttempts = DEFAULT_DEAD_LETTER_MAX_ATTEMPTS,
+): Promise<number | null> {
+  return refreshDeadLetterQueueDepth(async () => {
+    const result = await db.query<{ count: string | number }>(
+      `SELECT COUNT(*) AS count
+       FROM dead_letter_events
+       WHERE resolved_at IS NULL
+         AND attempt_count < $1`,
+      [maxAttempts],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }, alertThreshold, logger);
 }

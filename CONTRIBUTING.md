@@ -124,3 +124,5 @@ The implemented and target topology is summarized in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 For end-to-end oracle operations (council + optimistic), see
 [`docs/ORACLE_RUNBOOK.md`](docs/ORACLE_RUNBOOK.md).
+For the alert → runbook map, start with
+[`docs/RUNBOOK_INDEX.md`](docs/RUNBOOK_INDEX.md).

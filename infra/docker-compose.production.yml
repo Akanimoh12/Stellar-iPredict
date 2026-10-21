@@ -31,7 +31,7 @@ name: ipredict
 x-oracle-image: &oracle-image
   build:
     context: ..
-    dockerfile: oracle/src/aggregator/Dockerfile
+    dockerfile: oracle/Dockerfile.aggregator
   image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-oracle:${ORACLE_IMAGE_TAG:-local}"
 
 x-logging: &logging
@@ -52,7 +52,7 @@ x-redis-url: &redis-url
 services:
   # ── Data ───────────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16.4-alpine
+    image: postgres:16.4-alpine@sha256:d9bba297d287bb22ad05bc03940c6c74751f7d5c5fa3fb3c6ff0fb00d8eb2eec
     restart: always
     cpus: "1.00"
     mem_limit: 1g
@@ -83,7 +83,7 @@ services:
     logging: *logging
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:6e18ba5a5d2b7d41f0a2d5940026f8b9ecf80f682f7e6f8df634f19b1da9d8c0
     restart: always
     cpus: "0.50"
     mem_limit: 256m
@@ -117,7 +117,7 @@ services:
   # Not in the default profile: schema changes are a deliberate deploy step.
   migrate:
     profiles: ["migrate"]
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine@sha256:d9bba297d287bb22ad05bc03940c6c74751f7d5c5fa3fb3c6ff0fb00d8eb2eec
     # This is a finite, operator-invoked job. Its successful exit status is the
     # readiness signal, so it must not be restarted or given a long-running
     # container healthcheck.
@@ -146,6 +146,12 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -199,9 +205,15 @@ services:
   indexer:
     build:
       context: ../indexer
-      dockerfile: src/Dockerfile
+      dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-indexer:${INDEXER_IMAGE_TAG:-local}"
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -303,6 +315,12 @@ services:
   oracle-aggregator:
     <<: *oracle-image
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -358,6 +376,12 @@ services:
   oracle-monitor:
     <<: *oracle-image
     restart: always
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:
@@ -383,7 +407,7 @@ services:
     logging: *logging
 
   log-collector:
-    image: fluent/fluent-bit:3.1.9
+    image: fluent/fluent-bit:3.1.9@sha256:f520be3bebbd431c360980be406d4e21d60ea4f9c5d15a5198e3bfa7075691ea
     restart: always
     cpus: "0.25"
     mem_limit: 128m

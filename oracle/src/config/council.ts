@@ -32,6 +32,7 @@
 
 import { StrKey } from "@stellar/stellar-sdk";
 import { z } from "zod";
+import { normalizeEnvironment } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,6 +164,8 @@ export interface CouncilResolverDivergence {
   matches: boolean;
 }
 
+export type CouncilResolverReport = CouncilResolverDivergence;
+
 /** Compares canonical resolver addresses without exposing any secret config. */
 export function compareCouncilResolvers(
   config: CouncilConfig,
@@ -195,7 +198,7 @@ export function compareCouncilResolvers(
  * - `RESOLVER_SECRET_KEY` is missing or malformed.
  */
 export function loadCouncilConfig(env: NodeJS.ProcessEnv = process.env): CouncilConfig {
-  const parsed = schema.parse(env);
+  const parsed = schema.parse(normalizeEnvironment(env));
   const threshold = parsed.COUNCIL_THRESHOLD;
   const quorum = parsed.COUNCIL_QUORUM ?? threshold;
   return {

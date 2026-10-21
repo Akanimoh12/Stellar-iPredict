@@ -63,7 +63,7 @@ Every variable below is read and validated by `indexer/src/config/index.ts`
 | `REFERRAL_CONTRACT_ID` | **yes** | — | Stellar contract ID of the referral-registry contract. |
 | `LEADERBOARD_CONTRACT_ID` | **yes** | — | Stellar contract ID of the leaderboard contract. |
 | `POLL_INTERVAL_MS` | no | `5000` | Sleep between poll iterations (positive integer). |
-| `EVENTS_PER_PAGE` | no | `200` | Max events fetched per `getEvents` page (positive integer). |
+| `EVENTS_PER_PAGE` | no | `200` | Max events fetched per `getEvents` page (positive integer, at most `1000`). Values above `1000` are rejected at startup to bound backfill memory usage. |
 | `START_LEDGER` | no | `0` | Ledger to begin indexing from when no checkpoint exists (`0` = earliest available). |
 | `CONTRACT_IDS` | * | — | Comma-separated allowlist of Stellar contract IDs for the poll loop (`contract-filter.ts`). Required when the poll loop runtime is used. |
 | `LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error`. |
@@ -113,12 +113,12 @@ npm run dev                 # tsx watch src/index.ts
 ### Production
 
 Build and start the production image (the Dockerfile lives under
-`indexer/src/` so the build context includes `package-lock.json` and the full
+`indexer/` so the build context includes `package-lock.json` and the full
 source):
 
 ```bash
 cd indexer
-docker build -f src/Dockerfile -t ipredict-indexer:local .
+docker build -t ipredict-indexer:local .
 docker run --rm --env-file .env ipredict-indexer:local
 ```
 
@@ -161,6 +161,34 @@ it after a fresh deploy, a data wipe, or a ledger reorg.
 - Retry behaviour mirrors the polling loop: transient failures (429, 5xx,
   network) retry with exponential backoff via `fetchWithRetry`.
 
+### Memory characteristics
+
+Backfill memory usage is bounded by configuration, not by the size of the
+ledger range being replayed:
+
+- **`EVENTS_PER_PAGE` is capped at `1000`** (`MAX_EVENTS_PER_PAGE` in
+  `src/config/index.ts`). The Soroban RPC `getEvents` endpoint accepts limits
+  up to 10,000, but allowing arbitrarily large pages would let a single page
+  materialise an unbounded batch of decoded events in memory. The cap is
+  enforced at startup — an unreasonably large value causes the indexer to
+  exit with a validation error.
+- **Events are processed in chunks** (`EVENTS_PROCESSING_CHUNK_SIZE = 50` in
+  `src/backfill.ts`). Each page is decoded and written in batches of 50 events,
+  yielding to the event loop between chunks so processed events can be garbage
+  collected and the process stays responsive to metrics, health checks, and
+  shutdown signals.
+- **Peak memory is proportional to `EVENTS_PER_PAGE`**, not to the total number
+  of events in the backfill range. A backfill over a busy range (e.g., 3,000
+  events across 30 pages) keeps heap usage roughly flat — the per-page delta
+  is typically under 1 MB — because only one page (and one chunk within it) is
+  ever fully materialised.
+- **Memory usage is logged per page** (`[backfill] Page memory: heapUsed=… rss=…
+  heapDelta=…`) for observability during large backfills.
+
+Tuning `EVENTS_PER_PAGE` higher (up to the `1000` cap) reduces the number of
+RPC calls and can improve throughput, at the cost of higher peak memory. Lower
+values reduce memory but increase RPC call volume.
+
 ## Recovery Procedures
 
 ### Indexer stalled (lag alert)
@@ -191,6 +219,24 @@ when the node returns.
 **Manual intervention:** usually none. If a `LedgerGapError` is raised (the RPC
 reports `startLedger` older than its oldest retained ledger), that is a
 permanent, non-retried failure — see [Cursor reset](#cursor-reset).
+
+### Ledger gap, stale event, or chain-tip regression
+
+The poll loop reports `ledger gap or reorganization detected; backfill
+required` when the RPC rejects the requested range, returns an event before
+the requested cursor, or reports a latest ledger behind the saved checkpoint.
+It does not advance the checkpoint for that response. Configure
+`recoverLedgerGap` with the deployment's archival/snapshot backfill procedure;
+the handler must persist the recovered events and checkpoint before returning
+the resulting checkpoint ledger. Without a recovery handler, the poll fails
+explicitly and the existing checkpoint remains unchanged.
+
+The indexer also holds a PostgreSQL session advisory lock on a dedicated
+connection. A 10-second heartbeat verifies that the lock is still held. If
+verification fails, the live poll is aborted and the lock connection is
+destroyed so PostgreSQL releases the session lock. PostgreSQL also enforces a
+30-second idle-session timeout on that lock connection, so an event-loop stall
+cannot leave a live session lock held indefinitely.
 
 ### Database connectivity lost
 

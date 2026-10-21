@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the iPredict synthetic read-path monitor every 2 minutes
+Documentation=file:///opt/ipredict/infra/README.md
+
+[Timer]
+# Every 2 minutes: four read-only requests, so the load is negligible, and the
+# first failed run alerts immediately (MEDIUM) while the second escalates to
+# CRITICAL — a broken path is visible in ~4 minutes, with or without traffic.
+OnCalendar=*:0/2
+RandomizedDelaySec=15s
+Persistent=true
+AccuracySec=10s
+Unit=ipredict-synthetic-monitor.service
+
+[Install]
+WantedBy=timers.target

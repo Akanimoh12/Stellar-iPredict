@@ -1,8 +1,12 @@
 # Optimistic Oracle Runbook
 
+> **This file has moved.**
+> The canonical location is [`oracle/docs/OPTIMISTIC_ORACLE_RUNBOOK.md`](../../docs/OPTIMISTIC_ORACLE_RUNBOOK.md).
+> This copy is kept so existing bookmarks and editor jumps still resolve, but
+> the authoritative version is in `oracle/docs/`. Please update any links.
+
 > **Responding to an `oracle.monitor.market_stuck` alert?** Start with the
-> [Stuck Market Runbook](../docs/STUCK_MARKET_RUNBOOK.md). It is checked against the current code
-> and maps which runbook covers what. This file covers the bonded optimistic oracle: submit, challenge and finalize.
+> [Stuck Market Runbook](../../docs/STUCK_MARKET_RUNBOOK.md).
 
 This runbook documents the end-to-end operational procedures for the iPredict
 optimistic oracle: **submit**, **challenge**, and **finalize** operations. It
@@ -368,12 +372,34 @@ resolved, skips finalization, and the DB row is written via re-scan. This means
 |---|---|---|
 | `MarketStuck` | Market unresolved > 6 h past expiry | `stuck-market.ts` |
 | `BondBelowMinimum` | `bond_amount < SUBMITTER_BOND` for a live submission | `bond-monitor.ts` |
+| `BondSpendLimitApproaching` | Challenger bonds in the rolling previous hour reached the configured alert percentage or spend ceiling | `bond-monitor.ts` |
 | `CouncilInactivity` | No council votes in > 48 h on an escalated market | `council-inactivity-monitor.ts` |
 | `ConflictingSubmissions` | Two adapters return opposite outcomes at high confidence | `conflict-detection.ts` |
 | `SubmitFailed` | Submission failed after all retries | `submit-with-retry.ts` → alert webhook |
 
 Webhook alerts POST JSON to `FINALIZE_WEBHOOK_URL` (if configured). A webhook
 failure is logged and swallowed — it never blocks the aggregator poll loop.
+
+### Bond spend limit
+
+The monitor requires `HOURLY_BOND_SPEND_LIMIT_XLM` and
+`BOND_SPEND_ALERT_THRESHOLD_PERCENT` to be configured explicitly. The spend
+window is the rolling 60 minutes of recorded challenger bonds in
+`oracle_disputes`. Set both values from the operator's approved risk budget;
+there are intentionally no implicit financial defaults.
+
+For transaction-level enforcement, pass
+`assertBondSpendWithinHourlyLimit(pool, bondAmount, options)` as the challenge
+bot's `bondSpendGuard`. The monitor alert is an independent warning and does
+not itself cancel an on-chain transaction.
+
+### Runtime challenge kill switch
+
+`startChallengeBot` returns a `ChallengeBot` handle. Call
+`bot.setEnabled(false)` to stop automatic challenge submissions immediately,
+or `bot.setEnabled(true)` to resume. The bot keeps polling while disabled and
+will process new submissions after it is enabled again. Stopping the bot with
+`bot.stop()` remains permanent for that instance.
 
 ### Key log fields to watch
 

@@ -4,6 +4,12 @@
  */
 export * from "./secrets.js";
 
+/**
+ * The shared retry utility every service uses — one backoff curve, one jitter
+ * policy and one type-based retryability rule. See `retry.ts`.
+ */
+export * from "./retry.js";
+
 /** Canonical market categories stored on-chain and in PostgreSQL. */
 export const MARKET_CATEGORIES = [
   "Crypto",

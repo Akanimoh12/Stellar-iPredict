@@ -10,7 +10,8 @@ import {
   checkRetentionBoundary,
   DEFAULT_RETENTION_ALERT_THRESHOLD,
 } from "./rpc/getEvents.js";
-import { jitteredDelayMs } from "./rpc/retry.js";
+import { PermanentError } from "@ipredict/shared";
+import { jitteredDelayMs, withRetry } from "./rpc/retry.js";
 import { refreshDeadLetterQueueDepthFromDb } from "./metrics.js";
 import type { Logger } from "./log.js";
 
@@ -58,13 +59,7 @@ export async function getBackfillCoverage(
 }
 
 // Helper to detect 429 Rate Limit error
-export function isRateLimitError(err: any): boolean {
-  if (!err) return false;
-  const status = err.status || err.response?.status || err.response?.statusText;
-  if (status === 429) return true;
-  const msg = String(err).toLowerCase();
-  return msg.includes("429") || msg.includes("too many requests") || msg.includes("rate limit");
-}
+export { isRateLimitError } from "./rpc/retry.js";
 
 /**
  * Injected randomness for retry jitter (issue #503). Defaults to
@@ -87,9 +82,14 @@ export const jitteredBackoffDelay = (ceilingMs: number, random: RandomSource): n
   jitteredDelayMs(ceilingMs, random);
 
 /**
- * Retry wrapper with exponential backoff and per-attempt full jitter.
+ * Retry wrapper for backfill fetches.
  *
- * The delay before attempt `n` is drawn uniformly from
+ * The retry *mechanism* is the shared utility (issue #641): one backoff curve
+ * (exponential with full jitter) and one type-based retryability rule for
+ * every service. What the backfill states is its budget — five retries, a
+ * one-second base and a 30 s ceiling.
+ *
+ * Full jitter means the delay before attempt `n` is drawn uniformly from
  * `[0, min(delay * 2^n, MAX_RETRY_DELAY_MS))` — computed fresh for every
  * attempt, never once per retry sequence. Deterministic doubling alone made
  * every client that hit a 429 retry in lockstep (a synchronised burst exactly
@@ -107,27 +107,36 @@ export async function fetchWithRetry<T>(
   delay = 1000,
   random: RandomSource = defaultRandom,
 ): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (isRetentionExceededError(error)) {
-      throw error;
-    }
-    if (isRateLimitError(error) && retries > 0) {
-      const ceilingMs = Math.min(delay, MAX_RETRY_DELAY_MS);
-      // Full jitter: a fresh uniform draw in [0, ceiling) per attempt.
-      const waitMs = jitteredBackoffDelay(ceilingMs, random);
-      console.warn(
-        `[backfill] Rate limited (429). Retrying in ${waitMs}ms ` +
-        `(ceiling ${ceilingMs}ms, retries left: ${retries})...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      // The ceiling keeps growing exponentially; the jitter is redrawn for it
-      // on the next attempt.
-      return fetchWithRetry(fn, retries - 1, delay * 2, random);
-    }
-    throw error;
-  }
+  return withRetry<T>(
+    async () => {
+      try {
+        return await fn();
+      } catch (error) {
+        // A retention boundary is permanent: the data simply is not available
+        // any more. The RPC SDK reports it as an untyped error, so it is turned
+        // into a typed one here — the shared classifier decides by type, not by
+        // grepping the message.
+        if (isRetentionExceededError(error)) {
+          throw new PermanentError(error instanceof Error ? error.message : String(error), {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    },
+    {
+      maxRetries: retries,
+      baseDelayMs: delay,
+      maxDelayMs: MAX_RETRY_DELAY_MS,
+      random,
+      onRetry: ({ attempt, delayMs }) => {
+        console.warn(
+          `[backfill] Transient RPC failure. Retrying in ${delayMs}ms ` +
+          `(attempt ${attempt})...`,
+        );
+      },
+    },
+  );
 }
 
 // Ensure the dead-letter table exists

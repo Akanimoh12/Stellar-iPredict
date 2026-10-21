@@ -263,11 +263,15 @@ describe("error classification helpers", () => {
     expect(getStatusCode(new Error("plain"))).toBeUndefined();
   });
 
-  it("isRateLimitError detects status and message forms", () => {
+  it("isRateLimitError reads the status, not the message (issue #641)", () => {
     expect(isRateLimitError({ status: 429 })).toBe(true);
-    expect(isRateLimitError(new Error("Too Many Requests"))).toBe(true);
-    expect(isRateLimitError(new Error("HTTP 429 returned"))).toBe(true);
-    expect(isRateLimitError(new Error("rate limit exceeded"))).toBe(true);
+    expect(isRateLimitError({ statusCode: 429 })).toBe(true);
+    expect(isRateLimitError({ response: { status: 429 } })).toBe(true);
+    // The message is deliberately not consulted: a node that rewords its error
+    // text must not change how the indexer reacts to it.
+    expect(isRateLimitError(new Error("Too Many Requests"))).toBe(false);
+    expect(isRateLimitError(new Error("HTTP 429 returned"))).toBe(false);
+    expect(isRateLimitError(new Error("rate limit exceeded"))).toBe(false);
     expect(isRateLimitError(new Error("ordinary failure"))).toBe(false);
   });
 

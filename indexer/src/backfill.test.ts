@@ -71,10 +71,12 @@ describe("Backfill & Poll Module", () => {
       expect(isRateLimitError({ response: { status: 429 } })).toBe(true);
     });
 
-    it("should return true for message containing 429 or rate limit", () => {
-      expect(isRateLimitError("Error: 429 Too Many Requests")).toBe(true);
-      expect(isRateLimitError("Rate limit exceeded")).toBe(true);
-      expect(isRateLimitError(new Error("rate limit reached"))).toBe(true);
+    it("should not treat a message mentioning 429 as a rate limit (issue #641)", () => {
+      // Retryability is decided by the error's type, never by its text: a peer
+      // that rewords its error must not change how the indexer reacts to it.
+      expect(isRateLimitError("Error: 429 Too Many Requests")).toBe(false);
+      expect(isRateLimitError("Rate limit exceeded")).toBe(false);
+      expect(isRateLimitError(new Error("rate limit reached"))).toBe(false);
     });
 
     it("should return false for other errors", () => {

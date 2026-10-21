@@ -23,6 +23,12 @@ The schema has six tables, applied in order by the numbered files in
 | `events` | Raw on-chain event audit log used for replay and backfills |
 | `oracle_submissions` | Optimistic-oracle submission and status tracking |
 | `council_votes` | Phase 1.5 council member outcome submissions per market |
+| `oracle_disputes` | Tracking challenged and escalated optimistic-oracle submissions |
+| `dead_letter_events` | Stores unprocessable on-chain events for diagnostic and replay review |
+| `token_balances` | Historical snapshots of user IPRED token holdings |
+| `oracle_providers` | Registered and active oracle providers authorized to submit outcomes |
+| `idempotency_keys` | Idempotent oracle submission responses for safe retries |
+| `adapter_raw_payloads` | Verbatim raw provider responses retained for audit and dispute review |
 
 ## Table reference
 
@@ -147,6 +153,104 @@ is reached.
 
 Primary key: `(market_id, member)`. Index: `idx_council_votes_market_id` on
 `market_id`.
+
+### `oracle_disputes`
+
+Tracks challenged and escalated optimistic-oracle submissions.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `SERIAL` | Primary key |
+| `market_id` | `INTEGER` | Unique market identifier (`uq_oracle_disputes_market_id`) |
+| `submitter` | `VARCHAR(255)` | Wallet address of initial submitter |
+| `challenger` | `VARCHAR(255)` | Wallet address of challenger |
+| `outcome` | `VARCHAR(255)` | Disputed proposed outcome |
+| `submitter_bond` | `NUMERIC` | Submitter bond amount |
+| `challenger_bond` | `NUMERIC` | Challenger bond amount |
+| `total_bond` | `NUMERIC` | Total combined bond pool |
+| `status` | `oracle_dispute_status` | Status enum: `challenged`, `escalated` |
+| `challenged_at` | `TIMESTAMPTZ` | Timestamp when dispute was opened |
+| `escalated_at` | `TIMESTAMPTZ` | Timestamp when escalated to council |
+| `council_deadline` | `TIMESTAMPTZ` | Expiry deadline for council resolution |
+| `created_at` | `TIMESTAMPTZ` | Record creation timestamp |
+
+Indexes: `idx_oracle_disputes_status` on `status`.
+
+### `dead_letter_events`
+
+Dead letter queue storing failed/corrupt on-chain event payloads that could not be processed by the indexer.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `BIGSERIAL` | Primary key |
+| `ledger_seq` | `BIGINT` | Ledger sequence where failure occurred |
+| `tx_hash` | `CHAR(64)` | Transaction hash |
+| `raw_event` | `JSONB` | Verbatim event payload |
+| `error_message` | `TEXT` | Parser / pipeline error details |
+| `created_at` | `TIMESTAMP` | Timestamp event was dead-lettered |
+
+### `token_balances`
+
+Stores indexed IPRED token balances derived from `token_mint` and `token_transfer` events.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `address` | `CHAR(56)` | Primary key; user wallet address |
+| `balance` | `NUMERIC(30,7)` | Verified token balance |
+| `updated_at` | `TIMESTAMPTZ` | Last update timestamp |
+
+Indexes: `idx_token_balances_balance` on `balance DESC`, `idx_token_balances_updated_at` on `updated_at DESC`.
+
+### `oracle_providers`
+
+Registered oracle providers authorized to submit market resolution outcomes.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `address` | `VARCHAR(64)` | Primary key; provider public key |
+| `registered_at` | `TIMESTAMPTZ` | Provider registration timestamp |
+| `active` | `BOOLEAN` | Whether provider is currently permitted to submit |
+
+### `idempotency_keys`
+
+Ensures idempotency for oracle outcome submissions and HTTP retries.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `idempotency_key` | `VARCHAR(128)` | Primary key; client-supplied idempotency key |
+| `payload_hash` | `VARCHAR(64)` | SHA-256 hash of submission request payload |
+| `response_body` | `JSONB` | Cached JSON response returned to caller |
+| `status_code` | `INTEGER` | HTTP response status code |
+| `created_at` | `TIMESTAMPTZ` | Record creation timestamp |
+
+Indexes: `idx_idempotency_keys_created_at` on `created_at`.
+
+### `adapter_raw_payloads`
+
+Audit-class persistence of external oracle provider API responses.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `BIGSERIAL` | Primary key |
+| `market_id` | `TEXT` | Market identifier |
+| `provider` | `TEXT` | Adapter identifier (e.g., binance, reuters) |
+| `raw_request` | `JSONB` | Request parameters (sanitized of API keys) |
+| `raw_response` | `JSONB` | Verbatim response payload |
+| `response_bytes` | `INTEGER` | Uncompressed byte count of response |
+| `truncated` | `BOOLEAN` | True if payload exceeded storage cap |
+| `outcome` | `BOOLEAN` | Parsed provider outcome |
+| `confidence` | `NUMERIC(5,4)` | Reported confidence score |
+| `responded_at` | `TIMESTAMPTZ` | Provider response timestamp |
+| `received_at` | `TIMESTAMPTZ` | Persistence receipt timestamp |
+
+Indexes: `idx_adapter_raw_payloads_market` on `(market_id, received_at)`, `idx_adapter_raw_payloads_provider` on `(provider, market_id)`.
+
+### `oracle_submission_transitions` (State Trigger)
+
+Database-level transition constraints enforced via trigger `trg_oracle_submission_status_transition` on `oracle_submissions`. Valid transitions:
+- `submitted` -> `challenged`, `finalized`, `rejected`
+- `challenged` -> `finalized`, `rejected`
+
 
 ## Entity relationship diagram
 

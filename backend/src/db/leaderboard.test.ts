@@ -22,7 +22,7 @@ describe('getLeaderboard', () => {
 
     expect(mockPool.query).toHaveBeenCalledTimes(1);
     expect(mockPool.query).toHaveBeenCalledWith(
-      expect.stringContaining('ORDER BY points DESC'),
+      expect.stringContaining('ORDER BY points DESC, address ASC'),
       [20, 0]
     );
     expect(result).toEqual(mockRows);
@@ -47,7 +47,7 @@ describe('getLeaderboard', () => {
 
     expect(mockPool.query).toHaveBeenCalledTimes(1);
     expect(mockPool.query).toHaveBeenCalledWith(
-      expect.stringContaining('ORDER BY (won_bets + lost_bets) DESC'),
+      expect.stringContaining('ORDER BY (won_bets + lost_bets) DESC, address ASC'),
       [10, 5]
     );
     expect(result).toEqual(mockRows);

@@ -60,10 +60,10 @@ const MARKET_COLUMNS = `
 `;
 
 const ORDER_BY: Record<MarketSort, string> = {
-  newest: "created_at DESC",
-  volume: "(total_yes + total_no) DESC, created_at DESC",
-  ending_soon: "end_time ASC",
-  bettors: "bet_count DESC, created_at DESC",
+  newest: "created_at DESC, id DESC",
+  volume: "(total_yes + total_no) DESC, created_at DESC, id DESC",
+  ending_soon: "end_time ASC, id ASC",
+  bettors: "bet_count DESC, created_at DESC, id DESC",
 };
 
 function buildFilterClause(filter: MarketFilter): string {

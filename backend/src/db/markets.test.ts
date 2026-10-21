@@ -50,7 +50,7 @@ describe("getMarkets", () => {
     expect(firstCall[0]).toContain("FROM markets");
     expect(firstCall[0]).toContain("category = $1");
     expect(firstCall[0]).toContain("resolved = false");
-    expect(firstCall[0]).toContain("ORDER BY (total_yes + total_no) DESC");
+    expect(firstCall[0]).toContain("ORDER BY (total_yes + total_no) DESC, created_at DESC, id DESC");
     expect(firstCall[0]).toContain("COUNT(*) OVER ()");
     expect(firstCall[1]).toEqual(["Crypto", 10, 10]);
 
@@ -80,7 +80,7 @@ describe("getMarkets", () => {
     const firstCall = queryMock.mock.calls[0];
     expect(firstCall[0]).toContain("resolved = false AND cancelled = false");
     expect(firstCall[0]).toContain("end_time > EXTRACT(EPOCH FROM NOW())::BIGINT");
-    expect(firstCall[0]).toContain("ORDER BY end_time ASC");
+    expect(firstCall[0]).toContain("ORDER BY end_time ASC, id ASC");
     expect(result.total).toBe(0);
   });
 

@@ -99,7 +99,7 @@ export async function getBetsByMarketFromDb(
       `SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
          FROM bets
         WHERE market_id = $1
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, bettor DESC
         LIMIT $2 OFFSET $3`,
       [marketId, limit, offset],
     ),

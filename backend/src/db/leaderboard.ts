@@ -46,7 +46,7 @@ export async function getLeaderboard(
     const query = `
       SELECT address, display_name, points, won_bets, lost_bets, updated_at
       FROM leaderboard
-      ORDER BY (won_bets + lost_bets) DESC
+      ORDER BY (won_bets + lost_bets) DESC, address ASC
       LIMIT $1 OFFSET $2;
     `;
     const result = await pool.query<LeaderboardRow>(query, [limit, offset]);
@@ -56,7 +56,7 @@ export async function getLeaderboard(
   const query = `
     SELECT address, display_name, points, won_bets, lost_bets, updated_at
     FROM leaderboard
-    ORDER BY points DESC
+    ORDER BY points DESC, address ASC
     LIMIT $1 OFFSET $2;
   `;
   const result = await pool.query<LeaderboardRow>(query, [limit, offset]);

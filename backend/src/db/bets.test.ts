@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { getBetsByBettor, BetRow } from './bets';
+import { getBetsByBettor, getBetsByMarketFromDb, type BetRow } from './bets';
 import { Pool } from 'pg';
 
 describe('getBetsByBettor', () => {
@@ -68,6 +68,44 @@ describe('getBetsByBettor', () => {
     expect(result[0].net_amount).toBe(hugeAmountStr);
     expect(result[0].gross_amount).toBe(hugeAmountStr);
     expect(typeof result[0].net_amount).toBe('string');
+  });
+
+  it('orders tied bet timestamps by the primary key to prevent duplicate or skipped pages', async () => {
+    const mockRows: BetRow[] = [
+      {
+        market_id: '42',
+        bettor: 'GBOB',
+        net_amount: '10.0000000',
+        gross_amount: '10.0000000',
+        is_yes: true,
+        claimed: false,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+      },
+      {
+        market_id: '42',
+        bettor: 'GALICE',
+        net_amount: '20.0000000',
+        gross_amount: '20.0000000',
+        is_yes: false,
+        claimed: false,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ];
+
+    const mockDb = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: mockRows })
+        .mockResolvedValueOnce({ rows: [{ total: 2 }] }),
+    };
+
+    const result = await getBetsByMarketFromDb(42, 1, 10, mockDb as any);
+
+    expect(mockDb.query).toHaveBeenCalledWith(
+      expect.stringContaining('ORDER BY created_at DESC, bettor DESC'),
+      [42, 10, 0],
+    );
+    expect(result.bets).toEqual(mockRows);
   });
 });
 

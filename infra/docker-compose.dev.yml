@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.4-alpine
     environment:
       POSTGRES_USER: ipredict
       POSTGRES_PASSWORD: ipredict

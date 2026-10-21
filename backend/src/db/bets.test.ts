@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { getBetsByBettor, getBetsByMarketFromDb, type BetRow } from './bets';
+import {
+  getBetsByBettor,
+  getBetsByMarketFromDb,
+  getBetAnomalyReviewMetrics,
+  getUnreviewedBetAnomalies,
+  reviewBetAnomaly,
+  type BetRow,
+} from './bets';
 import { Pool } from 'pg';
 
 describe('getBetsByBettor', () => {
@@ -46,6 +53,68 @@ describe('getBetsByBettor', () => {
 
     // Verify the returned shapes exactly match
     expect(result).toEqual(mockRows);
+  });
+
+  describe("bet anomaly review helpers", () => {
+    it("returns queued alerts without changing market state", async () => {
+      const alert = {
+        market_id: "42",
+        window_start: new Date("2026-10-21T22:00:00Z"),
+        bettor_count: 3,
+        recent_net_amount: "1500000000",
+        same_side_share: "0.95",
+        reviewed_at: null,
+        review_outcome: null,
+        review_note: null,
+      };
+      const db = { query: vi.fn().mockResolvedValue({ rows: [alert] }) };
+      await expect(getUnreviewedBetAnomalies(db)).resolves.toEqual([alert]);
+      expect(db.query.mock.calls[0]?.[0]).toContain("WHERE reviewed_at IS NULL");
+    });
+
+    it("records a review and computes the conclusive false-positive rate", async () => {
+      const db = {
+        query: vi.fn()
+          .mockResolvedValueOnce({ rows: [{ market_id: "42" }] })
+          .mockResolvedValueOnce({
+            rows: [{ flagged: 5, reviewed: 4, false_positives: 1 }],
+          }),
+      };
+      await expect(
+        reviewBetAnomaly(
+          db,
+          "42",
+          new Date("2026-10-21T22:00:00Z"),
+          "false_positive",
+          "Normal seasonal activity",
+        ),
+      ).resolves.toBeUndefined();
+      await expect(getBetAnomalyReviewMetrics(db)).resolves.toEqual({
+        flagged: 5,
+        reviewed: 4,
+        falsePositives: 1,
+        falsePositiveRate: 0.25,
+      });
+    });
+
+    it("reports no measured false-positive rate before conclusive reviews", async () => {
+      const db = {
+        query: vi.fn().mockResolvedValue({
+          rows: [{ flagged: 0, reviewed: 0, false_positives: 0 }],
+        }),
+      };
+      await expect(getBetAnomalyReviewMetrics(db)).resolves.toMatchObject({
+        reviewed: 0,
+        falsePositiveRate: null,
+      });
+    });
+
+    it("surfaces a missing or previously reviewed alert", async () => {
+      const db = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+      await expect(
+        reviewBetAnomaly(db, "42", new Date(), "confirmed"),
+      ).rejects.toThrow("not found or has already been reviewed");
+    });
   });
 
   it('preserves exact string amounts larger than Number.MAX_SAFE_INTEGER without precision loss', async () => {
@@ -108,6 +177,7 @@ describe('getBetsByBettor', () => {
     expect(result.bets).toEqual(mockRows);
   });
 });
+<<<<<<< HEAD
 
 describe("getBetsByBettorPaginated", () => {
   it("fetches a stable page and the total count using parameterized queries", async () => {
@@ -260,3 +330,5 @@ describe("getBetsByMarket", () => {
     expect(r2.bets[0].address).toBe("GADDR3");
   });
 });
+=======
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)

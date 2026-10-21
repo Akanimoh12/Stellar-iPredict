@@ -51,6 +51,16 @@ export interface AmbiguousTallyAlert {
 
 export type AmbiguousTallyAlertSender = (alert: AmbiguousTallyAlert) => Promise<void>;
 
+export interface BetPatternAlert {
+  marketId: string;
+  windowStart: string;
+  bettorCount: number;
+  recentNetAmount: string;
+  sameSideShare: string;
+}
+
+export type BetPatternAlertSender = (alert: BetPatternAlert) => Promise<void>;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -425,6 +435,7 @@ export function createAmbiguousTallyAlertSender(
       logger?.error("ambiguous council tally requires manual review", payload);
       return;
     }
+
     try {
       await deliverWebhookWithRetry(
         webhookUrl,
@@ -442,6 +453,7 @@ export function createAmbiguousTallyAlertSender(
   };
 }
 
+<<<<<<< HEAD
 // ---------------------------------------------------------------------------
 // Bond Reconciliation Alerts (Issue #573)
 // ---------------------------------------------------------------------------
@@ -616,4 +628,41 @@ async function deliverMonitoringAlertWebhook(
   logger?: Logger,
 ): Promise<void> {
   await deliverWebhookWithRetry(webhookUrl, payload, logger, "ipredict-oracle-monitoring-alerts/1.0");
+=======
+/** Routes a detected betting pattern to review without intervening in a market. */
+export function createBetPatternAlertSender(
+  webhookUrl: string | undefined,
+  logger?: Logger,
+  fetchImpl: typeof fetch = fetch,
+): BetPatternAlertSender {
+  return async (alert) => {
+    const payload = {
+      type: "indexer.bet_pattern.detected",
+      action: "manual_review_only",
+      ...alert,
+    };
+    if (!webhookUrl) {
+      logger?.warn("betting pattern requires manual review", payload);
+      return;
+    }
+    try {
+      const response = await fetchImpl(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        logger?.error("betting pattern alert webhook returned non-2xx", {
+          marketId: alert.marketId,
+          status: response.status,
+        });
+      }
+    } catch (error) {
+      logger?.error("failed to deliver betting pattern alert webhook", {
+        marketId: alert.marketId,
+        error,
+      });
+    }
+  };
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
 }

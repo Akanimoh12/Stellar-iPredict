@@ -99,6 +99,7 @@ export function decodeBetPlacedEvent(
 
 type BetPlacedWriteResult = {
   side_valid: boolean;
+<<<<<<< HEAD
   markets_present: boolean;
   event_inserted: boolean | number | string;
   applied: boolean | number | string;
@@ -305,12 +306,187 @@ export async function handleBetPlacedEvents(
 
   return prepared.map(({ payload }) => payload);
 }
+=======
+  event_inserted: boolean;
+  applied: boolean;
+  anomaly_flagged: boolean;
+  anomaly: {
+    market_id: string;
+    window_start: string;
+    bettor_count: number;
+    recent_net_amount: string;
+    same_side_share: string;
+  } | null;
+};
+
+const ANOMALY_MIN_RECENT_AMOUNT = "1000000000";
+const ANOMALY_MIN_BETTORS = 3;
+const ANOMALY_MIN_SAME_SIDE_SHARE = "0.9";
+const ANOMALY_MIN_PRIOR_VOLUME_SHARE = "0.2";
+const ANOMALY_LATE_WINDOW_SECONDS = 24 * 60 * 60;
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
 
 export async function handleBetPlacedEvent(
   event: DecodedContractEvent,
   db: DbClient,
   redis: RedisClient,
 ): Promise<BetPlacedPayload> {
+<<<<<<< HEAD
   const [payload] = await handleBetPlacedEvents([event], db, redis);
+=======
+  const payload = decodeBetPlacedEvent(event);
+
+  /**
+   * The audit write, position upsert, and market aggregate update must be one
+   * statement. A separate `events` insert would make a crash after that insert
+   * unrecoverable: a replay would dedupe the event while its derived state was
+   * still missing. `new_event` therefore gates every downstream CTE.
+   *
+   * `bets` has one row per bettor/market. `(xmax = 0)` is PostgreSQL's standard
+   * UPSERT discriminator: true only for a newly inserted position, so
+   * `bet_count` tracks unique bettors rather than placement events. The
+   * `side_valid` guard keeps an impossible opposite-side event from changing
+   * either table or poisoning the event-dedupe log.
+   */
+  const result = await db.query<BetPlacedWriteResult>(
+    `WITH input AS (
+       SELECT $1::BIGINT AS ledger_seq,
+              $2::CHAR(64) AS tx_hash,
+              $3::BIGINT AS event_index,
+              $4::VARCHAR(50) AS event_type,
+              $5::JSONB AS payload,
+              $6::BIGINT AS market_id,
+              $7::CHAR(56) AS bettor,
+              $8::NUMERIC AS net_amount,
+              $9::NUMERIC AS gross_amount,
+              $10::BOOLEAN AS is_yes
+     ), side_valid AS (
+       SELECT i.*
+       FROM input i
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM bets b
+         WHERE b.market_id = i.market_id
+           AND b.bettor = i.bettor
+           AND b.is_yes IS DISTINCT FROM i.is_yes
+       )
+     ), new_event AS (
+       INSERT INTO events (ledger_seq, tx_hash, event_index, event_type, market_id, actor, payload)
+       SELECT ledger_seq, tx_hash, event_index, event_type, market_id, bettor, payload
+       FROM side_valid
+       ON CONFLICT (tx_hash, event_index) DO NOTHING
+       RETURNING 1
+     ), upserted_bet AS (
+       INSERT INTO bets (market_id, bettor, net_amount, gross_amount, is_yes)
+       SELECT i.market_id, i.bettor, i.net_amount, i.gross_amount, i.is_yes
+       FROM side_valid i
+       CROSS JOIN new_event
+       ON CONFLICT (market_id, bettor) DO UPDATE
+       SET net_amount = bets.net_amount + EXCLUDED.net_amount,
+           gross_amount = bets.gross_amount + EXCLUDED.gross_amount
+       RETURNING is_yes, (xmax = 0) AS new_bettor
+     ), market_update AS (
+       UPDATE markets m
+       SET total_yes = m.total_yes + CASE WHEN b.is_yes THEN i.net_amount ELSE 0 END,
+           total_no = m.total_no + CASE WHEN b.is_yes THEN 0 ELSE i.net_amount END,
+           bet_count = m.bet_count + CASE WHEN b.new_bettor THEN 1 ELSE 0 END,
+           updated_at = NOW()
+       FROM upserted_bet b
+       CROSS JOIN input i
+       WHERE m.id = i.market_id
+       RETURNING m.id
+     ), recent_bets AS (
+       SELECT actor, (payload->>'net_amount')::NUMERIC AS net_amount,
+              (payload->>'is_yes')::BOOLEAN AS is_yes
+       FROM events
+       WHERE market_id = $6
+         AND event_type = 'bet_placed'
+         AND created_at >= NOW() - INTERVAL '1 hour'
+       UNION ALL
+       SELECT i.bettor, i.net_amount, i.is_yes
+       FROM input i
+       CROSS JOIN new_event
+     ), recent_totals AS (
+       SELECT COUNT(DISTINCT actor)::INT AS bettor_count,
+              COALESCE(SUM(net_amount), 0) AS recent_net_amount,
+              COALESCE(SUM(net_amount) FILTER (WHERE is_yes), 0) AS yes_amount,
+              COALESCE(SUM(net_amount) FILTER (WHERE NOT is_yes), 0) AS no_amount
+       FROM recent_bets
+     ), anomaly_candidate AS (
+       SELECT $6::BIGINT AS market_id,
+              date_trunc('hour', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS window_start,
+              r.bettor_count,
+              r.recent_net_amount,
+              GREATEST(r.yes_amount, r.no_amount) / NULLIF(r.recent_net_amount, 0) AS same_side_share
+       FROM recent_totals r
+       JOIN markets m ON m.id = $6
+       CROSS JOIN new_event
+       WHERE m.resolved = FALSE
+         AND m.cancelled = FALSE
+         AND m.end_time > EXTRACT(EPOCH FROM NOW())::BIGINT
+         AND m.end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT + $15
+         AND r.bettor_count >= $14
+         AND r.recent_net_amount >= $11::NUMERIC
+         AND r.recent_net_amount >= (m.total_yes + m.total_no) * $13::NUMERIC
+         AND GREATEST(r.yes_amount, r.no_amount) / NULLIF(r.recent_net_amount, 0) >= $12::NUMERIC
+     ), anomaly_alert AS (
+       INSERT INTO bet_anomaly_alerts (
+         market_id, window_start, bettor_count, recent_net_amount, same_side_share
+       )
+       SELECT market_id, window_start, bettor_count, recent_net_amount, same_side_share
+       FROM anomaly_candidate
+       ON CONFLICT (market_id, window_start) DO NOTHING
+       RETURNING market_id, window_start, bettor_count, recent_net_amount, same_side_share
+     )
+     SELECT EXISTS (SELECT 1 FROM side_valid) AS side_valid,
+            EXISTS (SELECT 1 FROM new_event) AS event_inserted,
+            EXISTS (SELECT 1 FROM market_update) AS applied,
+            EXISTS (SELECT 1 FROM anomaly_alert) AS anomaly_flagged,
+            (SELECT jsonb_build_object(
+               'market_id', market_id::TEXT,
+               'window_start', window_start::TEXT,
+               'bettor_count', bettor_count,
+               'recent_net_amount', recent_net_amount::TEXT,
+               'same_side_share', same_side_share::TEXT
+             ) FROM anomaly_alert) AS anomaly`,
+    [
+      event.ledger,
+      event.txHash,
+      getEventIndex(event),
+      "bet_placed",
+      JSON.stringify(payload),
+      payload.market_id,
+      payload.bettor,
+      payload.net_amount,
+      payload.amount,
+      payload.is_yes,
+      ANOMALY_MIN_RECENT_AMOUNT,
+      ANOMALY_MIN_SAME_SIDE_SHARE,
+      ANOMALY_MIN_PRIOR_VOLUME_SHARE,
+      ANOMALY_MIN_BETTORS,
+      ANOMALY_LATE_WINDOW_SECONDS,
+    ],
+  );
+
+  const write = result.rows[0];
+  if (write?.side_valid === false) {
+    throw new Error("bet_placed side conflicts with the existing position");
+  }
+  if (write?.event_inserted === true && write.applied === false) {
+    throw new Error("bet_placed event could not update its market");
+  }
+  if (write?.anomaly_flagged && write.anomaly) {
+    console.warn(JSON.stringify({
+      type: "indexer.bet_pattern.detected",
+      action: "manual_review_only",
+      ...write.anomaly,
+    }));
+  }
+
+  // Run on a duplicate too: the database writes are a no-op, while a retry can
+  // repair a cache invalidation that failed after the original transaction.
+  await invalidateOnBetPlaced(redis, payload.market_id);
+
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
   return payload;
 }

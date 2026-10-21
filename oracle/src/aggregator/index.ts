@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 /**
  * Oracle Aggregator Public Module API
  *
@@ -97,6 +98,27 @@ export {
   createStellarSubmitter,
   OffChainSubmitterService,
   notifyFinalized,
+=======
+import { Networks, rpc } from "@stellar/stellar-sdk";
+import { Pool } from "pg";
+import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
+import { createCorrelationId, createLogger, isValidRequestId, type Logger } from "../log.js";
+import {
+  loadOracleMetricsConfig,
+  startOracleMetrics,
+  type OracleMetricsRuntime,
+} from "../metrics/index.js";
+import {
+  createAlertRouter,
+  createWebhookAlertChannel,
+  createWebhookAlertSender,
+  createAmbiguousTallyAlertSender,
+  type AlertChannel,
+} from "./alert.js";
+export { createBetPatternAlertSender } from "./alert.js";
+export type { BetPatternAlert, BetPatternAlertSender } from "./alert.js";
+import {
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
   createPostgresNotificationStore,
   failedWebhookNotificationsTableSql,
   computeTally,

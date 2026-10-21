@@ -15,6 +15,9 @@ This document is the contributor-facing reference for the core database tables u
 - `events` — raw on-chain event audit log used for replay and backfills
 - `oracle_submissions` — oracle workflow submissions and status tracking
 - `council_votes` — Phase 1.5 council member outcome submissions per market
+- `bet_anomaly_alerts` — review-only flags and human dispositions for
+  concentrated late betting patterns (see
+  [`docs/BET-ANOMALY-DETECTION.md`](../docs/BET-ANOMALY-DETECTION.md))
 
 ## Table reference
 
@@ -88,6 +91,16 @@ sequential migration instead.
 compatibility with deployments that already applied it. Its duplicate index
 DDL is skipped on fresh installs because `0028_markets_sort_indexes.sql`
 already creates those idempotent indexes.
+
+### `bet_anomaly_alerts`
+
+Stores review-only flags for concentrated late betting. The primary key
+`(market_id, window_start)` deduplicates alerts to one per market per UTC hour.
+`review_outcome` is null until a human review is recorded and may be
+`confirmed`, `false_positive`, or `inconclusive`. These records never change
+bet or market state. See
+[`docs/BET-ANOMALY-DETECTION.md`](../docs/BET-ANOMALY-DETECTION.md) for
+detection criteria and false-positive measurement.
 
 ### `leaderboard`
 

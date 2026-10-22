@@ -1672,17 +1672,64 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    "instance": {
                       "type": "string"
                     },
-                    "message": {
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
                       "type": "string"
                     }
                   },
                   "required": [
-                    "error",
-                    "message"
+                    "type",
+                    "title",
+                    "status",
+                    "instance",
+                    "error"
                   ],
                   "type": "object"
                 }
@@ -1692,6 +1739,166 @@
           }
         },
         "summary": "Get a user's profile: their bets and leaderboard stats",
+        "tags": [
+          "markets"
+        ]
+      }
+    },
+    "/api/v1/profile/{address}/bets": {
+      "get": {
+        "description": "Returns the bets placed by a Stellar address, newest first. This user-specific response is never cached.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "A Stellar public key.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bets": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "limit": {
+                      "type": "number"
+                    },
+                    "page": {
+                      "type": "number"
+                    },
+                    "total": {
+                      "type": "number"
+                    },
+                    "totalPages": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "bets",
+                    "total",
+                    "page",
+                    "limit",
+                    "totalPages"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response",
+            "headers": {
+              "Cache-Control": {
+                "description": "Always no-store for user-specific betting history.",
+                "schema": {
+                  "example": "no-store, no-cache, must-revalidate, private",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "instance",
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get a user's paginated bet history",
         "tags": [
           "markets"
         ]
@@ -1720,134 +1927,6 @@
           }
         },
         "summary": "Liveness probe",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/readyz": {
-      "get": {
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "checks": {
-                      "properties": {
-                        "db": {
-                          "properties": {
-                            "latencyMs": {
-                              "type": "number"
-                            },
-                            "ok": {
-                              "type": "boolean"
-                            }
-                          },
-                          "required": [
-                            "ok"
-                          ],
-                          "type": "object"
-                        },
-                        "redis": {
-                          "properties": {
-                            "latencyMs": {
-                              "type": "number"
-                            },
-                            "ok": {
-                              "type": "boolean"
-                            }
-                          },
-                          "required": [
-                            "ok"
-                          ],
-                          "type": "object"
-                        }
-                      },
-                      "required": [
-                        "db",
-                        "redis"
-                      ],
-                      "type": "object"
-                    },
-                    "status": {
-                      "enum": [
-                        "ready"
-                      ],
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "status",
-                    "checks"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Default Response"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "checks": {
-                      "properties": {
-                        "db": {
-                          "properties": {
-                            "latencyMs": {
-                              "type": "number"
-                            },
-                            "ok": {
-                              "type": "boolean"
-                            }
-                          },
-                          "required": [
-                            "ok"
-                          ],
-                          "type": "object"
-                        },
-                        "redis": {
-                          "properties": {
-                            "latencyMs": {
-                              "type": "number"
-                            },
-                            "ok": {
-                              "type": "boolean"
-                            }
-                          },
-                          "required": [
-                            "ok"
-                          ],
-                          "type": "object"
-                        }
-                      },
-                      "required": [
-                        "db",
-                        "redis"
-                      ],
-                      "type": "object"
-                    },
-                    "status": {
-                      "enum": [
-                        "not ready"
-                      ],
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "status",
-                    "checks"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Default Response"
-          }
-        },
-        "summary": "Readiness probe — verifies DB and Redis connectivity",
         "tags": [
           "system"
         ]

@@ -583,6 +583,77 @@ monitor itself stopped running".
 
 ---
 
+### 8. Contract WASM integrity
+
+The oracle and backend address contracts by ID. An in-place upgrade changes the
+code behind an ID without changing the ID, so at startup each service checks
+that the deployed code is still the audited build (#610).
+
+**What is checked.** Each service hashes (SHA-256) the WASM currently installed
+for every contract it is configured with and compares it to
+`EXPECTED_WASM_HASHES`:
+
+| Service | Contracts checked |
+|---|---|
+| `oracle` aggregator | `MARKET_CONTRACT_ID` (the only contract it submits to) |
+| `backend` API | `MARKET_CONTRACT_ID`, `TOKEN_CONTRACT_ID`, `REFERRAL_CONTRACT_ID`, `LEADERBOARD_CONTRACT_ID`, whichever are set |
+
+`EXPECTED_WASM_HASHES` is a comma-separated list of `contractId=sha256hex`
+pairs, set in both services' environment:
+
+```bash
+EXPECTED_WASM_HASHES=CCUY...MARKET=3f1c...e9,CCY4...TOKEN=a7d2...41
+```
+
+A malformed value (wrong format, not 64 hex characters) fails startup.
+
+**What happens.**
+
+| Result | Log | Alert |
+|---|---|---|
+| Hash matches | `info` "contract wasm hash verified" | none |
+| Contract set but not pinned | `warn` "contract wasm hash not pinned" | none |
+| RPC unreachable or contract missing | `warn` "contract wasm hash could not be verified" | none |
+| **Hash differs** | `error` "CONTRACT WASM HASH MISMATCH" with `severity: SEV1`, `expected` and `actual` | oracle: POSTed to `ALERT_WEBHOOK_URL` as `oracle.aggregator.contract_wasm_mismatch`; backend: alert on the log line (`alert=contract_wasm_mismatch`) |
+
+**A mismatch does not block startup.** This is deliberate. Blocking is safer
+in principle, but it turns a forgotten hash update after a legitimate upgrade
+into a full outage of resolution and the API. A loud SEV1 alert at startup
+gives the same visibility without the outage. Treat a mismatch you did not
+plan for as an incident: stop the oracle aggregator (it is the service that
+writes to the contract) until you confirm whether the upgrade was legitimate.
+
+**Getting the expected hash.** Hash the audited, reproducibly built artifact:
+
+```bash
+sha256sum target/wasm32v1-none/release/prediction_market.wasm
+```
+
+This is the same value `stellar contract install` (`upload`) prints as the
+WASM hash. To check what is live right now:
+
+```bash
+stellar contract fetch --id "$MARKET_CONTRACT_ID" --network "$NETWORK" --out-file live.wasm
+sha256sum live.wasm
+```
+
+**Updating after a legitimate upgrade:**
+
+1. Build the reviewed release and record `sha256sum` of each changed `.wasm`
+   in the release notes or PR.
+2. Upload it and run the `upgrade` invocation (see
+   [End-to-End Upgrade Runbook](#2-end-to-end-upgrade-runbook)). Confirm the
+   printed hash matches step 1.
+3. Update `EXPECTED_WASM_HASHES` for the upgraded contract IDs in the
+   environment of **both** `oracle` and `backend` (secrets store or
+   `infra/.env`), in the same change window.
+4. Restart the services and confirm an `info` "contract wasm hash verified"
+   line for each contract and no `CONTRACT WASM HASH MISMATCH`.
+5. On rollback ([Emergency Rollback Runbook](#7-emergency-rollback-runbook)),
+   restore the previous pinned hash at the same time.
+
+---
+
 ## Verification Checklist
 
 TLS expiry is the one outage that is entirely predictable, so it is monitored
@@ -1031,6 +1102,10 @@ Execute a small on-chain transaction to verify execution and event emissions:
    ```
 2. Confirm the indexer processes the post-upgrade ledger without JSON parsing or topic deserialization errors.
 3. Confirm database table `events` records the new event and indexer checkpoint advances monotonically.
+
+#### Phase D: Update the pinned WASM hash
+Do this as part of the upgrade, not after it. Otherwise every service logs a
+SEV1 mismatch on its next restart. See [Contract WASM integrity](#8-contract-wasm-integrity).
 
 ---
 

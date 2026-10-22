@@ -80,6 +80,11 @@ cost and expected market value to deter griefing. If a market is cancelled
 or force-resolved while a submission is open, the finalizers still run so
 bonds are never permanently stranded in escrow.
 
+**Front-running (#604):** someone copying a pending submission gains nothing
+on the normal unchallenged path, because only their own bond comes back. It is
+recorded as an accepted risk, without commit-reveal; see the analysis in
+[`ORACLE_AND_BACKEND.md`](ORACLE_AND_BACKEND.md#front-running-analysis-issue-604-accepted-risk-no-commit-reveal).
+
 **Operational risk:** bond amounts (`SUBMITTER_BOND_XLM`,
 `DISPUTER_BOND_XLM`) are configured off-chain in `infra/.env` and read by the
 aggregator; the on-chain contract constants
@@ -192,15 +197,26 @@ a crash or restart:
   exactly one indexer instance writes at a time; a second instance fails
   fast with `IndexerAlreadyRunningError` instead of racing the first.
 
+- **OpenAPI spec exposure (#603)**: the spec at `GET /api/docs` is generated
+  from route schemas. **Decision:** it is served by default in development and
+  test, and **off by default in production** (the route returns 404). A
+  deployment that wants to publish it for integrators sets
+  `OPENAPI_PUBLIC=true`, which makes exposure a recorded choice rather than an
+  accident. The published spec is the same one integrators can reconstruct by
+  using the public API, so turning it on is acceptable; the safeguard that
+  matters is what it leaves out. Operational routes in `INTERNAL_ROUTES`
+  (`backend/src/api/openapi.ts`: `/readyz`, `/metrics`) and any route with
+  `schema.hide: true` never appear in it, whichever setting is used. They still
+  serve; they are just not advertised. `openapi.test.ts` fails if an internal
+  route leaks into the spec. Add new admin or internal-only routes to
+  `INTERNAL_ROUTES` (or mark them `hide: true`) in the same PR.
+
 See `oracle/src/ORACLE_SECURITY_CHECKLIST.md` for the PR-time checklist these
 properties are reviewed against for any change under `oracle/`.
 
 ## Reporting a vulnerability
 
-The repository does not yet publish a dedicated security contact. For a
-finding that would be safe to discuss publicly (a hardening gap, a missing
-validation), open a GitHub issue labeled `area:security` following the
-process in [`CONTRIBUTING.md`](../CONTRIBUTING.md). For a finding that is
-directly exploitable against the live deployment (a way to forge an oracle
-submission, drain a bond, or obtain a key), do not open a public issue —
-contact a repository maintainer directly through GitHub instead.
+See [`SECURITY.md`](../SECURITY.md) at the repository root. Use GitHub private
+vulnerability reporting, never a public issue, for anything exploitable.
+Hardening ideas that are safe to discuss publicly can still go through
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) as an `area:security` issue.

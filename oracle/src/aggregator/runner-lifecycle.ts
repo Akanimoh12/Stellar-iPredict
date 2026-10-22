@@ -1,3 +1,5 @@
+import { rpc } from "@stellar/stellar-sdk";
+import { parseExpectedWasmHashes, verifyContractWasm } from "@ipredict/shared";
 import { loadAggregatorConfig } from "./config.js";
 import { createLogger } from "../log.js";
 import {
@@ -14,6 +16,7 @@ import {
 import { loadCouncilConfig } from "../config/council.js";
 import { AggregatorMetrics, AggregatorMetricsServer } from "./metrics.js";
 import { AggregatorHealthServer } from "./health.js";
+import { alertContractWasmResults } from "./wasm-integrity.js";
 import { createProductionDependencies } from "./runner-dependencies.js";
 import { runAggregator } from "./runner-loop.js";
 
@@ -25,6 +28,22 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+
+  // Issue #610: confirm the market contract still runs the audited build.
+  // Parsed up front so a malformed EXPECTED_WASM_HASHES fails startup; the RPC
+  // check itself runs in the background so a slow node cannot delay startup.
+  const expectedWasm = parseExpectedWasmHashes(config.EXPECTED_WASM_HASHES);
+  const marketContractId = config.MARKET_CONTRACT_ID;
+  if (marketContractId) {
+    const rpcServer = new rpc.Server(config.SOROBAN_RPC_URL);
+    verifyContractWasm({
+      contractIds: [marketContractId],
+      expected: expectedWasm,
+      fetchWasm: (id) => rpcServer.getContractWasmByContractId(id),
+    })
+      .then((results) => alertContractWasmResults(results, config.ALERT_WEBHOOK_URL, logger))
+      .catch((error) => logger.warn("contract wasm hash could not be verified", { error }));
+  }
 
   let metrics: OracleMetricsRuntime | undefined;
   let aggMetricsServer: AggregatorMetricsServer | undefined;

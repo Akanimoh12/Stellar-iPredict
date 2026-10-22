@@ -14,9 +14,23 @@ export const DOCS_ROUTE = "/api/docs";
 
 export const OPENAPI_VERSION = "3.1.0";
 
+/**
+ * Operational routes that must never appear in the published spec (#603).
+ * They stay reachable — orchestrators and scrapers need them — but listing them
+ * in a public document only advertises attack surface. A route can also opt out
+ * individually with `schema: { hide: true }`.
+ */
+export const INTERNAL_ROUTES: ReadonlySet<string> = new Set(["/readyz", "/metrics"]);
+
 export interface OpenApiOptions {
   /** Version reported in `info.version`. Defaults to the package version. */
   version?: string;
+  /**
+   * Whether `GET /api/docs` is served. The spec is still generated either way.
+   * See `OPENAPI_PUBLIC` in config and docs/SECURITY_BACKEND.md for the
+   * production decision. Defaults to true.
+   */
+  expose?: boolean;
 }
 
 const DESCRIPTION = [
@@ -82,7 +96,15 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
  * security headers set for #71, and the spec is what tooling consumes anyway.
  */
 export function registerOpenApi(app: FastifyInstance, options: OpenApiOptions = {}): void {
-  app.register(swagger, { openapi: buildOpenApiDocument(options) as any });
+  app.register(swagger, {
+    openapi: buildOpenApiDocument(options) as any,
+    transform: ({ schema, url }) => ({
+      schema: INTERNAL_ROUTES.has(url) ? { ...schema, hide: true } : schema,
+      url,
+    }),
+  });
+
+  if (options.expose === false) return;
 
   // Nested so it loads after the plugin above and lands in the spec itself.
   app.register(async (routes) => {

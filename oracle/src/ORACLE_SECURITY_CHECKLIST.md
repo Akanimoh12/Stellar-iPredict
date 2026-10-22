@@ -45,3 +45,14 @@ Copy this checklist into the PR description for any change under `oracle/`
 - [x] Alert payloads contain valid, navigable `runbook_url` references.
 - [x] Incident response and council escalation runbook documented in `oracle/docs/COUNCIL_FLOW_RUNBOOK.md`.
 
+
+## 5. Front-Running & Contract Integrity
+
+- [ ] Front-running (#604): the change does not add any reward to the
+      unchallenged submission path, publish a pending outcome before it is
+      on-chain, or otherwise make "submit first" profitable. If it does,
+      revisit the accepted-risk analysis in
+      `docs/ORACLE_AND_BACKEND.md` § "Front-running analysis".
+- [ ] Contract integrity (#610): if this targets a new contract or a redeployed
+      one, its pinned hash is in `EXPECTED_WASM_HASHES`
+      (`docs/DEPLOYMENT-GUIDE.md` § "Contract WASM integrity").

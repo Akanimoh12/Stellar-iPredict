@@ -136,7 +136,7 @@ describe("GET /readyz", () => {
     expect(res.json().status).toBe("not ready");
   });
 
-  it("includes the system tag in OpenAPI schema", async () => {
+  it("is kept out of the published OpenAPI spec as an internal probe (#603)", async () => {
     pingDbMock.mockResolvedValue({ ok: true, latencyMs: 1 });
     pingRedisMock.mockResolvedValue({ ok: true, latencyMs: 1 });
 
@@ -144,8 +144,6 @@ describe("GET /readyz", () => {
     await app.ready();
 
     const spec = app.swagger();
-    const readyzPath = spec.paths?.["/readyz"];
-    expect(readyzPath).toBeDefined();
-    expect(readyzPath?.get?.tags).toContain("system");
+    expect(spec.paths?.["/readyz"]).toBeUndefined();
   });
 });

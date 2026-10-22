@@ -1,10 +1,19 @@
 import { z } from "zod";
+import { parseExpectedWasmHashes } from "@ipredict/shared";
 import { parseCorsOrigins } from "../lib/cors.js";
 import {
   OracleApiKeyConfigError,
   parseOracleApiKeys,
   type OracleCredential,
 } from "./oracleApiKeys.js";
+
+// Blank `KEY=` lines from .env.example read as unset, not as invalid values.
+const blankAsUnset = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+
+const optionalBool = blankAsUnset(z.enum(["true", "false"])).transform((v) =>
+  v === undefined ? undefined : v === "true",
+);
 
 export const envSchema = z.object({
   DATABASE_URL: z
@@ -44,6 +53,23 @@ export const envSchema = z.object({
     .enum(["development", "test", "production"])
     .optional()
     .default("development"),
+  // Serve the OpenAPI spec at /api/docs (#603). Unset means on in development
+  // and test, off in production — production exposure must be opted into.
+  OPENAPI_PUBLIC: optionalBool,
+  // Contract integrity (#610). EXPECTED_WASM_HASHES is `contractId=sha256hex`
+  // pairs, comma-separated; checked against SOROBAN_RPC_URL at startup.
+  SOROBAN_RPC_URL: blankAsUnset(z.string().url()),
+  MARKET_CONTRACT_ID: blankAsUnset(z.string().min(1)),
+  TOKEN_CONTRACT_ID: blankAsUnset(z.string().min(1)),
+  REFERRAL_CONTRACT_ID: blankAsUnset(z.string().min(1)),
+  LEADERBOARD_CONTRACT_ID: blankAsUnset(z.string().min(1)),
+  EXPECTED_WASM_HASHES: blankAsUnset(z.string()).superRefine((v, ctx) => {
+      try {
+        parseExpectedWasmHashes(v);
+      } catch (error) {
+        ctx.addIssue({ code: "custom", message: (error as Error).message });
+      }
+    }),
   // Request timeouts (issue #474)
   REQUEST_TIMEOUT_MS: z
     .string()
@@ -149,7 +175,8 @@ export const envSchema = z.object({
 
 type EnvConfig = z.infer<typeof envSchema>;
 
-export interface Config extends EnvConfig {
+export interface Config extends Omit<EnvConfig, "OPENAPI_PUBLIC"> {
+  OPENAPI_PUBLIC: boolean;
   oracleApiKeys: OracleCredential[];
 }
 
@@ -210,7 +237,11 @@ export function loadConfig(): Config {
     throw error;
   }
 
-  cached = { ...result.data, oracleApiKeys };
+  cached = {
+    ...result.data,
+    OPENAPI_PUBLIC: result.data.OPENAPI_PUBLIC ?? result.data.NODE_ENV !== "production",
+    oracleApiKeys,
+  };
   return cached;
 }
 

@@ -45,6 +45,12 @@ const schema = z.object({
    */
   MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
 
+  /**
+   * Pinned SHA-256 of each contract's deployed WASM, as `contractId=hex` pairs
+   * (issue #610). Checked once at startup; see docs/DEPLOYMENT-GUIDE.md.
+   */
+  EXPECTED_WASM_HASHES: optionalEnv(z.string().min(1)),
+
   /** Stellar network passphrase for signing; defaults to testnet when unset. */
   NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
 

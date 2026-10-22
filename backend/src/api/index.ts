@@ -98,7 +98,7 @@ export const PUBLIC_ROUTES: readonly PublicRouteDefinition[] = Object.freeze([
     method: "GET",
     url: "/api/docs",
     auth: "public",
-    reason: "Public OpenAPI documentation specification for developer exploration and schema consumption",
+    reason: "OpenAPI spec for integrators; served outside production and in production only when OPENAPI_PUBLIC=true (#603). Internal routes are excluded",
   },
   {
     method: "GET",

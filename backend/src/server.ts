@@ -31,6 +31,8 @@ import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
 import { registerCancellationHook } from "./lib/cancellation.js";
+import { rpc } from "@stellar/stellar-sdk";
+import { parseExpectedWasmHashes, verifyContractWasm, type WasmCheckResult } from "@ipredict/shared";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -121,6 +123,8 @@ export interface BuildServerOptions {
   connectionTimeout?: number;
   /** Request timeout in milliseconds. Defaults to 30s (issue #474). */
   requestTimeout?: number;
+  /** Serve the OpenAPI spec at /api/docs. Defaults to `config.OPENAPI_PUBLIC` (#603). */
+  exposeDocs?: boolean;
 }
 
 export interface GracefulShutdownOptions {
@@ -292,7 +296,9 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // after this: registerOpenApi's onRoute hook only sees routes registered
   // after it is attached, so anything registered above it silently disappears
   // from the generated spec (#476).
-  registerOpenApi(server);
+  // Exposure is a deliberate per-environment decision (#603): on outside
+  // production, opt-in via OPENAPI_PUBLIC in production.
+  registerOpenApi(server, { expose: options.exposeDocs ?? config.OPENAPI_PUBLIC });
 
   // Routes go in a plugin registered after registerOpenApi, not directly on the
   // root instance: plugins load in registration order, so this guarantees the
@@ -447,6 +453,47 @@ export function registerGracefulShutdown(
   }
 }
 
+/**
+ * Startup check that each contract the API reports on still runs its pinned,
+ * audited WASM (#610). Logs only: a mismatch is an error line, never a failed
+ * start — see docs/DEPLOYMENT-GUIDE.md § "Contract WASM integrity".
+ */
+export async function verifyDeployedWasm(
+  log: FastifyInstance["log"],
+  settings: {
+    contractIds?: string[];
+    expectedHashes?: string;
+    fetchWasm?: (contractId: string) => Promise<Uint8Array>;
+  } = {},
+): Promise<WasmCheckResult[]> {
+  const contractIds =
+    settings.contractIds ??
+    [
+      config.MARKET_CONTRACT_ID,
+      config.TOKEN_CONTRACT_ID,
+      config.REFERRAL_CONTRACT_ID,
+      config.LEADERBOARD_CONTRACT_ID,
+    ].filter((id): id is string => Boolean(id));
+  const expected = parseExpectedWasmHashes(settings.expectedHashes ?? config.EXPECTED_WASM_HASHES);
+  const rpcUrl = config.SOROBAN_RPC_URL;
+  const fetchWasm =
+    settings.fetchWasm ??
+    (rpcUrl ? (id: string) => new rpc.Server(rpcUrl).getContractWasmByContractId(id) : undefined);
+  if (contractIds.length === 0 || !fetchWasm) return [];
+  const results = await verifyContractWasm({ contractIds, expected, fetchWasm });
+  for (const result of results) {
+    if (result.status === "match") log.info(result, "contract wasm hash verified");
+    else if (result.status === "mismatch")
+      log.error(
+        { ...result, alert: "contract_wasm_mismatch", severity: "SEV1" },
+        "CONTRACT WASM HASH MISMATCH: deployed code differs from the pinned audited build",
+      );
+    else if (result.status === "unpinned") log.warn(result, "contract wasm hash not pinned; set EXPECTED_WASM_HASHES");
+    else log.warn(result, "contract wasm hash could not be verified");
+  }
+  return results;
+}
+
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
   const { pool } = await import("./db/pool.js");
   const { getRedisClient } = await import("./db/redis.js");
@@ -465,6 +512,12 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
   });
 
   await server.listen({ port: config.port, host: config.host });
+
+  // Background, so a slow RPC node never delays serving (#610). Malformed
+  // EXPECTED_WASM_HASHES is already rejected by config validation.
+  verifyDeployedWasm(server.log).catch((error) =>
+    server.log.warn({ err: error }, "contract wasm hash could not be verified"),
+  );
 
   return server;
 }

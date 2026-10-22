@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "@/server";
-import { DOCS_ROUTE, OPENAPI_VERSION, buildOpenApiDocument } from "@/api/openapi";
+import { DOCS_ROUTE, INTERNAL_ROUTES, OPENAPI_VERSION, buildOpenApiDocument } from "@/api/openapi";
 import { createFakePool } from "../test/fakePool.js";
 
 interface OpenApiDocument {
@@ -45,6 +45,31 @@ describe("buildOpenApiDocument", () => {
       type: "http",
       scheme: "bearer",
     });
+  });
+});
+
+describe("spec exposure (#603)", () => {
+  it("never documents internal routes", async () => {
+    const spec = await fetchSpec();
+
+    for (const url of INTERNAL_ROUTES) {
+      expect(spec.paths[url], `${url} must not be in the published spec`).toBeUndefined();
+    }
+  });
+
+  it("keeps internal routes reachable", async () => {
+    server = buildServer({ corsOrigins: [], pool: createFakePool() });
+    await server.ready();
+
+    expect(server.registeredRoutes.some((r) => r.url === "/readyz")).toBe(true);
+  });
+
+  it("does not serve the spec when exposure is off", async () => {
+    server = buildServer({ corsOrigins: [], pool: createFakePool(), exposeDocs: false });
+
+    const res = await server.inject({ method: "GET", url: DOCS_ROUTE });
+
+    expect(res.statusCode).toBe(404);
   });
 });
 
@@ -107,6 +132,7 @@ describe("GET /api/docs", () => {
 
     const missing: string[] = [];
     for (const { method, url } of routeTable) {
+      if (INTERNAL_ROUTES.has(url)) continue;
       // Fastify route URLs use `:param`; OpenAPI/Swagger paths use `{param}`.
       const openApiPath = url.replace(/:([A-Za-z0-9_]+)/g, "{$1}");
       const pathItem = spec.paths[openApiPath];

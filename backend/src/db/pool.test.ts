@@ -204,6 +204,34 @@ describe("queryWithCancel", () => {
     await expect(promise).rejects.toBeInstanceOf(QueryCancelledError);
     expect(fake.client.release).toHaveBeenCalledTimes(1);
   });
+
+  it("logs a slow query warning when execution exceeds SLOW_QUERY_THRESHOLD_MS", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const nowSpy = vi.spyOn(performance, "now");
+    // Simulate query taking 350ms (threshold is 200ms)
+    nowSpy.mockReturnValueOnce(1000).mockReturnValueOnce(1350);
+
+    const fake = createFakeClient(777);
+    const { pool } = createFakePool(fake);
+    const controller = new AbortController();
+
+    const promise = queryWithCancel(pool, "SELECT * FROM slow_table", [], {
+      signal: controller.signal,
+    });
+
+    await flushMicrotasks();
+    fake.settle();
+    await promise;
+
+    expect(warnSpy).toHaveBeenCalled();
+    const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string);
+    expect(logged.msg).toBe("slow db query");
+    expect(logged.query).toBe("SELECT * FROM slow_table");
+    expect(logged.durationMs).toBe(350);
+
+    warnSpy.mockRestore();
+    nowSpy.mockRestore();
+  });
 });
 
 function flushMicrotasks(): Promise<void> {

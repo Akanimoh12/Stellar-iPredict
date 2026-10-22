@@ -18,7 +18,8 @@
     "smoke": "tsx test/smoke/run.ts",
     "smoke:list": "tsx test/smoke/run.ts --list",
     "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",
-    "audit": "npx audit-ci --config ./audit-ci.jsonc"
+    "audit": "npx audit-ci --config ./audit-ci.jsonc",
+    "analyze:slow-queries": "tsx scripts/analyze-slow-queries.ts"
   },
   "overrides": {
     "undici": "^6.28.1",

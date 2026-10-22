@@ -30,7 +30,7 @@ function createStubAdapter(
 describe("resolveMarket", () => {
   it("returns resolved with the first successful source when minAgreement is 1", async () => {
     const primary = createStubAdapter("primary", true);
-    const result = await resolveMarket(createMarket(), [primary]);
+    const result = await resolveMarket(createMarket(), [primary], { minAgreement: 1 });
 
     expect(result.status).toBe("resolved");
     expect(result.outcome).toBe(true);
@@ -42,7 +42,7 @@ describe("resolveMarket", () => {
     const primary = createStubAdapter("primary", null, "network error");
     const secondary = createStubAdapter("secondary", false);
 
-    const result = await resolveMarket(createMarket(), [primary, secondary]);
+    const result = await resolveMarket(createMarket(), [primary, secondary], { minAgreement: 1 });
 
     expect(result.status).toBe("resolved");
     expect(result.outcome).toBe(false);
@@ -56,7 +56,7 @@ describe("resolveMarket", () => {
     const secondary = createStubAdapter("secondary", null, "timeout");
     const tertiary = createStubAdapter("tertiary", true);
 
-    const result = await resolveMarket(createMarket(), [primary, secondary, tertiary]);
+    const result = await resolveMarket(createMarket(), [primary, secondary, tertiary], { minAgreement: 1 });
 
     expect(result.status).toBe("resolved");
     expect(result.outcome).toBe(true);
@@ -108,6 +108,7 @@ describe("resolveMarket", () => {
 
     const result = await resolveMarket(createMarket(), [primary, secondary, tertiary], {
       maxSources: 2,
+      minAgreement: 1,
     });
 
     expect(result.sources).toHaveLength(2);
@@ -213,7 +214,10 @@ describe("resolveMarket", () => {
         }),
       };
 
-      const result = await resolveMarket(createMarket(), [adapter], { rawPayloadSink: sink });
+      const result = await resolveMarket(createMarket(), [adapter], {
+        rawPayloadSink: sink,
+        minAgreement: 1,
+      });
 
       expect(result.status).toBe("resolved");
       expect(sink).toHaveBeenCalledTimes(1);
@@ -266,7 +270,9 @@ describe("resolveMarket", () => {
     });
 
     it("resolves normally when no sink is configured", async () => {
-      const result = await resolveMarket(createMarket(), [createStubAdapter("a", true)]);
+      const result = await resolveMarket(createMarket(), [createStubAdapter("a", true)], {
+        minAgreement: 1,
+      });
       expect(result.status).toBe("resolved");
     });
   });

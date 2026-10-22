@@ -70,6 +70,30 @@ export const DEFAULT_CONNECTION_TIMEOUT_MS = 10000;
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
+/**
+ * Canonical specification of security headers enforced by helmet on all responses.
+ * Locked down for a JSON API: nothing is rendered, so every content source is denied
+ * and the API cannot be framed (issue #602).
+ */
+export const EXPECTED_SECURITY_HEADERS = {
+  "content-security-policy":
+    "default-src 'none';base-uri 'none';form-action 'none';frame-ancestors 'none'",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "cross-origin",
+  "origin-agent-cluster": "?1",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=15552000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "x-dns-prefetch-control": "off",
+  "x-download-options": "noopen",
+  "x-frame-options": "SAMEORIGIN",
+  "x-permitted-cross-domain-policies": "none",
+  "x-xss-protection": "0",
+} as const;
+
+export type SecurityHeaderName = keyof typeof EXPECTED_SECURITY_HEADERS;
+
+
 export interface ServerConfig {
   port: number;
   host: string;

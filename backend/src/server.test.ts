@@ -1,8 +1,9 @@
 
 import { describe, expect, it, vi, afterEach } from "vitest";
-import type { FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
+import helmet from "@fastify/helmet";
 import { registerGracefulShutdown } from "./server.js";
-import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS } from "@/server";
+import { buildServer, parseCorsOrigins, DEFAULT_CORS_ORIGINS, EXPECTED_SECURITY_HEADERS } from "@/server";
 import { createFakePool } from "./test/fakePool.js";
 
 function makeFakeServer(close: ReturnType<typeof vi.fn>): FastifyInstance {
@@ -249,29 +250,44 @@ describe("CORS", () => {
 });
 
 describe("security headers", () => {
-  it("sets the standard helmet headers", async () => {
+  it("asserts every configured security header is present with exact directive values", async () => {
     const app = makeServer();
 
     const res = await app.inject({ method: "GET", url: "/healthz" });
 
-    expect(res.headers["x-content-type-options"]).toBe("nosniff");
-    expect(res.headers["x-frame-options"]).toBe("SAMEORIGIN");
-    expect(res.headers["referrer-policy"]).toBe("no-referrer");
-    expect(res.headers["strict-transport-security"]).toContain("max-age=15552000");
-    expect(res.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(res.statusCode).toBe(200);
+    for (const [header, expectedValue] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+      expect(res.headers[header], `Mismatch on header "${header}"`).toBe(expectedValue);
+    }
+    expect(res.headers["x-powered-by"]).toBeUndefined();
   });
 
-  it("locks down the content security policy", async () => {
+  it("locks down the content security policy with exact directive string and no permissive defaults", async () => {
     const app = makeServer();
 
     const res = await app.inject({ method: "GET", url: "/healthz" });
 
     const csp = res.headers["content-security-policy"];
-    expect(csp).toContain("default-src 'none'");
-    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toBe(EXPECTED_SECURITY_HEADERS["content-security-policy"]);
+    expect(csp).toBe("default-src 'none';base-uri 'none';form-action 'none';frame-ancestors 'none'");
     // helmet's defaults would otherwise re-permit what default-src 'none' denies.
     expect(csp).not.toContain("script-src");
+    expect(csp).not.toContain("style-src");
+    expect(csp).not.toContain("img-src");
+    expect(csp).not.toContain("font-src");
     expect(csp).not.toContain("unsafe-inline");
+    expect(csp).not.toContain("object-src");
+  });
+
+  it("asserts exact HSTS directives (180 days with includeSubDomains)", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "GET", url: "/healthz" });
+
+    expect(res.headers["strict-transport-security"]).toBe(
+      EXPECTED_SECURITY_HEADERS["strict-transport-security"]
+    );
+    expect(res.headers["strict-transport-security"]).toBe("max-age=15552000; includeSubDomains");
   });
 
   it("does not leak the server implementation", async () => {
@@ -280,6 +296,71 @@ describe("security headers", () => {
     const res = await app.inject({ method: "GET", url: "/healthz" });
 
     expect(res.headers["x-powered-by"]).toBeUndefined();
+  });
+
+  it("carries all security headers on error responses (404 Not Found)", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "GET", url: "/non-existent-server-endpoint" });
+
+    expect(res.statusCode).toBe(404);
+    for (const [header, expectedValue] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+      expect(res.headers[header], `Mismatch on 404 header "${header}"`).toBe(expectedValue);
+    }
+    expect(res.headers["x-powered-by"]).toBeUndefined();
+  });
+
+  it("carries all security headers on method not allowed error responses (405 Method Not Allowed)", async () => {
+    const app = makeServer();
+
+    const res = await app.inject({ method: "DELETE", url: "/healthz" });
+
+    expect(res.statusCode).toBe(405);
+    for (const [header, expectedValue] of Object.entries(EXPECTED_SECURITY_HEADERS)) {
+      expect(res.headers[header], `Mismatch on 405 header "${header}"`).toBe(expectedValue);
+    }
+    expect(res.headers["x-powered-by"]).toBeUndefined();
+  });
+
+  it("fails verification if useDefaults: false is removed and helmet default directives are merged", async () => {
+    // Replicate helmet configuration without useDefaults: false
+    const weakApp = Fastify();
+    await weakApp.register(helmet, {
+      contentSecurityPolicy: {
+        directives: {
+          "default-src": ["'none'"],
+          "base-uri": ["'none'"],
+          "form-action": ["'none'"],
+          "frame-ancestors": ["'none'"],
+        },
+      },
+    });
+    weakApp.get("/probe", async () => ({ status: "ok" }));
+    const res = await weakApp.inject({ method: "GET", url: "/probe" });
+    await weakApp.close();
+
+    const weakCsp = res.headers["content-security-policy"];
+    // Omitting useDefaults: false merges permissive defaults that undermine default-src: none
+    expect(weakCsp).not.toBe(EXPECTED_SECURITY_HEADERS["content-security-policy"]);
+    expect(weakCsp).toContain("script-src");
+    expect(weakCsp).toContain("style-src");
+  });
+
+  it("fails verification if HSTS is weakened or includeSubDomains is removed", () => {
+    const weakened1 = "max-age=15552000"; // missing includeSubDomains
+    const weakened2 = "max-age=3600; includeSubDomains"; // shortened max-age
+    expect(weakened1).not.toBe(EXPECTED_SECURITY_HEADERS["strict-transport-security"]);
+    expect(weakened2).not.toBe(EXPECTED_SECURITY_HEADERS["strict-transport-security"]);
+  });
+
+  it("fails verification if Referrer-Policy is relaxed", () => {
+    const relaxed = "strict-origin-when-cross-origin";
+    expect(relaxed).not.toBe(EXPECTED_SECURITY_HEADERS["referrer-policy"]);
+  });
+
+  it("fails verification if frame-ancestors is relaxed or omitted", () => {
+    const relaxed = "default-src 'none';base-uri 'none';form-action 'none'";
+    expect(relaxed).not.toBe(EXPECTED_SECURITY_HEADERS["content-security-policy"]);
   });
 });
 

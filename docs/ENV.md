@@ -43,6 +43,7 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `TOKEN_CONTRACT_ID` | `backend`, `indexer` | Optional | IPRED token contract identifier. |
 | `REFERRAL_CONTRACT_ID` | `backend`, `indexer` | Optional | Referral registry contract identifier. |
 | `LEADERBOARD_CONTRACT_ID` | `backend`, `indexer` | Optional | Leaderboard and points contract identifier. |
+| `EXPECTED_WASM_HASHES` | `backend`, `oracle` | **Yes** | Pinned `contractId=sha256hex` pairs, comma-separated, verified against the deployed WASM at startup. A mismatch logs a SEV1 alert but does not block startup. See [DEPLOYMENT-GUIDE.md § Contract WASM integrity](DEPLOYMENT-GUIDE.md#8-contract-wasm-integrity). |
 
 ---
 
@@ -58,6 +59,7 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `BODY_LIMIT_BYTES` | Optional | `16384` (16 KiB) | Global maximum request payload size in bytes (returns 413 if exceeded). |
 | `REQUEST_TIMEOUT_MS` | Optional | `30000` (30s) | Server-side request processing timeout in milliseconds. |
 | `CONNECTION_TIMEOUT_MS` | Optional | `10000` (10s) | Socket connection timeout in milliseconds. |
+| `OPENAPI_PUBLIC` | Optional | `true` outside production, `false` in production | Serve the OpenAPI spec at `/api/docs`. Internal routes are never included. See [SECURITY_BACKEND.md](SECURITY_BACKEND.md#api-surface-hardening). |
 
 ### Database Pool Tuning
 | Variable | Required (Prod) | Default | Description |

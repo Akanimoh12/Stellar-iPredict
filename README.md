@@ -424,6 +424,14 @@ See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
 
 ---
 
+## Security
+
+Found a vulnerability? **Do not open a public issue.** Report it privately
+through GitHub's *Report a vulnerability* form on the Security tab. See
+[SECURITY.md](SECURITY.md) for scope, response times and the disclosure process.
+
+---
+
 ## License
 
 [MIT](LICENSE)

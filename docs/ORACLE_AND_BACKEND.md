@@ -94,6 +94,75 @@ const DISPUTER_BOND:  i128 = 200_0000000;  // 200 XLM (must exceed submitter)
 // Council fee: 10% of loser's bond
 ```
 
+#### Front-running analysis (issue #604): accepted risk, no commit-reveal
+
+**The concern.** `submit_outcome` is permissionless and the contract accepts
+one submission per market (`SubmissionExists`). An observer who sees an
+honest submission forming, either in the transaction queue or through the
+off-chain intake, can send the same outcome first and become the submitter
+of record.
+
+**What the front-runner gains**, from the payout paths in
+`contracts/prediction_market/src/lib.rs`:
+
+| Path | Front-runner receives | Net gain |
+|---|---|---|
+| Unchallenged → `finalize_outcome` (the normal case) | own bond back, in full | **0**, minus tx fees and 24h of locked capital |
+| Challenged, council upholds the outcome → `resolve_dispute` | own bond + half the challenger's bond | **+½ × DISPUTER_BOND**, i.e. +100 XLM at the 200 XLM floor |
+| Challenged, council overturns | nothing | **−SUBMITTER_BOND**, i.e. −100 XLM |
+| Council misses its window → `finalize_challenge_timeout` | own bond back | **0** |
+
+The only case that pays requires (a) a third party to challenge a **correct**
+outcome and (b) the council to rule against that challenger. A challenger
+who knowingly disputes a correct outcome is giving away half their bond, so
+this case is rare by design. The front-runner's expected value is roughly
+`P(frivolous challenge) × 100 XLM − tx fees − cost of locking ≥100 XLM for 24h`.
+For an uncontroversial market that probability is close to zero.
+
+**What the honest submitter loses.** Almost nothing. The bond transfer runs
+after the `SubmissionExists` check and a failed Soroban transaction is atomic,
+so a front-run submission escrows nothing and costs only the transaction fee
+(the aggregator sets a 0.01 XLM max). `OffChainSubmitter` also simulates
+`get_oracle_submission` before sending, so in most races it never sends.
+
+**What the protocol loses.** Nothing. A front-runner copying the correct
+outcome resolves the market exactly as the honest submitter would have. The
+real threat is a **wrong** outcome landing first, and that is not front-running.
+It is a false submission, already handled by the 24h challenge window and the
+challenge bot (`oracle/src/aggregator/challenge-bot.ts`).
+
+**Why not commit-reveal.** Commit-reveal needs two transactions (commit a
+hash of `outcome‖salt‖submitter`, then reveal) and a reveal window long enough
+for honest submitters to land the reveal under congestion:
+
+- Minimum added latency: one ledger close (~5–6 s) between commit and reveal.
+  A safe reveal window of about 10 ledgers (~1 min) is still under 0.1% of the
+  24h challenge window that dominates time to finalization. So latency is
+  **not** the cost that matters.
+- The real costs are a second transaction fee per submission, new contract
+  state (pending commits plus a reveal deadline), and a new liveness failure:
+  a committer who never reveals blocks the market until a timeout clears the
+  commit. That needs new finalizer logic and more bond-stranding cases, which
+  is the class of bug the finalizers exist to prevent.
+
+Adding that complexity to protect a prize that is zero in the normal case is
+a poor trade.
+
+**Decision.** Accepted risk. No commit-reveal.
+
+**Residual risk.**
+
+- A front-runner can capture the bond-plus-half payout in the rare
+  frivolous-challenge case. That value comes out of the frivolous challenger's
+  bond, not out of user funds or the honest submitter.
+- The honest submitter's bond return is not "stolen", since it was never
+  escrowed. The protocol does not pay submitters for work, so there is no
+  work reward to steal.
+- **Revisit this decision** if any of these change: a submitter reward or
+  fee share is added to the unchallenged path; `DISPUTER_BOND` grows enough
+  that ½ of it is a meaningful prize; or the off-chain intake starts
+  publishing pending outcomes before they are on-chain.
+
 #### Why Optimistic Works for iPredict
 
 - Most markets are uncontroversial (BTC price, sports scores)

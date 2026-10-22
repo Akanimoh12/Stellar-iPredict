@@ -761,6 +761,10 @@ impl PredictionMarketContract {
     /// Post an outcome for an expired market with a bond, opening the challenge
     /// window. Callable by anyone. The bond is escrowed in this contract and
     /// returned on finalization (or forfeited if a challenge succeeds).
+    ///
+    /// First-come: front-running a submission is an accepted risk, since the
+    /// unchallenged path only returns the submitter's own bond. See
+    /// docs/ORACLE_AND_BACKEND.md § "Front-running analysis" (#604).
     pub fn submit_outcome(
         env: Env,
         submitter: Address,

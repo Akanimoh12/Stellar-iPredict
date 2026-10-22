@@ -3,6 +3,7 @@
  * See `secrets.ts` and `docs/SECRETS.md`.
  */
 export * from "./secrets.js";
+export * from "./wasm-integrity.js";
 
 /**
  * The shared retry utility every service uses — one backoff curve, one jitter

@@ -3,6 +3,9 @@
 We're building the real backend and oracle for iPredict. All of this work
 happens on the **`implementation-drips`** branch — not `main`.
 
+> **Security issues:** do not file vulnerabilities as public issues or PRs.
+> Follow [SECURITY.md](SECURITY.md) and use GitHub private vulnerability reporting.
+
 ## Workflow
 
 1. **Find an issue.** Browse [open issues](../../issues). Filter by `area:` label

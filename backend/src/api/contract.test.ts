@@ -11,6 +11,7 @@ import {
   assertAllRoutesClassified,
 } from "./index.js";
 import { buildServer } from "../server.js";
+import { INTERNAL_ROUTES } from "./openapi.js";
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
 // Exercise the real query modules, including routes that use the default pool.
@@ -49,7 +50,7 @@ function queryRows(sql: string, values?: unknown[]) {
 }
 
 const cases: { method: "GET" | "POST"; url: string; path: string; status: number }[] = [
-  ...["/api/docs", "/healthz", "/readyz", "/resolution-status", "/status", "/api/markets", "/api/markets/resolution-status", "/api/markets/unmappable", "/api/leaderboard", "/api/stats"].map(path => ({ method: "GET" as const, url: path, path, status: 200 })),
+  ...["/api/docs", "/healthz", "/resolution-status", "/status", "/api/markets", "/api/markets/resolution-status", "/api/markets/unmappable", "/api/leaderboard", "/api/stats"].map(path => ({ method: "GET" as const, url: path, path, status: 200 })),
   ...["", "/bets", "/odds"].map(suffix => ({ method: "GET" as const, url: `/api/markets/1${suffix}`, path: `/api/markets/{id}${suffix}`, status: 200 })),
   { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
   { method: "GET", url: `/api/v1/profile/${address}/bets?page=1&limit=20`, path: "/api/v1/profile/{address}/bets", status: 200 },
@@ -90,7 +91,8 @@ describe("OpenAPI contracts on the production server", () => {
     const tested = cases.map(c => `${c.method.toLowerCase()} ${c.path}`).sort();
     const documented = Object.entries(spec.paths).flatMap(([path, methods]) => Object.keys(methods as object).map(method => `${method} ${path}`)).sort();
     expect(documented).toEqual(tested);
-    expect(app.registeredRoutes.map(({ method, url }) => `${method.toLowerCase()} ${url.replace(/:([A-Za-z0-9_]+)/g, "{$1}")}`).sort()).toEqual(tested);
+    // Internal routes (#603) are deliberately absent from the published spec.
+    expect(app.registeredRoutes.filter(({ url }) => !INTERNAL_ROUTES.has(url)).map(({ method, url }) => `${method.toLowerCase()} ${url.replace(/:([A-Za-z0-9_]+)/g, "{$1}")}`).sort()).toEqual(tested);
   });
   it.each(cases)("$method $url returns a valid $status response without dropped fields", async ({ method, url, path, status }) => {
     await assertContract({ method, url, ...(method === "POST" ? { payload: { marketId: 1, outcome: "YES", signature: "invalid", provider: address } } : {}) }, path, status);
@@ -107,9 +109,12 @@ describe("OpenAPI contracts on the production server", () => {
   ] as const)("validates real error response %s", async (url, path, status) => {
     await assertContract({ method: "GET", url }, path, status);
   });
-  it("validates readiness failure against the declared 503 response", async () => {
+  it("keeps /readyz out of the published spec but serving (#603)", async () => {
+    const spec = await getOpenApiSpec(app);
+    expect(spec.paths["/readyz"]).toBeUndefined();
+    expect((await app.inject("/readyz")).statusCode).toBe(200);
     mocks.query.mockRejectedValue(new Error("Database unavailable"));
-    await assertContract({ method: "GET", url: "/readyz" }, "/readyz", 503);
+    expect((await app.inject("/readyz")).statusCode).toBe(503);
   });
   it.each(["/api/markets", "/api/markets/1", "/api/markets/1/bets"])("detects a new database field silently removed from %s", async url => {
     mocks.query.mockImplementation(async (sql: string, values?: unknown[]) => ({ rows: queryRows(sql, values).map(row => ({ ...row, new_public_field: "must survive" })) }));

@@ -121,8 +121,37 @@ describe("bet_placed handler", () => {
 
     expect(db.query).toHaveBeenNthCalledWith(
       1,
+<<<<<<< HEAD
       expect.stringContaining("jsonb_to_recordset"),
       [expect.any(String)],
+=======
+      expect.stringContaining("INSERT INTO events"),
+      [
+        event.ledger,
+        event.txHash,
+        event.eventIndex,
+        "bet_placed",
+        JSON.stringify({
+          market_id: 7,
+          bettor: BETTOR,
+          is_yes: true,
+          amount: "1000000000",
+          net_amount: "980000000",
+          fee: "20000000",
+          is_increase: false,
+        }),
+        7,
+        BETTOR,
+        "980000000",
+        "1000000000",
+        true,
+        "1000000000",
+        "0.9",
+        "0.2",
+        3,
+        86400,
+      ],
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
     );
     expect(JSON.parse(vi.mocked(db.query).mock.calls[0][1]?.[0] as string)).toEqual([
       expect.objectContaining({
@@ -142,7 +171,11 @@ describe("bet_placed handler", () => {
     expect(query).toContain("UPDATE markets");
     expect(query).toContain("ON CONFLICT (tx_hash, event_index) DO NOTHING");
     expect(query).toContain("(xmax = 0) AS new_bettor");
+<<<<<<< HEAD
     expect(query).toContain("invariant_guard");
+=======
+    expect(query).toContain("INSERT INTO bet_anomaly_alerts");
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
     expect(redis.del).toHaveBeenCalledWith(
       "ipredict:v1:market:7",
       "ipredict:v1:markets:active",
@@ -167,6 +200,7 @@ describe("bet_placed handler", () => {
     );
   });
 
+<<<<<<< HEAD
   it("batches ordered placements from one ledger into one atomic SQL statement", async () => {
     const otherBettor = "G" + "B".repeat(55);
     const first = sampleEvent();
@@ -263,5 +297,36 @@ describe("bet_placed handler", () => {
       ),
     ).rejects.toThrow("conflicting payloads");
     expect(db.query).not.toHaveBeenCalled();
+=======
+  it("logs a newly flagged pattern for manual review only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db: DbClient = {
+      query: vi.fn().mockResolvedValue({
+        rows: [{
+          side_valid: true,
+          event_inserted: true,
+          applied: true,
+          anomaly_flagged: true,
+          anomaly: {
+            market_id: "7",
+            window_start: "2026-10-21T22:00:00+00:00",
+            bettor_count: 3,
+            recent_net_amount: "1500000000",
+            same_side_share: "0.95",
+          },
+        }],
+        rowCount: 1,
+      }),
+    };
+    const redis: RedisClient = { del: vi.fn().mockResolvedValue(2) };
+
+    try {
+      await handleBetPlacedEvent(sampleEvent(), db, redis);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('"action":"manual_review_only"'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('"market_id":"7"'));
+    } finally {
+      warn.mockRestore();
+    }
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
   });
 });

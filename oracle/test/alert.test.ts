@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { 
   createAlertRouter,
@@ -8,6 +9,13 @@ import {
   alertAggregateLag,
   alertCircuitBreakerOpen,
   THRESHOLDS,
+=======
+import { describe, expect, it, vi } from "vitest";
+import {
+  createWebhookAlertSender,
+  createBetPatternAlertSender,
+  classifyAlertSeverity,
+>>>>>>> 4241d68 (Detect concentrated late betting patterns)
 } from "../src/aggregator/alert.js";
 
 describe("alertBondDiscrepancy (Issue #573)", () => {
@@ -201,5 +209,56 @@ describe("alert delivery retries and per-channel deduplication", () => {
 
     expect(successfulChannel.send).toHaveBeenCalledOnce();
     expect(recoveringChannel.send).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createBetPatternAlertSender", () => {
+  it("posts a review-only alert and does not take action on the market", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+    const send = createBetPatternAlertSender(
+      "https://alerts.example.com/review",
+      undefined,
+      fetchImpl,
+    );
+
+    await send({
+      marketId: "42",
+      windowStart: "2026-10-21T22:00:00Z",
+      bettorCount: 3,
+      recentNetAmount: "1500000000",
+      sameSideShare: "0.95",
+    });
+
+    const body = JSON.parse((fetchImpl.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({
+      type: "indexer.bet_pattern.detected",
+      action: "manual_review_only",
+      marketId: "42",
+      bettorCount: 3,
+    });
+  });
+
+  it("logs a manual-review alert when no webhook is configured", async () => {
+    const warn = vi.fn();
+    const send = createBetPatternAlertSender(undefined, {
+      level: "info",
+      child: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+      log: vi.fn(),
+    });
+    await send({
+      marketId: "42",
+      windowStart: "2026-10-21T22:00:00Z",
+      bettorCount: 3,
+      recentNetAmount: "1500000000",
+      sameSideShare: "0.95",
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "betting pattern requires manual review",
+      expect.objectContaining({ action: "manual_review_only" }),
+    );
   });
 });

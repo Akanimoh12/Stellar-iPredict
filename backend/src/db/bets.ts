@@ -24,6 +24,26 @@ export interface PaginatedBets {
   totalPages: number;
 }
 
+export type BetAnomalyReviewOutcome = "confirmed" | "false_positive" | "inconclusive";
+
+export interface BetAnomalyAlert {
+  market_id: string;
+  window_start: Date;
+  bettor_count: number;
+  recent_net_amount: string;
+  same_side_share: string;
+  reviewed_at: Date | null;
+  review_outcome: BetAnomalyReviewOutcome | null;
+  review_note: string | null;
+}
+
+export interface BetAnomalyReviewMetrics {
+  flagged: number;
+  reviewed: number;
+  falsePositives: number;
+  falsePositiveRate: number | null;
+}
+
 // Re-export for backwards compatibility
 export type { BetRow };
 
@@ -99,7 +119,7 @@ export async function getBetsByMarketFromDb(
       `SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
          FROM bets
         WHERE market_id = $1
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, bettor DESC
         LIMIT $2 OFFSET $3`,
       [marketId, limit, offset],
     ),
@@ -113,6 +133,74 @@ export async function getBetsByMarketFromDb(
   const totalPages = Math.ceil(total / limit);
 
   return { bets, total, page, limit, totalPages };
+}
+
+/** Returns unresolved anomaly flags for the human-review queue. */
+export async function getUnreviewedBetAnomalies(
+  db: Queryable,
+): Promise<BetAnomalyAlert[]> {
+  const { rows } = await db.query<BetAnomalyAlert>(
+    `SELECT market_id::TEXT AS market_id, window_start, bettor_count,
+            recent_net_amount::TEXT AS recent_net_amount,
+            same_side_share::TEXT AS same_side_share,
+            reviewed_at, review_outcome, review_note
+       FROM bet_anomaly_alerts
+      WHERE reviewed_at IS NULL
+      ORDER BY window_start DESC, market_id DESC`,
+  );
+  return rows;
+}
+
+/** Record a review disposition; alerts never affect market or bet state. */
+export async function reviewBetAnomaly(
+  db: Queryable,
+  marketId: string,
+  windowStart: Date,
+  outcome: BetAnomalyReviewOutcome,
+  note?: string,
+): Promise<void> {
+  const { rows } = await db.query<{ market_id: string }>(
+    `UPDATE bet_anomaly_alerts
+        SET reviewed_at = NOW(), review_outcome = $3, review_note = $4
+      WHERE market_id = $1 AND window_start = $2 AND reviewed_at IS NULL
+      RETURNING market_id::TEXT AS market_id`,
+    [marketId, windowStart, outcome, note ?? null],
+  );
+  if (rows.length === 0) {
+    throw new Error("Bet anomaly alert was not found or has already been reviewed");
+  }
+}
+
+/**
+ * Measures the false-positive rate among adjudicated alerts. Returns null
+ * until at least one alert has been reviewed.
+ */
+export async function getBetAnomalyReviewMetrics(
+  db: Queryable,
+): Promise<BetAnomalyReviewMetrics> {
+  const { rows } = await db.query<{
+    flagged: number;
+    reviewed: number;
+    false_positives: number;
+  }>(
+    `SELECT COUNT(*)::INT AS flagged,
+            COUNT(*) FILTER (
+              WHERE review_outcome IN ('confirmed', 'false_positive')
+            )::INT AS reviewed,
+            COUNT(*) FILTER (WHERE review_outcome = 'false_positive')::INT AS false_positives
+       FROM bet_anomaly_alerts`,
+  );
+  const metrics = rows[0];
+  if (!metrics) {
+    throw new Error("Failed to read bet anomaly review metrics");
+  }
+  return {
+    flagged: metrics.flagged,
+    reviewed: metrics.reviewed,
+    falsePositives: metrics.false_positives,
+    falsePositiveRate:
+      metrics.reviewed === 0 ? null : metrics.false_positives / metrics.reviewed,
+  };
 }
 
 /**

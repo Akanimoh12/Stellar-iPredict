@@ -1,4 +1,4 @@
-import { REQUEST_ID_HEADER } from "./log.js";
+import { REQUEST_ID_HEADER, redactDatabaseUrl } from "./log.js";
 
 export interface AjvValidationIssue { instancePath?: string; message?: string; params?: Record<string, unknown> }
 export interface FastifyErrorLike extends Error { statusCode?: number; code?: string; validation?: AjvValidationIssue[] }
@@ -148,7 +148,7 @@ export function mapError(error: FastifyErrorLike | Error): { statusCode: number;
     }
 
     const code = rawCode === "FST_ERR_VALIDATION" ? "BAD_REQUEST" : (rawCode ?? "BAD_REQUEST");
-    return { statusCode, code, message: error.message || "Request failed" };
+    return { statusCode, code, message: redactDatabaseUrl(error.message || "Request failed") };
   }
   return { statusCode: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" };
 }

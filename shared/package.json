@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {

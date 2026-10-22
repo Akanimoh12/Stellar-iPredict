@@ -32,7 +32,7 @@ indexer/
     event-router.ts     routes a decoded event to its handler
     handlers/           one handler per recognised event type
     rpc/getEvents.ts    getEvents client, cursor pagination, gap detection
-    rpc/retry.ts        RPC retry with exponential backoff + jitter
+    rpc/retry.ts        RPC retry budget (shared retry utility, issue #641)
     config/index.ts     env loading + validation (Zod)
     metrics.ts          in-process counters/gauge
     db.ts               query/close interfaces
@@ -215,6 +215,11 @@ attempt is exhausted, the error propagates; the polling loop logs
 `"poll iteration failed"` and sleeps `POLL_INTERVAL_MS` before trying again.
 The indexer does **not** crash — it keeps looping and resumes automatically
 when the node returns.
+
+The retry *mechanism* is shared with the oracle (`@ipredict/shared`, issue
+#641): one backoff curve, one jitter policy and one rule that decides
+retryability from the failure's type, never from the text of its message.
+`rpc/retry.ts` only states the indexer's budget.
 
 **Manual intervention:** usually none. If a `LedgerGapError` is raised (the RPC
 reports `startLedger` older than its oldest retained ledger), that is a

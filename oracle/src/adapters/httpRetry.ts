@@ -1,4 +1,5 @@
-import { retryAfterFromHeaders, retryDelayMs } from "./http.js";
+import { HTTP_RETRY_CONFIG, RetryTimeoutError, createRetryRunner, type RetryOptions } from "@ipredict/shared";
+import { retryAfterFromHeaders } from "./http.js";
 
 export interface FetchWithRetryOptions {
   /** Injected for testing; defaults to the global fetch. */
@@ -10,10 +11,20 @@ export interface FetchWithRetryOptions {
    * Configure per adapter, since providers differ in latency.
    */
   timeoutMs?: number;
+  /**
+   * Total number of attempts, the first try included.
+   *
+   * The name is historical: the shared retry engine counts *retries* after the
+   * first attempt, so the value is translated here (`attempts - 1`). Keeping the
+   * original meaning means `maxRetries: 1` still asks a provider exactly once
+   * — which is what the health probe relies on.
+   */
   maxRetries?: number;
   /**
-   * Base linear backoff between retries, in ms (attempt * this value). A
-   * provider `Retry-After` on a retryable response replaces this delay.
+   * Base delay of the backoff between retries, in ms. The delay grows
+   * exponentially from it (`base * 2^attempt`), capped at 30 s, and is drawn
+   * with full jitter. A provider `Retry-After` on a retryable response
+   * replaces this delay.
    */
   retryBackoffMs?: number;
   /**
@@ -27,8 +38,11 @@ export interface FetchWithRetryOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
-const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_BACKOFF_MS = 500;
+
+/** The retry engine, configured with the HTTP budget (issue #641). */
+const runHttpRetry = createRetryRunner(HTTP_RETRY_CONFIG);
 
 export class AdapterHttpError extends Error {
   constructor(
@@ -42,13 +56,16 @@ export class AdapterHttpError extends Error {
   }
 }
 
-/** A single attempt, or the whole retry budget, ran out of time. */
-export class AdapterTimeoutError extends Error {
-  constructor(
-    message: string,
-    public readonly scope: "attempt" | "total",
-  ) {
-    super(message);
+/**
+ * A single attempt, or the whole retry budget, ran out of time.
+ *
+ * Extends the shared {@link RetryTimeoutError} so the shared classifier knows
+ * an attempt timeout is transient (worth another try) while a total-budget
+ * timeout is not.
+ */
+export class AdapterTimeoutError extends RetryTimeoutError {
+  constructor(message: string, scope: "attempt" | "total") {
+    super(message, scope);
     this.name = "AdapterTimeoutError";
   }
 }
@@ -57,35 +74,32 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-/** Default total budget: every attempt at full timeout plus all backoff sleeps. */
+/**
+ * Default total budget: every attempt at full timeout plus all backoff sleeps.
+ *
+ * The backoff is exponential, so the sleeps are `base * 2^0`, `base * 2^1`, …
+ * The jitter is full, which means the real delay is at most the ceiling, so
+ * the ceiling sum is the worst case the budget has to cover.
+ */
 export function defaultTotalTimeoutMs(timeoutMs: number, maxRetries: number, retryBackoffMs: number): number {
   let backoff = 0;
-  for (let attempt = 1; attempt < maxRetries; attempt++) backoff += attempt * retryBackoffMs;
+  for (let attempt = 0; attempt < maxRetries - 1; attempt++) backoff += retryBackoffMs * 2 ** attempt;
   return maxRetries * timeoutMs + backoff;
 }
 
 /**
- * Rejects when `ms` elapses. Racing against this guarantees the attempt ends
- * even if the injected/underlying fetch ignores its abort signal.
- */
-function timeoutRace(ms: number, make: () => Error): { promise: Promise<never>; cancel: () => void } {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const promise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(make()), Math.max(0, ms));
-  });
-  // Avoid unhandled rejection noise when the race is won by the real request.
-  promise.catch(() => undefined);
-  return { promise, cancel: () => clearTimeout(timer) };
-}
-
-/**
- * Fetches a URL with a hard per-attempt timeout and linear-backoff retries on
- * transient failures (network errors, timeouts, `429` rate limiting, `5xx`).
- * A timed-out attempt is treated as transient and consumes one retry.
- * Non-retryable client errors (other `4xx`) throw immediately.
+ * Fetches a URL with a hard per-attempt timeout and exponential-backoff
+ * retries on transient failures (network errors, timeouts, `429` rate
+ * limiting, `5xx`). A timed-out attempt is treated as transient and consumes
+ * one retry. Non-retryable client errors (other `4xx`) throw immediately.
+ *
+ * The retry mechanism — the backoff curve, the jitter, the retryability rule
+ * — is the shared utility (issue #641); this module owns the HTTP budget and
+ * the shape of an adapter failure. Retryability is decided by the *type* of
+ * the failure (its status code), never by the text of its message.
  *
  * When a retryable response carries `Retry-After`, the next attempt waits that
- * long instead of following the linear schedule. If the requested wait does
+ * long instead of following the backoff schedule. If the requested wait does
  * not fit in the remaining budget the rate-limit error is thrown at once
  * (with its `retryAfterMs`), rather than retrying before the provider allows.
  *
@@ -101,77 +115,43 @@ export async function fetchWithRetry(
 ): Promise<Response> {
   const fetchFn = options.fetchFn ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const maxAttempts = Math.max(1, options.maxRetries ?? DEFAULT_MAX_ATTEMPTS);
   const retryBackoffMs = options.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
   const totalTimeoutMs =
-    options.totalTimeoutMs ?? defaultTotalTimeoutMs(timeoutMs, maxRetries, retryBackoffMs);
+    options.totalTimeoutMs ?? defaultTotalTimeoutMs(timeoutMs, maxAttempts, retryBackoffMs);
 
-  const deadline = Date.now() + totalTimeoutMs;
-  let lastError: unknown;
+  const retryOptions: RetryOptions<Response> = {
+    // The engine counts retries after the first attempt; the option above
+    // counts attempts in total.
+    maxRetries: maxAttempts - 1,
+    attemptTimeoutMs: timeoutMs,
+    totalTimeoutMs,
+    baseDelayMs: retryBackoffMs,
+    label: url,
+    timeoutError: (message, scope) => new AdapterTimeoutError(message, scope),
+    // The last failure is surfaced as-is, so callers keep seeing the adapter's
+    // own error type instead of a retry wrapper.
+    finalError: (error) => (error instanceof Error ? error : new Error(String(error))),
+  };
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new AdapterTimeoutError(`Total retry budget of ${totalTimeoutMs}ms exhausted for ${url}`, "total");
-    }
-
-    // The attempt may not outlive the overall budget.
-    const attemptMs = Math.min(timeoutMs, remaining);
-    const cappedByTotal = attemptMs < timeoutMs;
-    const controller = new AbortController();
-    const race = timeoutRace(attemptMs, () => {
-      controller.abort();
-      return cappedByTotal
-        ? new AdapterTimeoutError(`Total retry budget of ${totalTimeoutMs}ms exhausted for ${url}`, "total")
-        : new AdapterTimeoutError(`Request to ${url} timed out after ${timeoutMs}ms`, "attempt");
-    });
-
-    try {
-      const attemptWork = (async () => {
-        const response = await fetchFn(url, { ...init, signal: controller.signal });
-        if (response.ok) {
-          // Buffer real responses inside the attempt timeout so a stalled body
-          // cannot hang the caller's later `.json()`.
-          if (typeof Response !== "undefined" && response instanceof Response) {
-            const body = await response.arrayBuffer();
-            return new Response(body, {
-              status: response.status,
-              statusText: response.statusText,
-              headers: response.headers,
-            });
-          }
-          return response;
-        }
-        const retryAfterMs = isRetryableStatus(response.status)
-          ? retryAfterFromHeaders(response.headers)
-          : undefined;
-        throw new AdapterHttpError(`Request failed with status ${response.status}`, response.status, retryAfterMs);
-      })();
-      // If the race wins, the losing work must not surface as unhandled.
-      attemptWork.catch(() => undefined);
-
-      return await Promise.race([attemptWork, race.promise]);
-    } catch (error) {
-      if (error instanceof AdapterHttpError && error.status !== undefined && !isRetryableStatus(error.status)) {
-        throw error;
+  return runHttpRetry<Response>(async (_attempt, signal) => {
+    const response = await fetchFn(url, { ...init, signal });
+    if (response.ok) {
+      // Buffer real responses inside the attempt timeout so a stalled body
+      // cannot hang the caller's later `.json()`.
+      if (typeof Response !== "undefined" && response instanceof Response) {
+        const body = await response.arrayBuffer();
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
       }
-      if (error instanceof AdapterTimeoutError && error.scope === "total") {
-        throw error;
-      }
-      lastError = error;
-    } finally {
-      race.cancel();
+      return response;
     }
-
-    if (attempt < maxRetries) {
-      const sleepMs = retryDelayMs(lastError, attempt * retryBackoffMs);
-      if (Date.now() + sleepMs >= deadline) {
-        if (lastError instanceof AdapterHttpError && lastError.retryAfterMs !== undefined) throw lastError;
-        throw new AdapterTimeoutError(`Total retry budget of ${totalTimeoutMs}ms exhausted for ${url}`, "total");
-      }
-      await new Promise((resolve) => setTimeout(resolve, sleepMs));
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    const retryAfterMs = isRetryableStatus(response.status)
+      ? retryAfterFromHeaders(response.headers)
+      : undefined;
+    throw new AdapterHttpError(`Request failed with status ${response.status}`, response.status, retryAfterMs);
+  }, retryOptions);
 }

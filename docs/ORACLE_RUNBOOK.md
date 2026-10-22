@@ -437,6 +437,12 @@ const tx = new TransactionBuilder(sourceAccount, { fee: "100000", networkPassphr
 | `SubmitFailed` | Submission failed after all retries | `submit-with-retry.ts` |
 | `AggregatorDown` | Aggregator process not running | Infrastructure monitor |
 
+Both retry paths in the oracle — `adapters/httpRetry.ts` (provider HTTP
+calls) and `aggregator/submit-with-retry.ts` (on-chain submissions) — use the
+shared retry utility in `@ipredict/shared` (issue #641). The backoff curve, the
+jitter and the rule that decides retryability from the failure's type are the
+same everywhere; each call site only states its own budget.
+
 Webhook alerts POST JSON to `FINALIZE_WEBHOOK_URL`. A webhook failure is
 logged and swallowed — it never blocks the poll loop.
 

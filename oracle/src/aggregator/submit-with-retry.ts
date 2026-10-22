@@ -1,3 +1,4 @@
+import { SUBMIT_RETRY_CONFIG, createRetryRunner, type RetryOptions as SharedRetryOptions } from "@ipredict/shared";
 import type { Logger } from "../log.js";
 
 export interface RetryOptions {
@@ -11,28 +12,23 @@ export interface RetryOptions {
   logger?: Logger;
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
- * Full-jitter exponential backoff (AWS-style): delay is a random value in
- * [0, min(maxDelayMs, baseDelayMs * 2^attempt)) rather than the full
- * exponential value, so retries from concurrent failures don't line up and
- * hammer the RPC endpoint at the same instant.
+ * Full-jitter exponential backoff (AWS-style).
+ *
+ * Re-exported from the shared retry utility (issue #641) so the delay curve
+ * that every service uses can be asserted from here too.
  */
-export function computeBackoffDelayMs(
-  attempt: number,
-  baseDelayMs: number,
-  maxDelayMs: number,
-  random: () => number = Math.random,
-): number {
-  const cappedExponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
-  return Math.floor(random() * cappedExponential);
-}
+export { computeBackoffDelayMs } from "@ipredict/shared";
+
+/** The retry engine, configured with the on-chain submission budget. */
+const runSubmitRetry = createRetryRunner(SUBMIT_RETRY_CONFIG);
 
 /**
  * Retries a single market's on-chain submission with exponential backoff.
+ *
+ * The retry *mechanism* — the backoff curve, the jitter, the retryability
+ * rule — is the shared utility (issue #641); this function owns what makes a
+ * submission different from a plain request: the on-chain state check.
  *
  * On-chain state is checked after every failure and again immediately before
  * every retry, so a submission that actually landed (e.g. it timed out on the
@@ -47,10 +43,9 @@ export async function submitWithRetry(
   isAlreadyFinalized: (marketId: string) => Promise<boolean>,
   options: RetryOptions,
 ): Promise<boolean> {
-  const sleep = options.sleep ?? defaultSleep;
-  const random = options.random ?? Math.random;
   const logger = options.logger;
   let lastError: unknown;
+  let attempts = 0;
 
   /** `undefined` means the on-chain state could not be determined. */
   const checkFinalized = async (attempt: number): Promise<boolean | undefined> => {
@@ -63,43 +58,67 @@ export async function submitWithRetry(
     }
   };
 
-  for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
-    if (attempt > 0) {
-      const delayMs = computeBackoffDelayMs(attempt - 1, options.baseDelayMs, options.maxDelayMs, random);
-      await sleep(delayMs);
-
+  const retryOptions: SharedRetryOptions<boolean> = {
+    maxRetries: options.maxRetries,
+    baseDelayMs: options.baseDelayMs,
+    maxDelayMs: options.maxDelayMs,
+    sleep: options.sleep,
+    random: options.random,
+    /**
+     * Consulted after the backoff sleep, before the next submission.
+     *
+     * This is where the on-chain state decides whether another submission may
+     * be sent: `stop` when the market is already finalized, `skip` while the
+     * state is unknown.
+     */
+    beforeRetry: async ({ attempt }) => {
       const finalized = await checkFinalized(attempt);
       if (finalized) {
         logger?.info("submit already finalized on-chain before retry", { marketId, attempt });
-        return true;
+        return { action: "stop", value: true };
       }
       if (finalized === undefined) {
         logger?.warn("skipping retry: on-chain state unknown", { marketId, attempt });
-        continue;
+        return { action: "skip" };
       }
-    }
+      return { action: "retry" };
+    },
+    /**
+     * The last failure is surfaced as-is, so the alert reports the underlying
+     * error rather than a retry wrapper.
+     */
+    finalError: (error, count) => {
+      attempts = count;
+      return error instanceof Error ? error : new Error(String(error));
+    },
+  };
 
-    try {
-      await submit(marketId);
-      logger?.info("submit succeeded", { marketId, attempt });
-      return true;
-    } catch (error) {
-      lastError = error;
-      logger?.warn("submit failed", { marketId, attempt, error });
-
-      if (await checkFinalized(attempt)) {
-        logger?.info("submit already finalized on-chain despite error", { marketId, attempt });
+  try {
+    return await runSubmitRetry<boolean>(async (attempt) => {
+      try {
+        await submit(marketId);
+        logger?.info("submit succeeded", { marketId, attempt: attempt + 1 });
         return true;
+      } catch (error) {
+        lastError = error;
+        logger?.warn("submit failed", { marketId, attempt: attempt + 1, error });
+
+        if (await checkFinalized(attempt + 1)) {
+          logger?.info("submit already finalized on-chain despite error", { marketId, attempt: attempt + 1 });
+          return true;
+        }
+        throw error;
       }
+    }, retryOptions);
+  } catch (error) {
+    // The retry budget is spent.
+    lastError = lastError ?? error;
+    logger?.error("submit failed persistently", { marketId, attempts, error: lastError });
+
+    if (attempts >= options.alertThreshold) {
+      await options.onPersistentFailure?.({ marketId, attempts, error: lastError });
     }
+
+    return false;
   }
-
-  const attempts = options.maxRetries + 1;
-  logger?.error("submit failed persistently", { marketId, attempts, error: lastError });
-
-  if (attempts >= options.alertThreshold) {
-    await options.onPersistentFailure?.({ marketId, attempts, error: lastError });
-  }
-
-  return false;
 }

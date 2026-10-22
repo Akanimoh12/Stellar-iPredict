@@ -11,7 +11,7 @@ const CONNECTION_TIMEOUT_MS = Number.parseInt(
   process.env.DB_CONNECTION_TIMEOUT_MS ?? "5000",
   10,
 );
-const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
+export const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
   process.env.DB_SLOW_QUERY_THRESHOLD_MS ?? "200",
   10,
 );
@@ -279,7 +279,11 @@ export async function queryWithCancel<Row extends object>(
       const result = await client.query<Row>(text, params);
       return result;
     } finally {
-      observeDbQuery(performance.now() - startedAt);
+      const durationMs = performance.now() - startedAt;
+      observeDbQuery(durationMs);
+      if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
+        logSlowQuery({ query: text, durationMs, thresholdMs: SLOW_QUERY_THRESHOLD_MS });
+      }
     }
   } catch (error) {
     if (cancelled) {

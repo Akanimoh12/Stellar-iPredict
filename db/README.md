@@ -495,6 +495,107 @@ The seed is idempotent:
 - Records are inserted with `ON CONFLICT ... DO UPDATE`
 - Safe to run multiple times
 
+## Slow Query Log Analysis (#599)
+
+Once slow-query logging is enabled (via `DB_SLOW_QUERY_THRESHOLD_MS`, default 200ms), raw logs alone are insufficient to prioritize database optimizations. Without aggregation, a query appearing thousands of times looks identical to a one-off outlier. The highest-value optimization target is not the single slowest query, but the query shape consuming the **highest cumulative execution time**.
+
+The repository provides a dedicated analyzer tool ([`scripts/analyze-slow-queries.ts`](../scripts/analyze-slow-queries.ts)) that normalizes SQL statements into query shapes, aggregates execution durations, and ranks them by cumulative time consumed.
+
+### Running Against Production Logs
+
+The script processes both application JSON logs (emitted by `logSlowQuery`) and PostgreSQL engine logs (`log_min_duration_statement`).
+
+```bash
+# 1. Piped from live Docker container logs
+docker compose logs backend | npx tsx scripts/analyze-slow-queries.ts
+
+# 2. Analyzed from a production log file (e.g. Fluent-bit output)
+npx tsx scripts/analyze-slow-queries.ts --file /var/log/ipredict/containers.log
+
+# 3. Output top 5 targets in machine-readable JSON format
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --top 5 --json
+
+# 4. Export aggregated rankings to CSV
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --csv > slow_queries.csv
+
+# 5. Filter for shapes with at least 5 executions taking >= 250ms
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --min-duration 250 --min-calls 5
+```
+
+Or run via npm:
+
+```bash
+npm run analyze:slow-queries -- -f /path/to/logfile.log --top 10
+```
+
+### Report Metrics & Optimization Target Identification
+
+The report calculates:
+- **Calls ($N$):** Total executions observed for this query shape.
+- **Total Time:** Cumulative time consumed ($\sum t$). **This is the primary ranking metric.**
+- **Mean Duration:** Average latency per execution ($\frac{\sum t}{N}$).
+- **Min / Max:** Extreme observed execution times.
+- **Percentiles (p50, p90, p95, p99):** Linear interpolation over up to 4,096 sampled durations per shape. Percentiles are exact up to that limit and estimated above it; counts, total, mean, min, and max use every observation.
+- **% of DB Time:** Proportion of all slow query execution time spent on this shape.
+- **[HIGH IMPACT - TOP 80% CUMULATIVE TIME]:** Automatically flagged shapes that account for 80% of cumulative database workload (Pareto principle).
+
+#### Diagnosing Actionable Targets:
+- **High Call Count + Moderate Latency:** Classic N+1 pattern or un-cached hot path. Resolve with Redis cache-aside or batched `WHERE id IN (?)` queries.
+- **Low Call Count + High Max/p99:** Missing partial index, missing composite sort index, or sequential table scan. Inspect with `EXPLAIN (ANALYZE, BUFFERS)`.
+
+---
+
+### In-Engine Alternative: `pg_stat_statements`
+
+PostgreSQL provides a native extension, `pg_stat_statements`, that tracks query statistics directly within the database engine.
+
+#### Comparison: When to Use Which
+| Feature | `scripts/analyze-slow-queries.ts` | `pg_stat_statements` |
+|---|---|---|
+| **Data Source** | Application JSON logs & engine log files | In-memory PostgreSQL engine shared memory |
+| **Server Restart Required?** | **No** (works out-of-the-box on any logs) | **Yes** (requires `shared_preload_libraries`) |
+| **Historical Forensics** | Excellent (analyzes past files/incident archives) | Volatile (reset on restart or manual clear) |
+| **Overhead** | Zero DB overhead (runs client-side or offline) | Very low (~1-2% CPU overhead in PostgreSQL) |
+| **Threshold Filtering** | Configurable via `--min-duration` and `--min-calls` | Tracks all queries executed by server |
+
+#### Enabling `pg_stat_statements` in PostgreSQL
+
+1. **Configure `postgresql.conf` or Docker command:**
+   `pg_stat_statements` must be preloaded at database server startup.
+
+   In `infra/docker-compose.production.yml` (under `postgres` service):
+   ```yaml
+   command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
+   ```
+
+2. **Restart the PostgreSQL server:**
+   ```bash
+   docker compose restart postgres
+   ```
+
+3. **Create the extension in the database:**
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+   ```
+
+4. **Query the Top Workload Targets:**
+   ```sql
+   SELECT
+     query,
+     calls,
+     round(total_exec_time::numeric, 2) AS total_time_ms,
+     round(mean_exec_time::numeric, 2) AS mean_time_ms,
+     round(min_exec_time::numeric, 2) AS min_time_ms,
+     round(max_exec_time::numeric, 2) AS max_time_ms,
+     round((total_exec_time / sum(total_exec_time) OVER () * 100)::numeric, 1) AS percent_time
+   FROM pg_stat_statements
+   WHERE query NOT ILIKE '%pg_stat_statements%'
+   ORDER BY total_exec_time DESC
+   LIMIT 10;
+   ```
+
+---
+
 ## Contributing
 
 Pick an open issue labelled `area:db`, branch off `implementation-drips`,

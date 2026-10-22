@@ -12,7 +12,8 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test:contract": "vitest run src/api/contract.test.ts src/api/contract-helpers.test.ts src/api/frontend-contract.test.ts"
+    "test:contract": "vitest run src/api/contract.test.ts src/api/contract-helpers.test.ts src/api/frontend-contract.test.ts",
+    "analyze:slow-queries": "tsx ../scripts/analyze-slow-queries.ts"
   },
   "dependencies": {
     "@ipredict/shared": "*",

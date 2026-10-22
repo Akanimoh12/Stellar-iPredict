@@ -1,0 +1,30 @@
+name: 'Setup Node Environment'
+description: 'Shared composite action to setup Node.js, configure cache, and install dependencies'
+inputs:
+  node-version:
+    description: 'Node.js version'
+    required: false
+    default: '22'
+  cache-dependency-path:
+    description: 'Path to lockfile for caching'
+    required: false
+    default: 'package-lock.json'
+  install-deps:
+    description: 'Whether to run npm ci'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js ${{ inputs.node-version }}
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+    - name: Install dependencies
+      if: inputs.install-deps == 'true'
+      shell: bash
+      run: npm ci

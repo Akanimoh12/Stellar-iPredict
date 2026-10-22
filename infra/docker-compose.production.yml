@@ -152,6 +152,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cpus: "1.00"
+    mem_limit: 512m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -214,6 +216,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cpus: "0.75"
+    mem_limit: 512m
     environment:
       <<: [*postgres-url, *redis-url]
       NODE_ENV: production
@@ -266,6 +270,8 @@ services:
       dockerfile: Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-proxy:${PROXY_IMAGE_TAG:-local}"
     restart: always
+    cpus: "0.50"
+    mem_limit: 128m
     environment:
       # Public hostname served with automatic HTTPS. Defaults to localhost,
       # which Caddy serves with an internally-trusted certificate.
@@ -321,6 +327,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cpus: "0.50"
+    mem_limit: 384m
     environment:
       <<: *postgres-url
       NODE_ENV: production
@@ -382,6 +390,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cpus: "0.25"
+    mem_limit: 384m
     # No RESOLVER_KEY and no data-source credentials: the monitor only reads
     # Postgres and posts alerts, so it is given nothing it could sign with.
     environment:

@@ -55,6 +55,9 @@ const cases: { method: "GET" | "POST"; url: string; path: string; status: number
   { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
   { method: "GET", url: `/api/v1/profile/${address}/bets?page=1&limit=20`, path: "/api/v1/profile/{address}/bets", status: 200 },
   ...["/api/oracle/submit", "/api/v1/oracle/submit"].map(path => ({ method: "POST" as const, url: path, path, status: 401 })),
+  // Wallet authentication endpoints (issue #600)
+  { method: "GET", url: `/auth/challenge?address=${address}`, path: "/auth/challenge", status: 200 },
+  { method: "POST", url: "/auth/verify", path: "/auth/verify", status: 400 }, // Returns 400 without valid signature
 ];
 let app: FastifyInstance;
 let rawPayload: unknown;
@@ -83,6 +86,34 @@ async function assertContract(options: InjectOptions, path: string, status: numb
   expect(rawPayload).toBeDefined();
   assertPreservedFields(rawPayload, response.json());
   return response;
+}
+
+async function authenticateWithFreshWallet(server: FastifyInstance) {
+  const keypair = Keypair.random();
+  const challengeResponse = await server.inject({
+    method: "GET",
+    url: `/auth/challenge?address=${keypair.publicKey()}`,
+  });
+  const challenge = challengeResponse.json() as { nonce: string; message: string };
+  const timestampMatch = challenge.message.match(/timestamp:(\d+)/);
+  if (!timestampMatch) throw new Error("Challenge message is missing its timestamp");
+  const signature = Buffer.from(
+    keypair.sign(Buffer.from(challenge.message, "utf8")),
+  ).toString("base64");
+
+  return {
+    address: keypair.publicKey(),
+    response: await server.inject({
+      method: "POST",
+      url: "/auth/verify",
+      payload: {
+        address: keypair.publicKey(),
+        nonce: challenge.nonce,
+        signature,
+        timestamp: Number(timestampMatch[1]),
+      },
+    }),
+  };
 }
 
 describe("OpenAPI contracts on the production server", () => {
@@ -212,6 +243,17 @@ describe("Route authentication registry and enforcement (#548)", () => {
       if (testUrl.includes(":id")) testUrl = testUrl.replace(":id", "1");
       if (testUrl.includes(":address")) testUrl = testUrl.replace(":address", address);
 
+      // Special handling for auth routes that require parameters
+      if (testUrl === "/auth/challenge") {
+        testUrl = `/auth/challenge?address=${address}`;
+      }
+      if (testUrl === "/auth/verify") {
+        const { address: walletAddress, response } = await authenticateWithFreshWallet(app);
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ address: walletAddress });
+        continue;
+      }
+
       const response = await app.inject({
         method: route.method,
         url: testUrl,
@@ -219,5 +261,12 @@ describe("Route authentication registry and enforcement (#548)", () => {
       expect([401, 403]).not.toContain(response.statusCode);
       expect(response.statusCode).toBe(200);
     }
+  });
+
+  it("allows wallet authentication without a pre-existing bearer token", async () => {
+    const { address: walletAddress, response } = await authenticateWithFreshWallet(app);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ address: walletAddress });
   });
 });

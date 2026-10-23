@@ -9,6 +9,7 @@ import compress from "@fastify/compress";
 import { registerApiRoutes } from "./api/index.js";
 import { registerOpenApi } from "./api/openapi.js";
 import { healthRoutes, markShuttingDown } from "./api/health.js";
+import { walletAuthPlugin } from "./auth/walletAuth.js";
 import {
   DEFAULT_CORS_ORIGINS,
   parseCorsOrigins,
@@ -309,6 +310,9 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // Exposure is a deliberate per-environment decision (#603): on outside
   // production, opt-in via OPENAPI_PUBLIC in production.
   registerOpenApi(server, { expose: options.exposeDocs ?? config.OPENAPI_PUBLIC });
+
+  // Wallet authentication plugin (issue #600) - provides /auth/challenge and /auth/verify
+  server.register(walletAuthPlugin);
 
   // Routes go in a plugin registered after registerOpenApi, not directly on the
   // root instance: plugins load in registration order, so this guarantees the

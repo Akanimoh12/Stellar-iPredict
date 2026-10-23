@@ -30,9 +30,71 @@
           "error"
         ],
         "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": {
+                "items": {
+                  "properties": {
+                    "field": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "field",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "message": {
+                "type": "string"
+              },
+              "requestId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ],
+            "type": "object"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
+      "bearerAuth": {
+        "description": "Wallet authentication token from `/auth/verify`",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "oracleApiKey": {
         "description": "Oracle provider API key, for `POST /api/v1/oracle/submit` and `POST /api/oracle/*`.",
         "scheme": "bearer",
@@ -1904,6 +1966,271 @@
         ]
       }
     },
+    "/auth/challenge": {
+      "get": {
+        "description": "Returns a cryptographic nonce that the client must sign with their Stellar private key to prove address ownership. The nonce expires in 300 seconds and can only be used once.",
+        "parameters": [
+          {
+            "description": "Stellar public key address (G...)",
+            "in": "query",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "pattern": "^G[A-Z2-7]{55}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expiresIn": {
+                      "description": "Seconds until nonce expires",
+                      "type": "number"
+                    },
+                    "message": {
+                      "description": "The exact message to sign (for client-side verification)",
+                      "type": "string"
+                    },
+                    "nonce": {
+                      "description": "Base64url-encoded random nonce",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "nonce",
+                    "expiresIn",
+                    "message"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Get an authentication challenge nonce",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/verify": {
+      "post": {
+        "description": "Verifies a signature over the challenge message. On success, returns an authentication token that can be used as a Bearer token for subsequent authenticated requests.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "address": {
+                    "pattern": "^G[A-Z2-7]{55}$",
+                    "type": "string"
+                  },
+                  "nonce": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "signature": {
+                    "description": "Base64-encoded signature",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "timestamp": {
+                    "description": "Unix timestamp from challenge",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "address",
+                  "nonce",
+                  "signature",
+                  "timestamp"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "address": {
+                      "description": "Verified Stellar address",
+                      "type": "string"
+                    },
+                    "expiresIn": {
+                      "description": "Token validity in seconds",
+                      "type": "number"
+                    },
+                    "token": {
+                      "description": "Bearer token for authenticated requests",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "token",
+                    "address",
+                    "expiresIn"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "error": {
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Verify a signed authentication challenge",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "responses": {
@@ -2182,6 +2509,10 @@
     {
       "description": "Oracle provider submissions",
       "name": "oracle"
+    },
+    {
+      "description": "Wallet-based authentication",
+      "name": "auth"
     }
   ]
 }

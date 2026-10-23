@@ -55,6 +55,7 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
       { name: "leaderboard", description: "Player rankings" },
       { name: "stats", description: "Global platform statistics" },
       { name: "oracle", description: "Oracle provider submissions" },
+      { name: "auth", description: "Wallet-based authentication" },
     ],
     components: {
       securitySchemes: {
@@ -62,6 +63,11 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
           type: "http" as const,
           scheme: "bearer",
           description: "Oracle provider API key, for `POST /api/v1/oracle/submit` and `POST /api/oracle/*`.",
+        },
+        bearerAuth: {
+          type: "http" as const,
+          scheme: "bearer",
+          description: "Wallet authentication token from `/auth/verify`",
         },
       },
       schemas: {
@@ -79,6 +85,36 @@ export function buildOpenApiDocument(options: OpenApiOptions = {}) {
                   type: "string",
                   description:
                     "Correlation id for this request. Matches the `x-request-id` response header and the id tagging the corresponding server log line.",
+                },
+              },
+            },
+          },
+        },
+        ErrorResponse: {
+          type: "object",
+          required: ["error"],
+          properties: {
+            type: { type: "string" },
+            title: { type: "string" },
+            status: { type: "integer" },
+            instance: { type: "string" },
+            error: {
+              type: "object",
+              required: ["code", "message", "requestId"],
+              properties: {
+                code: { type: "string" },
+                message: { type: "string" },
+                requestId: { type: "string" },
+                details: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      field: { type: "string" },
+                      message: { type: "string" },
+                    },
+                    required: ["field", "message"],
+                  },
                 },
               },
             },

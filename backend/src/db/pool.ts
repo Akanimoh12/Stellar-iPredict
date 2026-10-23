@@ -1,5 +1,6 @@
 import { Pool, types, type PoolClient, type QueryResult } from "pg";
 import { logSlowQuery, redactDatabaseUrl } from "../lib/log.js";
+import { HttpError } from "../lib/errors.js";
 import { observeDbQuery, recordAbandonedQuery } from "../metrics.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
@@ -315,3 +316,158 @@ async function cancelBackend(
     console.error(`Failed to send pg_cancel_backend(${pid}):`, err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Per-query timeout support (#595)
+// ---------------------------------------------------------------------------
+//
+// Allows setting a tighter statement_timeout for individual queries without
+// affecting the global pool setting. Uses SET LOCAL statement_timeout inside
+// a transaction, which automatically reverts when the transaction ends.
+// This prevents timeout leakage onto pooled connections.
+
+export interface QueryTimeoutOptions {
+  /** Timeout in milliseconds. Must be positive. */
+  timeoutMs: number;
+  /** Route label for metrics, e.g. "GET /api/markets/:id". */
+  route?: string;
+  /** Aborts (typically because the client disconnected) to cancel the query. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Error thrown when a query exceeds its per-query timeout.
+ */
+export class QueryTimeoutError extends HttpError {
+  public readonly timeoutMs: number;
+  public readonly route?: string;
+
+  constructor(timeoutMs: number, route?: string) {
+    super(504, "QUERY_TIMEOUT", `Query timeout after ${timeoutMs}ms${route ? ` (${route})` : ""}`);
+    this.name = "QueryTimeoutError";
+    this.timeoutMs = timeoutMs;
+    this.route = route;
+  }
+}
+
+/**
+ * Run a query with a local statement timeout.
+ *
+ * Uses a transaction with SET LOCAL statement_timeout so the timeout
+ * only applies to this query and automatically reverts. The global
+ * STATEMENT_TIMEOUT_MS remains as a backstop.
+ *
+ * @param targetPool - Pool or client to run the query on
+ * @param text - SQL query text
+ * @param params - Query parameters
+ * @param options - Timeout options (timeoutMs required)
+ * @returns Query result
+ * @throws QueryTimeoutError if the query exceeds the timeout
+ */
+export async function queryWithTimeout<Row extends object>(
+  targetPool: CancellablePool,
+  text: string,
+  params: unknown[] = [],
+  options: QueryTimeoutOptions
+): Promise<QueryResult<Row>> {
+  const { timeoutMs, route, signal } = options;
+
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("timeoutMs must be a positive integer");
+  }
+  if (signal?.aborted) {
+    throw new QueryCancelledError("Query aborted before it started");
+  }
+
+  const client = await targetPool.connect();
+  const startedAt = performance.now();
+  let cancelled = false;
+  let onAbort: (() => void) | undefined;
+
+  try {
+    await client.query("BEGIN");
+    // SET LOCAL only affects the current transaction
+    await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+
+    if (signal) {
+      const { rows } = await client.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid",
+      );
+      const pid = rows[0]?.pid;
+
+      onAbort = () => {
+        cancelled = true;
+        if (pid !== undefined) void cancelBackend(targetPool, pid);
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      if (cancelled) {
+        throw new QueryCancelledError("Query aborted before it started");
+      }
+    }
+
+    const result = await client.query<Row>(text, params);
+    if (onAbort) {
+      signal?.removeEventListener("abort", onAbort);
+      onAbort = undefined;
+    }
+    await client.query("COMMIT");
+
+    const durationMs = performance.now() - startedAt;
+    if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
+      logSlowQuery({
+        query: text,
+        durationMs,
+        thresholdMs: SLOW_QUERY_THRESHOLD_MS,
+      });
+    }
+    observeDbQuery(durationMs);
+
+    return result as QueryResult<Row>;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Failed to roll back a timed query:", rollbackError);
+    }
+    const durationMs = performance.now() - startedAt;
+    observeDbQuery(durationMs);
+
+    if (cancelled) {
+      recordAbandonedQuery(route);
+      throw new QueryCancelledError("Query cancelled: client disconnected");
+    }
+    // Check if it's a statement_timeout error (SQLSTATE 57014)
+    if (isStatementTimeoutError(error)) {
+      throw new QueryTimeoutError(timeoutMs, route);
+    }
+    throw error;
+  } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    client.release();
+  }
+}
+
+/**
+ * Check if an error is a Postgres statement_timeout (SQLSTATE 57014).
+ */
+function isStatementTimeoutError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return String((error as { code: unknown }).code) === "57014";
+  }
+  return false;
+}
+
+/**
+ * Default fast query timeout for read endpoints (2 seconds).
+ * Override per endpoint as needed.
+ */
+export const FAST_QUERY_TIMEOUT_MS = 2000;
+
+/**
+ * Default standard query timeout for write endpoints (10 seconds).
+ */
+export const STANDARD_QUERY_TIMEOUT_MS = 10000;

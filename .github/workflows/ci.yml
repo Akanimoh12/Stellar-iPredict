@@ -447,10 +447,14 @@ jobs:
 
       - name: Run dependency vulnerability scan (Backend, Oracle, Indexer, DB, Frontend, Shared)
         run: |
+          # audit-ci applies the policy in audit-ci.jsonc, which is where an
+          # accepted risk has to be recorded with its justification, GHSA id
+          # and expiry date. A bare `npm audit` cannot express that, so the one
+          # advisory with no upstream fix would keep this job red forever.
           # The root lockfile covers all backend workspaces; frontend is separate.
-          npm audit --audit-level=high
+          npx audit-ci@^7 --config ./audit-ci.jsonc
           cd frontend
-          npm audit --audit-level=high
+          npx audit-ci@^7 --config ../audit-ci.jsonc
 
   # ─── Job 9: TypeScript Typecheck across all workspaces ───────────────────────
   typecheck:

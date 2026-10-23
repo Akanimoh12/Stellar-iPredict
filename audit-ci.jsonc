@@ -1,9 +1,26 @@
 {
-  "$schema": "https://raw.githubusercontent.com/IBM/audit-ci/main/schema.json",
+  "$schema": "https://raw.githubusercontent.com/IBM/audit-ci/main/docs/schema.json",
   "high": true,
   "package-managers": ["npm"],
   "allowlist": [
-    // Documented suppressions path for accepted risks:
-    // Suppressions require explicit documented justification, GHSA ID, and an expiry date.
+    // braces — stack-exhaustion DoS through deeply nested glob patterns.
+    //
+    // npm reports the vulnerable range as "*" and 3.0.3 is the newest release,
+    // so there is no version to upgrade to and an `overrides` pin cannot help.
+    // It is also unavoidable while `eslint-config-next` is installed: even
+    // @next/eslint-plugin-next 16.4.2 (needed by `next lint`) depends on
+    // fast-glob 3.3.1 -> micromatch -> braces.
+    //
+    // Every path is build/lint tooling — Tailwind's file watcher and the ESLint
+    // toolchain — never the shipped frontend bundle or the API server.
+    // Exploiting it requires feeding attacker-controlled glob patterns to those
+    // dev-only tools.
+    {
+      "GHSA-vfj7-8cjw-p6xm": {
+        "active": true,
+        "notes": "No patched braces release exists (vulnerable range \"*\"); reached only through Tailwind's watcher and the `next lint` toolchain. Re-evaluate at expiry.",
+        "expiry": "2027-01-31"
+      }
+    }
   ]
 }

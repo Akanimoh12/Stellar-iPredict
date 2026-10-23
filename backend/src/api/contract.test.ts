@@ -88,6 +88,34 @@ async function assertContract(options: InjectOptions, path: string, status: numb
   return response;
 }
 
+async function authenticateWithFreshWallet(server: FastifyInstance) {
+  const keypair = Keypair.random();
+  const challengeResponse = await server.inject({
+    method: "GET",
+    url: `/auth/challenge?address=${keypair.publicKey()}`,
+  });
+  const challenge = challengeResponse.json() as { nonce: string; message: string };
+  const timestampMatch = challenge.message.match(/timestamp:(\d+)/);
+  if (!timestampMatch) throw new Error("Challenge message is missing its timestamp");
+  const signature = Buffer.from(
+    keypair.sign(Buffer.from(challenge.message, "utf8")),
+  ).toString("base64");
+
+  return {
+    address: keypair.publicKey(),
+    response: await server.inject({
+      method: "POST",
+      url: "/auth/verify",
+      payload: {
+        address: keypair.publicKey(),
+        nonce: challenge.nonce,
+        signature,
+        timestamp: Number(timestampMatch[1]),
+      },
+    }),
+  };
+}
+
 describe("OpenAPI contracts on the production server", () => {
   it("covers every documented and registered operation", async () => {
     const spec = await getOpenApiSpec(app);
@@ -220,14 +248,9 @@ describe("Route authentication registry and enforcement (#548)", () => {
         testUrl = `/auth/challenge?address=${address}`;
       }
       if (testUrl === "/auth/verify") {
-        // /auth/verify returns 400 without valid signature, but not 401/403
-        const response = await app.inject({
-          method: route.method,
-          url: testUrl,
-          payload: { address, nonce: "test", signature: "invalid", timestamp: Math.floor(Date.now() / 1000) },
-        });
-        expect([401, 403]).not.toContain(response.statusCode);
-        expect(response.statusCode).toBe(400);
+        const { address: walletAddress, response } = await authenticateWithFreshWallet(app);
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ address: walletAddress });
         continue;
       }
 
@@ -238,5 +261,12 @@ describe("Route authentication registry and enforcement (#548)", () => {
       expect([401, 403]).not.toContain(response.statusCode);
       expect(response.statusCode).toBe(200);
     }
+  });
+
+  it("allows wallet authentication without a pre-existing bearer token", async () => {
+    const { address: walletAddress, response } = await authenticateWithFreshWallet(app);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ address: walletAddress });
   });
 });

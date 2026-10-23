@@ -438,7 +438,7 @@ export async function* iterateCouncilAudit(pool: QueryablePool): AsyncGenerator<
 
     // `market_id` is TEXT on adapter_raw_payloads and BIGINT on the other two
     // tables, so each lookup casts the id list to match its column.
-    const marketIds = finalized.rows.map((row) => row.market_id);
+    const marketIds = finalized.rows.map((row: FinalizedMarketRow) => row.market_id);
 
     const votes = await pool.query<CouncilVoteRow>(
       `SELECT market_id::text AS market_id, member, outcome
@@ -518,6 +518,31 @@ export async function collectCouncilAudit(pool: QueryablePool): Promise<CouncilA
 
 export type AuditFormat = "csv" | "json" | "raw-csv";
 
+/** Snapshot of an in-flight audit export, delivered to {@link StreamCouncilAuditOptions.onProgress}. */
+export interface AuditExportProgress {
+  /** Number of audit records serialised so far. */
+  records: number;
+  /** UTF-8 bytes of export produced so far (including the header/closing syntax). */
+  bytes: number;
+  /** Milliseconds elapsed since serialisation started. */
+  elapsedMs: number;
+  /** True once every chunk, including the closing syntax, has been produced. */
+  done: boolean;
+}
+
+export interface StreamCouncilAuditOptions {
+  /**
+   * Called after each chunk is produced so long exports can show progress.
+   *
+   * Progress is deliberately not written to stdout: stdout carries the export
+   * itself, and mixing the two would corrupt a redirected file. Callers should
+   * render this on stderr.
+   */
+  onProgress?: (progress: AuditExportProgress) => void;
+  /** Clock override; mainly used to keep progress tests deterministic. */
+  now?: () => number;
+}
+
 /**
  * Serialises the council audit in the requested format as it is read, yielding
  * the output in chunks so a large export never has to be held in memory whole.
@@ -531,27 +556,47 @@ export type AuditFormat = "csv" | "json" | "raw-csv";
 export async function* streamCouncilAudit(
   pool: QueryablePool,
   format: AuditFormat,
+  options: StreamCouncilAuditOptions = {},
 ): AsyncGenerator<string> {
+  const { onProgress, now = Date.now } = options;
+  const startedAt = now();
+  let records = 0;
+  let bytes = 0;
+
+  const track = (chunk: string): string => {
+    bytes += Buffer.byteLength(chunk, "utf8");
+    return chunk;
+  };
+  const report = (done: boolean): void => {
+    onProgress?.({ records, bytes, elapsedMs: now() - startedAt, done });
+  };
+
   if (format === "csv" || format === "raw-csv") {
     const isRaw = format === "raw-csv";
-    yield `${(isRaw ? RAW_CSV_COLUMNS : CSV_COLUMNS).join(",")}\n`;
+    yield track(`${(isRaw ? RAW_CSV_COLUMNS : CSV_COLUMNS).join(",")}\n`);
+    report(false);
     for await (const record of iterateCouncilAudit(pool)) {
       const lines = isRaw ? rawPayloadCsvRows(record) : [auditCsvRow(record)];
-      for (const line of lines) yield `${line}\n`;
+      for (const line of lines) yield track(`${line}\n`);
+      records += 1;
+      report(false);
     }
+    report(true);
     return;
   }
 
   // Matches JSON.stringify(records, null, 2): each record is indented one level
   // inside the array, and the closing bracket sits on its own line.
-  yield "[";
-  let count = 0;
+  yield track("[");
+  report(false);
   for await (const record of iterateCouncilAudit(pool)) {
     const entry = JSON.stringify(record, null, 2).replace(/\n/g, "\n  ");
-    yield `${count === 0 ? "\n" : ",\n"}  ${entry}`;
-    count += 1;
+    yield track(`${records === 0 ? "\n" : ",\n"}  ${entry}`);
+    records += 1;
+    report(false);
   }
-  yield count === 0 ? "]" : "\n]";
+  yield track(records === 0 ? "]" : "\n]");
+  report(true);
 }
 
 /**

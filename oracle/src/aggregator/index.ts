@@ -13,6 +13,13 @@
  * to avoid pulling in heavy transitive dependencies like `@stellar/stellar-sdk` or `pg`.
  */
 
+// ── Alerts ──────────────────────────────────────────────────────────────────
+export {
+  createBetPatternAlertSender,
+  type BetPatternAlert,
+  type BetPatternAlertSender,
+} from "./alert.js";
+
 // ── Aggregator Runner & Lifecycle ───────────────────────────────────────────
 export {
   runAggregator,

@@ -580,7 +580,7 @@ describe("resolveMarket diagnosis", () => {
       fetchOutcome: async () => ({ outcome: true, confidence: 1, raw: {} }),
     };
 
-    const result = await resolveMarket(cryptoMarket(), [working]);
+    const result = await resolveMarket(cryptoMarket(), [working], { minAgreement: 1 });
 
     expect(result.status).toBe("resolved");
     expect(result.reason?.code).toBe("resolved");

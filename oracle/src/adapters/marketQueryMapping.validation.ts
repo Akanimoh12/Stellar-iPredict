@@ -15,37 +15,76 @@ export function cloneMarketQueryMapping(mapping: MarketQueryMapping): MarketQuer
   };
 }
 
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function daysInMonth(year: number, month: number): number {
+  // Day 0 of the next month is the last day of this one. setUTCFullYear avoids
+  // the Date constructor's special-case mapping of years 0-99 to 1900-1999.
+  const date = new Date(0);
+  date.setUTCFullYear(year, month, 0);
+  return date.getUTCDate();
+}
+
+function assertCalendarDate(year: number, month: number, day: number): void {
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+    throw new Error("date is not a valid calendar date; it must be timezone-qualified");
+  }
+}
+
+/**
+ * Normalises an ISO-8601 date or timezone-qualified date-time to UTC.
+ *
+ * A bare date is interpreted as UTC midnight, matching how providers index
+ * historical data. A date-time without an explicit `Z`/offset is rejected
+ * rather than guessed from the host timezone: the same mapping must resolve to
+ * the same instant on every machine.
+ */
 function normalizeDate(value: string): string {
-  const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(value);
-  const dateTime =
-    /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/i.exec(value);
-  const calendarDate = dateOnly?.[1] ?? dateTime?.[1];
-  const calendarDateValue = calendarDate ? new Date(`${calendarDate}T00:00:00.000Z`) : undefined;
-
-  if (
-    !calendarDate ||
-    !calendarDateValue ||
-    !Number.isFinite(calendarDateValue.getTime()) ||
-    calendarDateValue.toISOString().slice(0, 10) !== calendarDate
-  ) {
-    throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
-  }
-
+  const dateOnly = DATE_ONLY.exec(value);
   if (dateOnly) {
-    return `${calendarDate}T00:00:00.000Z`;
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    assertCalendarDate(year, month, day);
+    const date = new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(0, 0, 0, 0);
+    return date.toISOString();
   }
 
-  if (
-    !dateTime ||
-    Number(dateTime[2]) > 23 ||
-    Number(dateTime[3]) > 59 ||
-    Number(dateTime[4]) > 59 ||
-    !Number.isFinite(Date.parse(value))
-  ) {
-    throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
+  const dateTime = DATE_TIME.exec(value);
+  if (!dateTime) {
+    throw new Error(
+      "date must be an ISO-8601 date or a timezone-qualified date-time",
+    );
   }
 
-  return new Date(value).toISOString();
+  const year = Number(dateTime[1]);
+  const month = Number(dateTime[2]);
+  const day = Number(dateTime[3]);
+  const hour = Number(dateTime[4]);
+  const minute = Number(dateTime[5]);
+  const second = dateTime[6] === undefined ? 0 : Number(dateTime[6]);
+  assertCalendarDate(year, month, day);
+  if (hour > 23 || minute > 59 || second > 59) {
+    throw new Error("date-time is outside the valid clock range; it must be timezone-qualified");
+  }
+
+  const offset = dateTime[8];
+  if (offset !== "Z") {
+    const [offsetHours, offsetMinutes] = offset.slice(1).split(":").map(Number);
+    if (offsetHours > 23 || offsetMinutes > 59) {
+      throw new Error("date-time has an invalid UTC offset; it must be timezone-qualified");
+    }
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("date is not a valid timezone-qualified ISO-8601 date-time");
+  }
+  return parsed.toISOString();
 }
 
 /**
@@ -87,12 +126,12 @@ export function validateMarketQueryMapping(input: MarketQueryMappingInput): Mark
     throw new Error("Market query mapping comparator must be gte, lte, or eq");
   }
 
-  let date: string | undefined;
+  let normalizedDate: string | undefined;
   if (input.date !== undefined) {
     if (typeof input.date !== "string") {
-      throw new Error("Market query mapping date must be a valid ISO-8601 date or timezone-qualified date-time");
+      throw new Error("Market query mapping date must be a string");
     }
-    date = normalizeDate(input.date);
+    normalizedDate = normalizeDate(input.date);
   }
 
   if (
@@ -128,7 +167,7 @@ export function validateMarketQueryMapping(input: MarketQueryMappingInput): Mark
     ...input,
     marketId: input.marketId.trim(),
     asset: input.asset?.trim(),
-    date,
+    date: normalizedDate,
     source: input.source?.trim(),
   });
 }

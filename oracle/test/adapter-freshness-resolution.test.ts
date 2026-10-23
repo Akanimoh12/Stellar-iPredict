@@ -45,7 +45,7 @@ describe("stale quotes do not resolve markets at full confidence", () => {
     });
     const reviewQueue = new InMemoryReviewQueue();
 
-    const result = await resolveMarket(market(), [adapter], { reviewQueue });
+    const result = await resolveMarket(market(), [adapter], { reviewQueue, minAgreement: 1 });
 
     expect(result.sources[0]!.confidence).toBeLessThan(CATEGORY_MIN_CONFIDENCE);
     expect(result.confidence).toBeLessThan(CATEGORY_MIN_CONFIDENCE);
@@ -67,7 +67,7 @@ describe("stale quotes do not resolve markets at full confidence", () => {
     const result = await resolveMarket(
       market({ params: { symbol: "BTC", comparator: "gte", threshold: 50_000 } }),
       [adapter],
-      { reviewQueue },
+      { reviewQueue, minAgreement: 1 },
     );
 
     expect(result.status).toBe("review");
@@ -81,7 +81,7 @@ describe("stale quotes do not resolve markets at full confidence", () => {
     });
     const reviewQueue = new InMemoryReviewQueue();
 
-    const result = await resolveMarket(market(), [adapter], { reviewQueue });
+    const result = await resolveMarket(market(), [adapter], { reviewQueue, minAgreement: 1 });
 
     expect(result.status).toBe("resolved");
     expect(result.outcome).toBe(true);
@@ -102,6 +102,7 @@ describe("stale quotes do not resolve markets at full confidence", () => {
 
     const result = await resolveMarket(market(), [primary, fallback], {
       reviewQueue: new InMemoryReviewQueue(),
+      minAgreement: 1,
     });
 
     expect(result.status).toBe("resolved");

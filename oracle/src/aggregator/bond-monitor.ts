@@ -73,10 +73,10 @@ export async function checkBondSpendFromDb(
         AND COALESCE(challenged_at, created_at) <= $2`,
     [new Date(now.getTime() - 60 * 60 * 1_000), now],
   );
-  const rawHourlySpend = result.rows[0]?.hourly_spend;
-  if (rawHourlySpend === undefined || rawHourlySpend === null) {
-    throw new Error("hourly bond spend query returned no aggregate value");
-  }
+  // The aggregate always returns one row in Postgres, but treating an absent
+  // value as zero keeps a degraded/empty result from stopping the whole
+  // monitor cycle.
+  const rawHourlySpend = result.rows[0]?.hourly_spend ?? "0";
   const hourlySpend = BigInt(rawHourlySpend);
   const alertAt = (
     options.hourlySpendLimit * BigInt(options.alertThresholdPercent) + 99n

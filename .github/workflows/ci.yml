@@ -520,7 +520,10 @@ jobs:
 
       - name: Build Backend image
         run: |
-          docker build -t ipredict-backend:test -f backend/Dockerfile backend/
+          # Context is the repository root: the backend imports the
+          # @ipredict/shared workspace package, which only the root lockfile
+          # resolves.
+          docker build -t ipredict-backend:test -f backend/Dockerfile .
 
       - name: Scan Backend image with Trivy
         uses: aquasecurity/trivy-action@master

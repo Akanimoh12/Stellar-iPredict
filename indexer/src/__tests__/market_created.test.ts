@@ -70,4 +70,34 @@ describe("market_created handler", () => {
     );
     expect(redis.del).toHaveBeenCalledWith("ipredict:v1:markets:all", "ipredict:v1:markets:active");
   });
+
+  it("sanitizes market text and image URLs before persistence", async () => {
+    const db: DbClient = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) };
+    const redis: RedisClient = { del: vi.fn().mockResolvedValue(3) };
+    const question = `<script>alert(1)</script>${"x".repeat(600)}`;
+
+    await handleMarketCreatedEvent(
+      sampleEvent({
+        market_id: 8,
+        question,
+        category: "Crypto",
+        end_time: 1798675200,
+        creator: CREATOR,
+        image_url: "javascript:alert(1)",
+      }),
+      db,
+      redis,
+    );
+
+    const marketWrite = db.query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO markets"),
+    );
+    if (!marketWrite || !Array.isArray(marketWrite[1])) {
+      throw new Error("Market insert was not issued with query parameters");
+    }
+    const values = marketWrite[1];
+    expect(values[1]).toBe(`alert(1)${"x".repeat(492)}`);
+    expect(values[2]).toBeNull();
+    expect(values[1]).not.toMatch(/[<>]/);
+  });
 });

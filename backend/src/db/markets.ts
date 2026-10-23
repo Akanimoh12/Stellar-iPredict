@@ -218,7 +218,7 @@ export async function getMarkets(
   const total = rows.length > 0 ? Number(rows[0].total_count) : await countWhenEmptyPage(whereSql, baseValues, db);
 
   return {
-    rows: rows.map(({ total_count: _total_count, ...row }) => row as MarketRow),
+    rows: sanitizeMarketRows(rows.map(({ total_count: _total_count, ...row }) => row as MarketRow)),
     total,
     page,
     limit,
@@ -261,7 +261,7 @@ export async function getMarketById(
   `;
 
   const { rows } = await db.query<MarketRow>(query, [id]);
-  return rows[0] ?? null;
+  return rows[0] ? sanitizeMarketRow(rows[0]) : null;
 }
 
 // ── Resolution-delay detection (issue #645) ──────────────────────────────────

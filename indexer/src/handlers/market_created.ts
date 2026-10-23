@@ -2,6 +2,11 @@ import { parseEventPayload, type MarketCreatedPayload } from "../schemas.js";
 import { invalidateOnMarketCreated } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
+import {
+  sanitizeMarketQuestion,
+  sanitizeMarketCategory,
+  sanitizeImageUrl,
+} from "../lib/sanitize.js";
 
 export const MARKET_CREATED_TOPIC = ["mkt", "created"] as const;
 
@@ -30,6 +35,11 @@ export async function handleMarketCreatedEvent(
   });
   if (!inserted) return payload;
 
+  // Sanitize all text fields at the boundary before storage
+  const sanitizedQuestion = sanitizeMarketQuestion(payload.question);
+  const sanitizedCategory = sanitizeMarketCategory(payload.category);
+  const sanitizedImageUrl = sanitizeImageUrl(payload.image_url);
+
   await db.query(
     `INSERT INTO markets (id, question, image_url, category, end_time, creator, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -42,9 +52,9 @@ export async function handleMarketCreatedEvent(
        updated_at = NOW()`,
     [
       payload.market_id,
-      payload.question,
-      payload.image_url ?? null,
-      payload.category,
+      sanitizedQuestion,
+      sanitizedImageUrl,
+      sanitizedCategory,
       payload.end_time,
       payload.creator,
     ],

@@ -1,9 +1,11 @@
-import { pool } from "./pool.js";
+import { getClient, pool } from "./pool.js";
 
 export interface HealthCheckResult {
   ok: boolean;
   latencyMs?: number;
   error?: string;
+  /** For write checks: distinguishes read-only from fully unavailable */
+  readOnly?: boolean;
 }
 
 export interface RetryOptions {
@@ -22,16 +24,16 @@ const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
 
 /**
  * Pings the database to check connectivity and measure latency.
- * 
+ *
  * @returns Health check result with ok status and latency in milliseconds
  */
 export async function pingDb(): Promise<HealthCheckResult> {
   const start = Date.now();
-  
+
   try {
     await pool.query("SELECT 1");
     const latencyMs = Date.now() - start;
-    
+
     return {
       ok: true,
       latencyMs,
@@ -42,6 +44,88 @@ export async function pingDb(): Promise<HealthCheckResult> {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Checks database write capability by attempting a write and rolling back.
+ *
+ * A no-op update against a permanent table verifies the database accepts
+ * writes without changing rows or leaving residue.
+ *
+ * @returns Health check result with ok status, latency, and readOnly flag
+ */
+export async function checkWriteCapability(): Promise<HealthCheckResult> {
+  const start = Date.now();
+  let client: Awaited<ReturnType<typeof getClient>> | undefined;
+
+  try {
+    client = await getClient();
+    await client.query("BEGIN");
+
+    // A no-op update still requires write access to a permanent table.
+    await client.query("UPDATE markets SET updated_at = updated_at WHERE FALSE");
+    await client.query("ROLLBACK");
+
+    const latencyMs = Date.now() - start;
+
+    return {
+      ok: true,
+      latencyMs,
+      readOnly: false,
+    };
+  } catch (error) {
+    // Ensure we roll back on error too
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Failed to roll back the database write health check:", rollbackError);
+      }
+    }
+
+    const latencyMs = Date.now() - start;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // Check for read-only error (SQLSTATE 25006 or similar)
+    const isReadOnly = isReadOnlyError(error);
+
+    return {
+      ok: false,
+      latencyMs,
+      error: errorMessage,
+      readOnly: isReadOnly,
+    };
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
+
+/**
+ * Check if an error indicates a read-only database.
+ * SQLSTATE 25006 = read_only_sql_transaction
+ * Read-only recovery and standby messages cover other PostgreSQL variants.
+ */
+function isReadOnlyError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null) {
+    const err = error as { code?: unknown; message?: unknown };
+    if (err.code === "25006") {
+      return true;
+    }
+    if (typeof err.message === "string") {
+      const msg = err.message.toLowerCase();
+      if (
+        msg.includes("read-only") ||
+        msg.includes("read only") ||
+        msg.includes("recovery mode") ||
+        msg.includes("standby")
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Upper bound on how long a single readiness check may take. */

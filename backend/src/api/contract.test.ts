@@ -55,6 +55,9 @@ const cases: { method: "GET" | "POST"; url: string; path: string; status: number
   { method: "GET", url: `/api/v1/profile/${address}`, path: "/api/v1/profile/{address}", status: 200 },
   { method: "GET", url: `/api/v1/profile/${address}/bets?page=1&limit=20`, path: "/api/v1/profile/{address}/bets", status: 200 },
   ...["/api/oracle/submit", "/api/v1/oracle/submit"].map(path => ({ method: "POST" as const, url: path, path, status: 401 })),
+  // Wallet authentication endpoints (issue #600)
+  { method: "GET", url: `/auth/challenge?address=${address}`, path: "/auth/challenge", status: 200 },
+  { method: "POST", url: "/auth/verify", path: "/auth/verify", status: 400 }, // Returns 400 without valid signature
 ];
 let app: FastifyInstance;
 let rawPayload: unknown;
@@ -211,6 +214,22 @@ describe("Route authentication registry and enforcement (#548)", () => {
       let testUrl = route.url;
       if (testUrl.includes(":id")) testUrl = testUrl.replace(":id", "1");
       if (testUrl.includes(":address")) testUrl = testUrl.replace(":address", address);
+
+      // Special handling for auth routes that require parameters
+      if (testUrl === "/auth/challenge") {
+        testUrl = `/auth/challenge?address=${address}`;
+      }
+      if (testUrl === "/auth/verify") {
+        // /auth/verify returns 400 without valid signature, but not 401/403
+        const response = await app.inject({
+          method: route.method,
+          url: testUrl,
+          payload: { address, nonce: "test", signature: "invalid", timestamp: Math.floor(Date.now() / 1000) },
+        });
+        expect([401, 403]).not.toContain(response.statusCode);
+        expect(response.statusCode).toBe(400);
+        continue;
+      }
 
       const response = await app.inject({
         method: route.method,

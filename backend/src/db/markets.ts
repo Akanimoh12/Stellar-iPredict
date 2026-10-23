@@ -1,6 +1,7 @@
 import { Pool, types } from "pg";
 import type { FilterableMarketCategory } from "@ipredict/shared";
 import type { MarketRow } from "./types.js";
+import { sanitizeForHtmlOutput } from "../lib/sanitize.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
 types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
@@ -30,6 +31,28 @@ export type GetMarketsResult = {
 export type Queryable = {
   query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
 };
+
+/**
+ * Sanitize a MarketRow for safe output (defense in depth).
+ * Input should already be sanitized at write time, but this ensures
+ * even legacy or directly-inserted data is safe.
+ */
+export function sanitizeMarketRow(row: MarketRow): MarketRow {
+  return {
+    ...row,
+    question: sanitizeForHtmlOutput(row.question),
+    category: sanitizeForHtmlOutput(row.category) as MarketRow["category"],
+    image_url: row.image_url ? sanitizeForHtmlOutput(row.image_url) : null,
+    creator: sanitizeForHtmlOutput(row.creator),
+  };
+}
+
+/**
+ * Sanitize multiple market rows.
+ */
+export function sanitizeMarketRows(rows: MarketRow[]): MarketRow[] {
+  return rows.map(sanitizeMarketRow);
+}
 
 let pool: Pool | undefined;
 
@@ -189,7 +212,7 @@ export async function getMarkets(
   const total = rows.length > 0 ? Number(rows[0].total_count) : await countWhenEmptyPage(whereSql, baseValues, db);
 
   return {
-    rows: rows.map(({ total_count: _total_count, ...row }) => row as MarketRow),
+    rows: sanitizeMarketRows(rows.map(({ total_count: _total_count, ...row }) => row as MarketRow)),
     total,
     page,
     limit,
@@ -232,7 +255,7 @@ export async function getMarketById(
   `;
 
   const { rows } = await db.query<MarketRow>(query, [id]);
-  return rows[0] ?? null;
+  return rows[0] ? sanitizeMarketRow(rows[0]) : null;
 }
 
 // ── Resolution-delay detection (issue #645) ──────────────────────────────────

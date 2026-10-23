@@ -26,7 +26,10 @@ describe("resolution provenance", () => {
   it("stores and retrieves the sources and decision", async () => {
     const store = new InMemoryProvenanceStore();
 
-    await resolveMarket(market, [adapter({ value: 123 })], { provenanceStore: store });
+    await resolveMarket(market, [adapter({ value: 123 })], {
+      provenanceStore: store,
+      minAgreement: 1,
+    });
 
     expect(await store.get("42")).toMatchObject({
       marketId: "42",
@@ -46,6 +49,7 @@ describe("resolution provenance", () => {
       sourceUrl: "https://example.test/result?api_key=secret",
     })], {
       provenanceStore: store,
+      minAgreement: 1,
     });
 
     const stored = await store.get("42");

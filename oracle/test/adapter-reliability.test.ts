@@ -40,7 +40,10 @@ describe("adapter health checks", () => {
 describe("manual review queue", () => {
   it("routes low-confidence results to review", async () => {
     const queue = new InMemoryReviewQueue();
-    const result = await resolveMarket(market, [adapter("source", true, 0.4)], { reviewQueue: queue });
+    const result = await resolveMarket(market, [adapter("source", true, 0.4)], {
+      reviewQueue: queue,
+      minAgreement: 1,
+    });
     expect(result.status).toBe("review");
     expect(queue.list()).toHaveLength(1);
     expect(queue.list()[0]).toMatchObject({ reason: "low_confidence", confidence: 0.4 });

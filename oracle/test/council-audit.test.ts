@@ -14,6 +14,7 @@ import {
   toAuditCsv,
   toAuditJson,
   toRawPayloadCsv,
+  type AuditExportProgress,
   type CouncilAuditRecord,
   type RawPayloadRecord,
 } from "../src/aggregator/council-audit.js";
@@ -499,5 +500,45 @@ describe("streamCouncilAudit", () => {
     expect(await exportCouncilAudit(pool, "json")).toBe(toAuditJson([]));
     expect(await exportCouncilAudit(pool, "csv")).toBe(toAuditCsv([]));
     expect(await exportCouncilAudit(pool, "raw-csv")).toBe(toRawPayloadCsv([]));
+  });
+
+  it("reports record and byte progress while keeping the output unchanged", async () => {
+    const pool = createPool(finalized, votes, payloads);
+    const updates: AuditExportProgress[] = [];
+    const chunks: string[] = [];
+    let clock = 0;
+
+    for await (const chunk of streamCouncilAudit(pool, "json", {
+      now: () => {
+        const current = clock;
+        clock += 25;
+        return current;
+      },
+      onProgress: (progress) => updates.push({ ...progress }),
+    })) {
+      chunks.push(chunk);
+    }
+
+    // The first update is emitted before the first record, then one per record
+    // and a final update once the closing bracket has been produced.
+    expect(updates[0]).toMatchObject({ records: 0, done: false });
+    expect(updates.map((update) => update.records)).toEqual([0, 1, 2, 2]);
+    expect(updates.at(-1)).toMatchObject({ records: 2, done: true });
+    // Bytes count the UTF-8 export payload, not the record objects.
+    expect(updates.at(-1)?.bytes).toBe(Buffer.byteLength(chunks.join(""), "utf8"));
+    expect(chunks.join("")).toBe(toAuditJson(await collectCouncilAudit(createPool(finalized, votes, payloads))));
+  });
+
+  it("reports one record per market for the row-oriented CSV formats", async () => {
+    const pool = createPool(finalized, votes, payloads);
+    const updates: AuditExportProgress[] = [];
+
+    for await (const _chunk of streamCouncilAudit(pool, "raw-csv", {
+      onProgress: (progress) => updates.push({ ...progress }),
+    })) {
+      // drain
+    }
+
+    expect(updates.at(-1)).toMatchObject({ records: 2, done: true });
   });
 });

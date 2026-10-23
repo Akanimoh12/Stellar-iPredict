@@ -318,6 +318,27 @@ ALTER SEQUENCE schema_drift_check.adapter_raw_payloads_id_seq OWNED BY schema_dr
 
 
 --
+-- Name: bet_anomaly_alerts; Type: TABLE; Schema: schema_drift_check; Owner: -
+--
+
+CREATE TABLE schema_drift_check.bet_anomaly_alerts (
+ market_id bigint NOT NULL,
+ window_start timestamp with time zone NOT NULL,
+ bettor_count integer NOT NULL,
+ recent_net_amount numeric(30,7) NOT NULL,
+ same_side_share numeric(5,4) NOT NULL,
+ reviewed_at timestamp with time zone,
+ review_outcome character varying(20),
+ review_note text,
+ CONSTRAINT bet_anomaly_alerts_bettor_count_check CHECK ((bettor_count >= 3)),
+ CONSTRAINT bet_anomaly_alerts_check CHECK (((reviewed_at IS NULL) = (review_outcome IS NULL))),
+ CONSTRAINT bet_anomaly_alerts_recent_net_amount_check CHECK ((recent_net_amount > (0)::numeric)),
+ CONSTRAINT bet_anomaly_alerts_review_outcome_check CHECK (((review_outcome)::text = ANY ((ARRAY['confirmed'::character varying, 'false_positive'::character varying, 'inconclusive'::character varying])::text[]))),
+ CONSTRAINT bet_anomaly_alerts_same_side_share_check CHECK (((same_side_share >= (0)::numeric) AND (same_side_share <= (1)::numeric)))
+);
+
+
+--
 -- Name: bets; Type: TABLE; Schema: schema_drift_check; Owner: -
 --
 
@@ -840,6 +861,14 @@ ALTER TABLE ONLY schema_drift_check.adapter_raw_payloads
 
 
 --
+-- Name: bet_anomaly_alerts bet_anomaly_alerts_pkey; Type: CONSTRAINT; Schema: schema_drift_check; Owner: -
+--
+
+ALTER TABLE ONLY schema_drift_check.bet_anomaly_alerts
+ ADD CONSTRAINT bet_anomaly_alerts_pkey PRIMARY KEY (market_id, window_start);
+
+
+--
 -- Name: bets bets_pkey; Type: CONSTRAINT; Schema: schema_drift_check; Owner: -
 --
 
@@ -1006,6 +1035,13 @@ CREATE INDEX idx_adapter_raw_payloads_provider ON schema_drift_check.adapter_raw
 
 
 --
+-- Name: idx_bet_anomaly_alerts_unreviewed; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_bet_anomaly_alerts_unreviewed ON schema_drift_check.bet_anomaly_alerts USING btree (window_start DESC) WHERE (reviewed_at IS NULL);
+
+
+--
 -- Name: idx_bets_bettor_created_at; Type: INDEX; Schema: schema_drift_check; Owner: -
 --
 
@@ -1045,6 +1081,13 @@ CREATE INDEX idx_dead_letter_events_created_at ON schema_drift_check.dead_letter
 --
 
 CREATE INDEX idx_dead_letter_events_ledger ON schema_drift_check.dead_letter_events USING btree (ledger_seq DESC);
+
+
+--
+-- Name: idx_dead_letter_events_retryable; Type: INDEX; Schema: schema_drift_check; Owner: -
+--
+
+CREATE INDEX idx_dead_letter_events_retryable ON schema_drift_check.dead_letter_events USING btree (created_at) WHERE ((resolved_at IS NULL) AND (attempt_count < 10));
 
 
 --
@@ -1248,6 +1291,14 @@ CREATE TRIGGER trg_oracle_submission_status_transition BEFORE UPDATE OF status O
 --
 
 CREATE TRIGGER trg_oracle_submissions_updated_at BEFORE UPDATE ON schema_drift_check.oracle_submissions FOR EACH ROW EXECUTE FUNCTION schema_drift_check.set_updated_at();
+
+
+--
+-- Name: bet_anomaly_alerts bet_anomaly_alerts_market_id_fkey; Type: FK CONSTRAINT; Schema: schema_drift_check; Owner: -
+--
+
+ALTER TABLE ONLY schema_drift_check.bet_anomaly_alerts
+ ADD CONSTRAINT bet_anomaly_alerts_market_id_fkey FOREIGN KEY (market_id) REFERENCES schema_drift_check.markets(id) ON DELETE RESTRICT;
 
 
 --

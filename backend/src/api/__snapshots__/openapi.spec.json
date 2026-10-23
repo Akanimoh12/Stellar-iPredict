@@ -382,13 +382,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -403,6 +420,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -660,13 +689,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -681,6 +727,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -696,13 +754,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -717,6 +792,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -855,13 +942,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -876,6 +980,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -891,13 +1007,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -912,6 +1045,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -1013,13 +1158,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -1034,6 +1196,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -1049,13 +1223,30 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
+                  "additionalProperties": true,
                   "properties": {
                     "error": {
-                      "additionalProperties": false,
                       "properties": {
                         "code": {
                           "type": "string"
+                        },
+                        "details": {
+                          "items": {
+                            "properties": {
+                              "field": {
+                                "type": "string"
+                              },
+                              "message": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "field",
+                              "message"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         },
                         "message": {
                           "type": "string"
@@ -1070,6 +1261,18 @@
                         "requestId"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -1235,6 +1438,18 @@
                         "message"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -1484,6 +1699,18 @@
                         "message"
                       ],
                       "type": "object"
+                    },
+                    "instance": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "number"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
                     }
                   },
                   "required": [

@@ -235,9 +235,9 @@ describe("analyzeSlowQueries", () => {
   it("respects minDurationMs, minCalls, and top options", () => {
     const entries: RawSlowQueryEntry[] = [
       { query: "SELECT 1", durationMs: 50 },
-      { query: "SELECT 2", durationMs: 250 },
-      { query: "SELECT 3", durationMs: 300 },
-      { query: "SELECT 4", durationMs: 350 },
+      { query: "SELECT a FROM t1", durationMs: 250 },
+      { query: "SELECT b FROM t2", durationMs: 300 },
+      { query: "SELECT c FROM t3", durationMs: 350 },
     ];
 
     const filtered = analyzeSlowQueries(entries, { minDurationMs: 200, top: 2 });

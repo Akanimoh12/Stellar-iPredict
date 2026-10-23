@@ -1,0 +1,91 @@
+name: Backup Restore Verification
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dump_file:
+        description: "Path to a specific .dump or .dump.enc archive to verify (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-backup-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-backup:
+    name: Verify Backup Restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate verify-backup script syntax
+        run: bash -n infra/scripts/verify-backup.sh
+
+      - name: Prepare test backup archive if none exists
+        run: |
+          mkdir -p infra/backups
+          # If no dump file exists or is specified, generate a verified synthetic dump from db/migrations
+          if [ -z "${{ github.event.inputs.dump_file }}" ] && [ -z "$(find infra/backups -maxdepth 1 -type f \( -name 'ipredict-*.dump' -o -name 'ipredict-*.dump.enc' \) 2>/dev/null)" ]; then
+            echo "No existing dump found. Creating test database from migrations to verify backup lifecycle..."
+            docker run -d --name pg-test \
+              -e POSTGRES_USER=ipredict \
+              -e POSTGRES_PASSWORD=ipredict \
+              -e POSTGRES_DB=ipredict \
+              -p 5432:5432 \
+              postgres:16.4-alpine
+            for i in $(seq 1 30); do
+              docker exec pg-test pg_isready -U ipredict -d ipredict >/dev/null 2>&1 && break
+              sleep 1
+            done
+            for mig in $(ls -1 db/migrations/*.sql | grep -v '\.down\.sql' | sort -V); do
+              docker exec -i pg-test psql -U ipredict -d ipredict < "$mig" >/dev/null
+            done
+            DATABASE_URL="postgres://ipredict:ipredict@localhost:5432/ipredict?sslmode=disable" \
+              infra/scripts/backup.sh -o infra/backups --local
+            docker rm -f pg-test
+          fi
+
+      - name: Run backup restore verification
+        id: verify
+        env:
+          BACKUP_ALERT_WEBHOOK_URL: ${{ secrets.BACKUP_ALERT_WEBHOOK_URL }}
+        run: |
+          DUMP_ARG="${{ github.event.inputs.dump_file }}"
+          if [ -n "$DUMP_ARG" ]; then
+            infra/scripts/verify-backup.sh "$DUMP_ARG"
+          else
+            infra/scripts/verify-backup.sh
+          fi
+
+      - name: Alert on failure
+        if: failure() && env.BACKUP_ALERT_WEBHOOK_URL != ''
+        env:
+          BACKUP_ALERT_WEBHOOK_URL: ${{ secrets.BACKUP_ALERT_WEBHOOK_URL }}
+        run: |
+          curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\":\"🚨 *CRITICAL*: iPredict scheduled backup verification failed on workflow run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$BACKUP_ALERT_WEBHOOK_URL" || true
+
+      - name: Report verification summary
+        if: always()
+        run: |
+          echo "## Backup Restore Verification Summary" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.verify.outcome }}" == "success" ]; then
+            echo "✅ **Status:** Backup verification passed successfully." >> $GITHUB_STEP_SUMMARY
+            echo "- All required tables exist" >> $GITHUB_STEP_SUMMARY
+            echo "- Schema migrations match repository state" >> $GITHUB_STEP_SUMMARY
+            echo "- Referential integrity verified (no orphan records)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status:** Backup verification failed." >> $GITHUB_STEP_SUMMARY
+            echo "Please inspect the job logs and database dump." >> $GITHUB_STEP_SUMMARY
+          fi

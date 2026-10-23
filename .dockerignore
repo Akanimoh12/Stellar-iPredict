@@ -1,0 +1,21 @@
+# Build context hygiene for images built from the repository root.
+#
+# backend/Dockerfile needs the root workspace manifests plus the shared and
+# backend sources, so its context is the whole repository. Everything that is
+# rebuilt inside the image, and everything that must never be baked into it,
+# is excluded here.
+
+.git
+.github
+
+# Installed or compiled inside the image.
+**/node_modules
+**/dist
+**/coverage
+**/.next
+contracts/target
+
+# Secrets and local environment files.
+**/.env
+**/.env.*
+!**/.env.example

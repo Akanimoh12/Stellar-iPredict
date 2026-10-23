@@ -459,6 +459,10 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
             type: "object",
             required: ["error"],
             properties: {
+              type: { type: "string" },
+              title: { type: "string" },
+              status: { type: "number" },
+              instance: { type: "string" },
               error: {
                 type: "object",
                 required: ["code", "message"],
@@ -858,6 +862,10 @@ export function registerOracleRoutes(
             type: "object",
             required: ["error"],
             properties: {
+              type: { type: "string" },
+              title: { type: "string" },
+              status: { type: "number" },
+              instance: { type: "string" },
               error: {
                 type: "object",
                 required: ["code", "message"],

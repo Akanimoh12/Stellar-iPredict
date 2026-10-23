@@ -24,34 +24,6 @@ describe('migration prefix uniqueness', () => {
         return match[1];
       });
 
-      it('runs the CI prefix checker against the frozen legacy collision set', () => {
-        const scriptPath = path.resolve(__dirname, '..', '..', 'scripts', 'check-migration-prefixes.sh');
-        const result = spawnSync('bash', [scriptPath], { encoding: 'utf8' });
-
-        expect(result.status, result.stderr || result.stdout).toBe(0);
-        expect(result.stdout).toContain('No unexpected migration prefix collisions');
-      });
-
-      it('skips the redundant markets sort migration on fresh databases', () => {
-        expect(REDUNDANT_MIGRATIONS).toEqual({
-          '0029_markets_sort_indexes.sql': '0028_markets_sort_indexes.sql',
-        });
-      });
-
-      it('adds bet amount and oracle submission constraints in a forward migration', () => {
-        const sqlPath = path.join(MIGRATIONS_DIR, '0031_bet_oracle_constraints.sql');
-        expect(fs.existsSync(sqlPath)).toBe(true);
-
-        const sql = fs.readFileSync(sqlPath, 'utf8');
-        expect(sql).toContain('CHECK (net_amount >= 0)');
-        expect(sql).toContain('CHECK (gross_amount >= 0)');
-        expect(sql).toContain('CHECK (net_amount <= gross_amount)');
-        expect(sql).toContain('CHECK (bond_amount >= 0)');
-        expect(sql).toContain('ALTER COLUMN submitted_at SET NOT NULL');
-        expect(sql).toContain('RAISE EXCEPTION');
-        expect(fs.existsSync(path.join(MIGRATIONS_DIR, '0031_bet_oracle_constraints.down.sql'))).toBe(true);
-      });
-
     const seen: Record<string, string[]> = {};
     for (let i = 0; i < files.length; i++) {
       const prefix = prefixes[i];
@@ -73,6 +45,35 @@ describe('migration prefix uniqueness', () => {
         'Renumber the colliding file(s) to an unused number.'
       );
     }
+  });
+
+  it('runs the CI prefix checker against the frozen legacy collision set', () => {
+    const scriptPath = path.resolve(__dirname, '..', '..', 'scripts', 'check-migration-prefixes.sh');
+    const shellCmd = process.platform === 'win32' ? 'sh' : 'bash';
+    const result = spawnSync(shellCmd, [scriptPath], { encoding: 'utf8' });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('No unexpected migration prefix collisions');
+  }, 15_000);
+
+  it('skips the redundant markets sort migration on fresh databases', () => {
+    expect(REDUNDANT_MIGRATIONS).toEqual({
+      '0029_markets_sort_indexes.sql': '0028_markets_sort_indexes.sql',
+    });
+  });
+
+  it('adds bet amount and oracle submission constraints in a forward migration', () => {
+    const sqlPath = path.join(MIGRATIONS_DIR, '0031_bet_oracle_constraints.sql');
+    expect(fs.existsSync(sqlPath)).toBe(true);
+
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+    expect(sql).toContain('CHECK (net_amount >= 0)');
+    expect(sql).toContain('CHECK (gross_amount >= 0)');
+    expect(sql).toContain('CHECK (net_amount <= gross_amount)');
+    expect(sql).toContain('CHECK (bond_amount >= 0)');
+    expect(sql).toContain('ALTER COLUMN submitted_at SET NOT NULL');
+    expect(sql).toContain('RAISE EXCEPTION');
+    expect(fs.existsSync(path.join(MIGRATIONS_DIR, '0031_bet_oracle_constraints.down.sql'))).toBe(true);
   });
 
   it('exports MIGRATION_ADVISORY_LOCK_KEY constant for concurrent locking', async () => {

@@ -198,3 +198,10 @@ export {
   type DependencyCheckResult,
   type ReadinessCheckResult,
 } from "./health.js";
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+export {
+  createBetPatternAlertSender,
+  type BetPatternAlert,
+  type BetPatternAlertSender,
+} from "./alert.js";

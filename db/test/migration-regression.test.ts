@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { LEGACY_MIGRATION_GROUPS } from "../migration-names.js";
+import { LEGACY_MIGRATION_GROUPS, REDUNDANT_MIGRATIONS } from "../migration-names.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -10,6 +10,31 @@ import { DEFAULT_TEST_DATABASE_URL, normalizeSchemaDump } from "./schema-drift.j
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "..", "migrations");
 const SCRATCH_SCHEMA = "migration_regression_check";
+
+/**
+ * Down migrations that cannot restore the previous schema byte-for-byte.
+ *
+ * The exact-schema comparison in the suite is still enforced for every other
+ * down migration, so a new one that silently fails to revert its up migration
+ * is still caught. These are listed explicitly, with the reason, so each
+ * exception has to be argued for rather than discovered. Every entry still has
+ * to run without error and its up migration still has to re-apply cleanly.
+ */
+const PARTIAL_DOWN_MIGRATIONS: Readonly<Record<string, string>> = {
+  // 0009 declares total_bond as the 8th column. Converting it to a generated
+  // column requires DROP + ADD, and a re-added column always lands last, so the
+  // original position cannot be restored by any ALTER TABLE. Nothing else about
+  // the column differs.
+  "0015_oracle_disputes_total_bond_generated":
+    "re-adding total_bond moves it to the end of the column order",
+  // The file states that the archive_old_events() repair is deliberately not
+  // reverted, because restoring the 0013 version would reintroduce its bug.
+  "0018_data_retention": "keeps the repaired archive_old_events() on purpose",
+  // The file states that the indexes and NOT NULL are deliberately left in
+  // place: removing them would be worse than the pre-0026 runtime DDL state.
+  "0026_dead_letter_events_timestamptz":
+    "intentionally leaves the table, indexes and NOT NULL in place",
+};
 
 function dbUrl(): string {
   return (
@@ -150,6 +175,12 @@ describe("migrations executed against real Postgres", () => {
     const failures: string[] = [];
     const url = dbUrl();
     for (const file of upMigrations()) {
+      // The migration runner skips these on a fresh database (their DDL is
+      // already applied by the canonical migration), so replaying them here
+      // would test a code path no deployment takes — and their down migrations
+      // drop objects the canonical migration created.
+      if (REDUNDANT_MIGRATIONS[file]) continue;
+
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
       try {
         const downFile = `${file.replace(/\.sql$/, "")}.down.sql`;
@@ -163,7 +194,9 @@ describe("migrations executed against real Postgres", () => {
           await client.query("BEGIN");
           await client.query(fs.readFileSync(downPath, "utf8"));
           await client.query("COMMIT");
-          expect(dumpSchema(url, SCRATCH_SCHEMA), `${downFile} must restore the schema from before ${file}`).toBe(before);
+          if (!PARTIAL_DOWN_MIGRATIONS[file.replace(/\.sql$/, "")]) {
+            expect(dumpSchema(url, SCRATCH_SCHEMA), `${downFile} must restore the schema from before ${file}`).toBe(before);
+          }
 
           await client.query("BEGIN");
           await client.query(sql);
@@ -175,7 +208,10 @@ describe("migrations executed against real Postgres", () => {
       }
     }
     expect(failures, `Migrations failed to execute:\n${failures.join("\n")}`).toEqual([]);
-  });
+    // Applying every migration, each with up to two pg_dump comparisons, does
+    // not fit in vitest's 5s default. The time is spent in Postgres, not in a
+    // hang, so the budget is explicit rather than silently tripped.
+  }, 180_000);
 
   it("migrations that claim idempotency can be applied a second time", async (ctx) => {
     if (!client) return ctx.skip();
@@ -274,5 +310,6 @@ describe("migrations executed against real Postgres", () => {
     expect(plans[0].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_bettor_created_at");
     expect(plans[1].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_market_created_at");
     expect(plans[2].rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("idx_bets_claimed_created_at");
-  });
+    // Builds a 100 x 500 bets fixture and ANALYZEs it before planning.
+  }, 180_000);
 });

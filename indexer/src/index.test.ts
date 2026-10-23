@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// These mocks stand in for classes the code under test constructs with `new`.
+// vitest invokes a mock implementation through Reflect.construct, so the
+// implementation has to be a constructible function — an arrow function is not.
 vi.mock("./metrics-server.js", () => ({
-  MetricsServer: vi.fn().mockImplementation(() => ({
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-  })),
+  MetricsServer: vi.fn().mockImplementation(function () {
+    return {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
 
 vi.mock("./db.js", () => {
@@ -68,7 +73,7 @@ const mockGetLatestLedger = vi.fn().mockResolvedValue({ sequence: 100 });
 const mockGetEvents = vi.fn().mockResolvedValue({ events: [] });
 
 vi.mock("@stellar/stellar-sdk", () => {
-  const mockServer = vi.fn().mockImplementation(() => {
+  const mockServer = vi.fn().mockImplementation(function () {
     return {
       getLatestLedger: mockGetLatestLedger,
       getEvents: mockGetEvents,

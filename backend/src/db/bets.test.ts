@@ -1,10 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getBetsByBettor,
+  getBetsByBettorPaginated,
+  getBetsByMarket,
   getBetsByMarketFromDb,
   getBetAnomalyReviewMetrics,
   getUnreviewedBetAnomalies,
   reviewBetAnomaly,
+  seedBets,
+  clearBets,
+  type Bet,
   type BetRow,
 } from './bets';
 import { Pool } from 'pg';
@@ -216,8 +221,6 @@ describe("getBetsByBettorPaginated", () => {
     });
   });
 });
-
-import { getBetsByMarket, seedBets, clearBets, type Bet } from './bets.js';
 
 function makeBets(count: number, offset = 0): Bet[] {
   return Array.from({ length: count }, (_, i) => ({

@@ -142,8 +142,10 @@ services:
   # ── Application ────────────────────────────────────────────────────────────
   api:
     build:
-      context: ../backend
-      dockerfile: Dockerfile
+      # Repository root: the image needs the @ipredict/shared workspace
+      # package, which only the root lockfile resolves.
+      context: ..
+      dockerfile: backend/Dockerfile
     image: "${IMAGE_REGISTRY:-ghcr.io/akanimoh12}/ipredict-api:${API_IMAGE_TAG:-local}"
     restart: always
     user: "1000:1000"

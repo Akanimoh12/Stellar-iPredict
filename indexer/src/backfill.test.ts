@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock pg before importing db or backfill
 vi.mock("pg", () => {
-  const mockPool = vi.fn().mockImplementation(() => {
+  // `new Pool(...)` in src/db.ts: the implementation must be constructible,
+  // which an arrow function is not.
+  const mockPool = vi.fn().mockImplementation(function () {
     return {
       query: vi.fn().mockResolvedValue({ rows: [] }),
       on: vi.fn(),
@@ -46,7 +48,9 @@ vi.mock("./config/index.js", () => {
 
 // Mock stellar sdk components
 vi.mock("@stellar/stellar-sdk", () => {
-  const mockServer = vi.fn().mockImplementation(() => {
+  // `new rpc.Server(...)`: the implementation has to be constructible, which
+  // an arrow function is not.
+  const mockServer = vi.fn().mockImplementation(function () {
     return {
       getLatestLedger: vi.fn(),
       getEvents: vi.fn(),
@@ -285,7 +289,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       const lastLedger = await runBackfill();
 
@@ -313,7 +319,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       const lastLedger = await runBackfill();
 
@@ -347,7 +355,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       const lastLedger = await runBackfill();
 
@@ -373,7 +383,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       try {
         await runBackfill();
@@ -402,7 +414,9 @@ describe("Backfill & Poll Module", () => {
         getHealth: mockGetHealth,
         getEvents: vi.fn(),
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       try {
         await runBackfill();
@@ -490,7 +504,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       // Force a baseline measurement
       const memBefore = sampleMemoryUsage();
@@ -542,7 +558,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       const progressSnapshots: any[] = [];
       const result = await runFullReindex({
@@ -585,7 +603,9 @@ describe("Backfill & Poll Module", () => {
         getLatestLedger: mockGetLatestLedger,
         getEvents: mockGetEvents,
       };
-      vi.mocked(rpc.Server).mockReturnValue(serverInstance as any);
+      vi.mocked(rpc.Server).mockImplementation(function () {
+        return serverInstance as any;
+      });
 
       const result = await runFullReindex({
         db: mockDb as any,

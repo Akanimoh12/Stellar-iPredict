@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
-import { pingDb, withHealthTimeout } from "../db/health.js";
+import { pingDb, checkWriteCapability, withHealthTimeout } from "../db/health.js";
 import { pingRedis } from "../db/redis.js";
 import { getResolutionDelayStatus } from "../db/markets.js";
 
@@ -7,12 +7,14 @@ interface CheckResult {
   ok: boolean;
   latencyMs?: number;
   error?: string;
+  readOnly?: boolean;
 }
 
 /** Public shape of a dependency check — a boolean summary, no error detail. */
 interface PublicCheckResult {
   ok: boolean;
   latencyMs?: number;
+  readOnly?: boolean;
 }
 
 /**
@@ -34,7 +36,9 @@ export function resetShuttingDownForTests(): void {
 }
 
 function toPublicResult(result: CheckResult): PublicCheckResult {
-  return result.latencyMs === undefined ? { ok: result.ok } : { ok: result.ok, latencyMs: result.latencyMs };
+  return result.latencyMs === undefined
+    ? { ok: result.ok, readOnly: result.readOnly }
+    : { ok: result.ok, latencyMs: result.latencyMs, readOnly: result.readOnly };
 }
 
 interface ReadyzResponse {
@@ -50,7 +54,7 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
     "/readyz",
     {
       schema: {
-        summary: "Readiness probe — verifies DB and Redis connectivity",
+        summary: "Readiness probe — verifies DB and Redis connectivity and write capability",
         tags: ["system"],
         response: {
           200: {
@@ -65,6 +69,7 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
                     properties: {
                       ok: { type: "boolean" },
                       latencyMs: { type: "number" },
+                      readOnly: { type: "boolean" },
                     },
                     required: ["ok"],
                   },
@@ -94,6 +99,7 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
                     properties: {
                       ok: { type: "boolean" },
                       latencyMs: { type: "number" },
+                      readOnly: { type: "boolean" },
                     },
                     required: ["ok"],
                   },
@@ -124,21 +130,34 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
         return;
       }
 
-      const [db, redis] = await Promise.all([
+      // Check both read connectivity AND write capability
+      const [dbRead, dbWrite, redis] = await Promise.all([
         withHealthTimeout(pingDb()),
+        withHealthTimeout(checkWriteCapability()),
         withHealthTimeout(pingRedis()),
       ]);
 
-      const ready = db.ok && redis.ok;
+      // Database is ready only if both read and write work
+      const dbReady = dbRead.ok && dbWrite.ok;
+      const ready = dbReady && redis.ok;
+
       if (!ready) {
         // Detailed diagnostics (hostnames, driver error text, etc.) stay on
         // the logging path only — the response body never carries them.
-        req.log.warn({ db, redis }, "readiness check failed");
+        req.log.warn({ dbRead, dbWrite, redis }, "readiness check failed");
       }
+
+      // Combine read and write check results for the response
+      const dbResult: CheckResult = {
+        ok: dbReady,
+        latencyMs: dbRead.latencyMs ?? dbWrite.latencyMs,
+        readOnly: dbWrite.readOnly ?? false,
+        error: dbWrite.ok ? undefined : (dbWrite.error ?? dbRead.error),
+      };
 
       const body: ReadyzResponse = {
         status: ready ? "ready" : "not ready",
-        checks: { db: toPublicResult(db), redis: toPublicResult(redis) },
+        checks: { db: toPublicResult(dbResult), redis: toPublicResult(redis) },
       };
 
       reply.status(ready ? 200 : 503).send(body);

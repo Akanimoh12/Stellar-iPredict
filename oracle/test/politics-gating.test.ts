@@ -53,8 +53,9 @@ describe("Politics: conservative confidence gating", () => {
       minConfidence: 0.85,
     });
 
-    // Standard categories remain 1-source with 0.7 confidence floor
-    expect(DEFAULT_CATEGORY_CONFIG.crypto.minAgreement).toBe(1);
+    // Crypto markets require two providers (issue #903); politics requires the
+    // same higher agreement with a stricter confidence floor.
+    expect(DEFAULT_CATEGORY_CONFIG.crypto.minAgreement).toBe(2);
     expect(DEFAULT_CATEGORY_CONFIG.crypto.minConfidence).toBe(0.7);
     expect(DEFAULT_CATEGORY_CONFIG.sports.minAgreement).toBe(1);
     expect(DEFAULT_CATEGORY_CONFIG.sports.minConfidence).toBe(0.7);

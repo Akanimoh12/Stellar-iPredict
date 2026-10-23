@@ -1,7 +1,7 @@
 import { Pool, types } from "pg";
 import type { FilterableMarketCategory } from "@ipredict/shared";
 import type { MarketRow } from "./types.js";
-import { sanitizeForHtmlOutput } from "../lib/sanitize.js";
+import * as poolModule from "./pool.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
 types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
@@ -32,37 +32,31 @@ export type Queryable = {
   query<T>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
 };
 
-/**
- * Sanitize a MarketRow for safe output (defense in depth).
- * Input should already be sanitized at write time, but this ensures
- * even legacy or directly-inserted data is safe.
- */
-export function sanitizeMarketRow(row: MarketRow): MarketRow {
-  return {
-    ...row,
-    question: sanitizeForHtmlOutput(row.question),
-    category: sanitizeForHtmlOutput(row.category) as MarketRow["category"],
-    image_url: row.image_url ? sanitizeForHtmlOutput(row.image_url) : null,
-    creator: sanitizeForHtmlOutput(row.creator),
-  };
-}
+let fallbackPool: Pool | undefined;
 
 /**
- * Sanitize multiple market rows.
+ * Default executor for market reads.
+ *
+ * Market listings/details are tolerant of slight staleness, so they use the
+ * read pool: the replica when one is configured and healthy, otherwise the
+ * primary (unchanged behaviour for existing deployments). The namespace
+ * access keeps this module loadable by tests that mock `db/pool.js` with only
+ * the primary pool.
  */
-export function sanitizeMarketRows(rows: MarketRow[]): MarketRow[] {
-  return rows.map(sanitizeMarketRow);
-}
-
-let pool: Pool | undefined;
-
 function getDefaultDb(): Queryable {
+  const readPool = (poolModule as { readPool?: Queryable }).readPool;
+  if (readPool) {
+    return readPool;
+  }
+
+  // Fallback for partial mocks and for callers that use this module without
+  // the shared pool. Production always takes the branch above.
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error("DATABASE_URL is required");
   }
-  pool ??= new Pool({ connectionString });
-  return pool;
+  fallbackPool ??= new Pool({ connectionString });
+  return fallbackPool;
 }
 
 const MARKET_COLUMNS = `
@@ -97,6 +91,18 @@ const ORDER_BY: Record<MarketSort, string> = {
   volume: "(total_yes + total_no) DESC, created_at DESC, id DESC",
   ending_soon: "end_time ASC, id ASC",
   bettors: "bet_count DESC, created_at DESC, id DESC",
+};
+
+const ACTIVE_CLAUSE =
+  "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
+
+const FILTER_CLAUSES: Record<MarketFilter, string> = {
+  active: ACTIVE_CLAUSE,
+  resolved: "resolved = true",
+  ended:
+    "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT",
+  cancelled: "cancelled = true",
+  all: "",
 };
 
 /**

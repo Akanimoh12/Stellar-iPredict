@@ -3,6 +3,7 @@ import { getAllBets } from "./bets.js";
 import type { Bet } from "./bets.js";
 import { getAllLeaderboardEntries, type LeaderboardEntry } from "./leaderboard.js";
 import type { Queryable } from "./markets.js";
+import * as poolModule from "./pool.js";
 
 export type { Queryable };
 
@@ -119,7 +120,19 @@ export interface GlobalStatsRow {
 
 let pool: Pool | undefined;
 
+/**
+ * Default executor for global stats.
+ *
+ * The three aggregate scans are the heaviest read queries in the API and are
+ * entirely point-in-time tolerant, so they use the read pool (replica when
+ * configured, primary otherwise).
+ */
 function getDefaultDb(): Queryable {
+  const readPool = (poolModule as { readPool?: Queryable }).readPool;
+  if (readPool) {
+    return readPool;
+  }
+
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error("DATABASE_URL is required");

@@ -115,6 +115,12 @@ export interface BuildServerOptions {
   logger?: FastifyServerOptions["logger"];
   /** Required PostgreSQL connection pool (issue #471). */
   pool: Pool;
+  /**
+   * Optional read-replica pool. Tolerant read endpoints (markets, leaderboard,
+   * stats) use this when provided; it falls back to `pool` when omitted, so
+   * deployments without a replica are unchanged.
+   */
+  readPool?: Pool;
   /** Redis client for cache-aside reads. When omitted, routes hit the DB directly. */
   redis?: Redis;
   /** Global request body limit in bytes. Defaults to 16 KiB (issue #473). */
@@ -146,6 +152,10 @@ export const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
 
 export function buildServer(options: BuildServerOptions): FastifyInstance {
   const databasePool = options.pool;
+  // Tolerant reads go to the replica when one is configured. `readPool` is a
+  // lazy routing proxy (db/pool.ts): with no replica URL it resolves to the
+  // primary, so passing it is safe in every environment.
+  const readDatabasePool = options.readPool ?? databasePool;
   const redis = options.redis;
   const corsCredentials = options.corsCredentials ?? false;
   const allowedOrigins =
@@ -325,13 +335,13 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       }
     );
 
-    registerLeaderboardRoutes(routes, databasePool, redis);
-    registerStatsRoutes(routes, databasePool, redis);
+    registerLeaderboardRoutes(routes, readDatabasePool, redis);
+    registerStatsRoutes(routes, readDatabasePool, redis);
     if (databasePool) {
       registerOracleRoutes(routes, databasePool);
     }
 
-    createMarketsRoutes(routes, databasePool, redis);
+    createMarketsRoutes(routes, readDatabasePool, redis);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.
@@ -495,10 +505,10 @@ export async function verifyDeployedWasm(
 }
 
 export async function startServer(config: ServerConfig): Promise<FastifyInstance> {
-  const { pool } = await import("./db/pool.js");
+  const { pool, readPool } = await import("./db/pool.js");
   const { getRedisClient } = await import("./db/redis.js");
   const redis = getRedisClient();
-  const server = buildServer({ corsOrigins: config.corsOrigins, pool, redis });
+  const server = buildServer({ corsOrigins: config.corsOrigins, pool, readPool, redis });
 
   registerGracefulShutdown(server, {
     shutdownDatabase: true,

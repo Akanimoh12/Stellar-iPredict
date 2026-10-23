@@ -34,18 +34,28 @@ vi.mock("../db/pool.js", () => ({
 // Redis is unreachable: every ioredis client the app constructs fails its
 // commands. This keeps the real `getRedisClient` / `pingRedis` error-handling
 // code under test while guaranteeing no socket is ever opened.
+//
+// `cache/redis.ts` constructs the client from the *named* `Redis` export, so
+// that is the binding that must be replaced. Overriding only `default` left the
+// real class in place: the client connected lazily and these tests passed or
+// failed depending on whether a Redis server happened to be listening on
+// REDIS_URL, which CI always provides.
 vi.mock("ioredis", async (importOriginal) => {
   const original = await importOriginal<typeof import("ioredis")>();
+
+  class FakeRedis {
+    ping(): Promise<never> {
+      return Promise.reject(new Error("ECONNREFUSED"));
+    }
+    quit(): Promise<"OK"> {
+      return Promise.resolve("OK");
+    }
+  }
+
   return {
     ...original,
-    default: class FakeRedis {
-      ping(): Promise<never> {
-        return Promise.reject(new Error("ECONNREFUSED"));
-      }
-      quit(): Promise<"OK"> {
-        return Promise.resolve("OK");
-      }
-    },
+    default: FakeRedis,
+    Redis: FakeRedis,
   };
 });
 

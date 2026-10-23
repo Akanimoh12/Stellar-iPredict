@@ -14,9 +14,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   shutdown,
   queryWithCancel,
+  queryWithTimeout,
   QueryCancelledError,
+  QueryTimeoutError,
   type CancellablePool,
 } from "./pool.js";
+import { mapError } from "../lib/errors.js";
 import {
   getAbandonedQueryCounts,
   resetAbandonedQueryCounts,
@@ -231,6 +234,108 @@ describe("queryWithCancel", () => {
 
     warnSpy.mockRestore();
     nowSpy.mockRestore();
+  });
+});
+
+describe("queryWithTimeout", () => {
+  beforeEach(() => {
+    resetAbandonedQueryCounts();
+    resetDbQueryHistogram();
+  });
+
+  function createTimeoutPool(
+    runQuery: (text: string) => Promise<{ rows: unknown[] }>,
+  ) {
+    const queryCalls: string[] = [];
+    const client = {
+      query: vi.fn(async (text: string) => {
+        queryCalls.push(text);
+        if (text === "SELECT pg_backend_pid() AS pid") {
+          return { rows: [{ pid: 987 }] };
+        }
+        return runQuery(text);
+      }),
+      release: vi.fn(),
+    };
+    const pool: CancellablePool = {
+      connect: vi.fn(async () => client as never),
+      query: vi.fn(async () => ({ rows: [] }) as never),
+    };
+    return { pool, client, queryCalls };
+  }
+
+  it("uses a transaction-local timeout and releases the connection", async () => {
+    const { pool, client, queryCalls } = createTimeoutPool(async (text) => ({
+      rows: text === "SELECT 1" ? [{ value: 1 }] : [],
+    }));
+
+    const result = await queryWithTimeout(pool, "SELECT 1", [], {
+      timeoutMs: 750,
+      route: "GET /api/markets/:id",
+    });
+
+    expect(result.rows).toEqual([{ value: 1 }]);
+    expect(queryCalls).toEqual([
+      "BEGIN",
+      "SET LOCAL statement_timeout = 750",
+      "SELECT 1",
+      "COMMIT",
+    ]);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("maps PostgreSQL statement timeouts to an explicit gateway-timeout error", async () => {
+    const timeout = Object.assign(new Error("canceling statement"), { code: "57014" });
+    const { pool, client, queryCalls } = createTimeoutPool(async (text) => {
+      if (text === "SELECT slow") throw timeout;
+      return { rows: [] };
+    });
+
+    const error = await queryWithTimeout(pool, "SELECT slow", [], {
+      timeoutMs: 250,
+      route: "GET /api/markets/:id",
+    }).catch((value: unknown) => value);
+
+    if (!(error instanceof QueryTimeoutError)) {
+      throw new Error("Expected a QueryTimeoutError");
+    }
+    expect(error).toMatchObject({ statusCode: 504, code: "QUERY_TIMEOUT", timeoutMs: 250 });
+    expect(mapError(error)).toMatchObject({
+      statusCode: 504,
+      code: "QUERY_TIMEOUT",
+      message: "Query timeout after 250ms (GET /api/markets/:id)",
+    });
+    expect(queryCalls.at(-1)).toBe("ROLLBACK");
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the timed query when the request aborts", async () => {
+    let rejectSlowQuery!: (error: unknown) => void;
+    const { pool, client } = createTimeoutPool((text) => {
+      if (text === "SELECT slow") {
+        return new Promise((_resolve, reject) => {
+          rejectSlowQuery = reject;
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const controller = new AbortController();
+
+    const query = queryWithTimeout(pool, "SELECT slow", [], {
+      timeoutMs: 1000,
+      route: "GET /api/markets/:id",
+      signal: controller.signal,
+    });
+    await flushMicrotasks();
+    controller.abort();
+    rejectSlowQuery(Object.assign(new Error("canceling statement"), { code: "57014" }));
+
+    await expect(query).rejects.toBeInstanceOf(QueryCancelledError);
+    expect(pool.query).toHaveBeenCalledWith("SELECT pg_cancel_backend($1)", [987]);
+    expect(getAbandonedQueryCounts()).toEqual([
+      { route: "GET /api/markets/:id", count: 1 },
+    ]);
+    expect(client.release).toHaveBeenCalledOnce();
   });
 });
 

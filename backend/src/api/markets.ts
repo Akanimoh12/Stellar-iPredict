@@ -15,7 +15,7 @@ import {
 } from "../db/markets.js";
 import { getBetsByMarketFromDb } from "../db/bets.js";
 import { getOrSet } from "../cache/cacheAside.js";
-import { queryWithCancel, type CancellablePool } from "../db/pool.js";
+import { queryWithTimeout, type CancellablePool, FAST_QUERY_TIMEOUT_MS } from "../db/pool.js";
 import {
   marketKey,
   marketsListKey,
@@ -189,31 +189,26 @@ const errorResponseSchema = {
 } as const;
 
 /**
- * Wraps `db` so its queries are cancelled (see db/pool.ts `queryWithCancel`)
- * if `signal` aborts before they resolve — i.e. the client disconnected.
- *
- * Only ever used for these GET routes: each issues its own standalone,
- * read-only query outside of any transaction, so abandoning one mid-flight
- * can never leave a transaction half-committed. `db` is only a real
- * cancellable Postgres pool in production (it needs `.connect()` for the
- * pg_cancel_backend dance); unit tests inject a bare `{ query }` fake, which
- * this passes through untouched.
+ * Add a transaction-local timeout and optional disconnect cancellation to a
+ * real pool. Tests use query-only fakes, which pass through unchanged.
  */
-function withCancellation(
+function withTimeout(
   db: Queryable,
-  signal: AbortSignal | undefined,
   route: string,
+  signal?: AbortSignal,
+  timeoutMs: number = FAST_QUERY_TIMEOUT_MS,
 ): Queryable {
-  if (
-    !signal ||
-    typeof (db as unknown as Partial<CancellablePool>).connect !== "function"
-  ) {
+  if (typeof (db as unknown as Partial<CancellablePool>).connect !== "function") {
     return db;
   }
   const cancellablePool = db as unknown as CancellablePool;
   return {
     query: <T>(text: string, values?: unknown[]) =>
-      queryWithCancel(cancellablePool, text, values ?? [], { signal, route }) as unknown as Promise<{ rows: T[] }>,
+      queryWithTimeout(cancellablePool, text, values ?? [], {
+        timeoutMs,
+        route,
+        signal,
+      }) as unknown as Promise<{ rows: T[] }>,
   };
 }
 
@@ -287,6 +282,7 @@ export function createMarketsRoutes(
           },
           304: { type: "null", description: "Not Modified" },
           400: errorResponseSchema,
+          504: errorResponseSchema,
         },
       },
     },
@@ -309,10 +305,10 @@ export function createMarketsRoutes(
       const key = marketsListKey(filter, category, sort, page, limit);
       const ttl =
         filter === "active" ? MARKETS_ACTIVE_TTL : MARKETS_DEFAULT_TTL;
-      const cancellableDb = withCancellation(
+      const cancellableDb = withTimeout(
         db,
-        request.abortSignal,
         "GET /api/markets",
+        request.abortSignal,
       );
 
             const result = redis
@@ -376,11 +372,13 @@ export function createMarketsRoutes(
               "checkedAt",
             ],
           },
+          504: errorResponseSchema,
         },
       },
     },
     async (_request, reply) => {
-      const status = await getResolutionDelayStatus(db);
+      const cancellableDb = withTimeout(db, "GET /api/markets/resolution-status");
+      const status = await getResolutionDelayStatus(cancellableDb);
       // Short cache — this is a coarse signal and the query hits `markets`.
       reply.header("Cache-Control", "public, max-age=30");
       return reply.status(200).send(status);
@@ -433,6 +431,7 @@ export function createMarketsRoutes(
             },
             required: ["candidates", "checked", "windowSeconds", "includePastExpiry", "checkedAt"],
           },
+          504: errorResponseSchema,
         },
       },
     },
@@ -440,7 +439,8 @@ export function createMarketsRoutes(
       // Short cache: this drives a periodic sweep, not a user-facing view, and
       // an operator running it repeatedly should not hammer `markets`.
       reply.header("Cache-Control", "public, max-age=60");
-      return getUnmappableCandidates(db);
+      const cancellableDb = withTimeout(db, "GET /api/markets/unmappable");
+      return getUnmappableCandidates(cancellableDb);
     }
   );
 
@@ -474,6 +474,7 @@ export function createMarketsRoutes(
           },
           400: errorResponseSchema,
           404: errorResponseSchema,
+          504: errorResponseSchema,
         },
       },
     },
@@ -484,9 +485,14 @@ export function createMarketsRoutes(
       }
 
       const calculateOddsPayload = async () => {
+        const cancellableDb = withTimeout(
+          db,
+          "GET /api/markets/:id/odds",
+          request.abortSignal,
+        );
         const market = redis
-          ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, () => getMarketById(id, db))
-          : await getMarketById(id, db);
+          ? await getOrSet(redis, marketKey(id), MARKET_DETAIL_TTL, () => getMarketById(id, cancellableDb))
+          : await getMarketById(id, cancellableDb);
 
         if (!market) {
           throw notFound("Market not found");
@@ -573,6 +579,7 @@ export function createMarketsRoutes(
           },
           400: errorResponseSchema,
           404: errorResponseSchema,
+          504: errorResponseSchema,
         },
       },
     },
@@ -582,10 +589,10 @@ export function createMarketsRoutes(
         throw badRequest("id must be a positive integer");
       }
 
-      const cancellableDb = withCancellation(
+      const cancellableDb = withTimeout(
         db,
-        request.abortSignal,
         "GET /api/markets/:id",
+        request.abortSignal,
       );
       const loader = () => getMarketById(id, cancellableDb);
       const market = redis
@@ -684,6 +691,7 @@ export function createMarketsRoutes(
           },
           400: errorResponseSchema,
           404: errorResponseSchema,
+          504: errorResponseSchema,
         },
       },
     },
@@ -703,10 +711,10 @@ export function createMarketsRoutes(
         );
       }
 
-      const cancellableDb = withCancellation(
+      const cancellableDb = withTimeout(
         db,
-        request.abortSignal,
         "GET /api/markets/:id/bets",
+        request.abortSignal,
       );
 
       // Verify the market exists before returning bets.

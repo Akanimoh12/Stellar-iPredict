@@ -1,5 +1,6 @@
-import { Pool } from "pg";
 import type { LeaderboardRow } from "./types.js";
+import type { Queryable } from "./markets.js";
+import * as poolModule from "./pool.js";
 
 export type SortOption = "points" | "bets";
 
@@ -34,12 +35,39 @@ const store = new Map<string, LeaderboardEntry>();
 // ── DB-backed public API ──────────────────────────────────────────────────────
 
 /**
- * Fetches a paginated and sorted leaderboard from the database.
+ * Default executor for leaderboard reads.
+ *
+ * Rankings tolerate a few seconds of staleness, so they are replica-eligible.
+ * The read pool falls back to the primary when no replica is configured, and
+ * pins a request to the primary after it has written anything (see
+ * `runWithReadSession` in db/pool.ts).
  */
-export async function getLeaderboard(
-  pool: Pool,
+function getDefaultReadDb(): Queryable {
+  const readPool = (poolModule as { readPool?: Queryable }).readPool;
+  if (!readPool) {
+    throw new Error("read database is not configured");
+  }
+  return readPool;
+}
+
+/**
+ * Fetches a paginated and sorted leaderboard from the database.
+ *
+ * Both call styles are supported:
+ *   getLeaderboard(params)          // replica/primary read pool
+ *   getLeaderboard(db, params)      // explicit executor (tests, transactions)
+ */
+export function getLeaderboard(params: GetLeaderboardParams): Promise<LeaderboardRow[]>;
+export function getLeaderboard(
+  db: Queryable,
   params: GetLeaderboardParams,
+): Promise<LeaderboardRow[]>;
+export async function getLeaderboard(
+  dbOrParams: Queryable | GetLeaderboardParams,
+  maybeParams?: GetLeaderboardParams,
 ): Promise<LeaderboardRow[]> {
+  const params = maybeParams ?? (dbOrParams as GetLeaderboardParams);
+  const db = maybeParams ? (dbOrParams as Queryable) : getDefaultReadDb();
   const { limit, offset, sort } = params;
 
   if (sort === "bets") {
@@ -49,7 +77,7 @@ export async function getLeaderboard(
       ORDER BY (won_bets + lost_bets) DESC, address ASC
       LIMIT $1 OFFSET $2;
     `;
-    const result = await pool.query<LeaderboardRow>(query, [limit, offset]);
+    const result = await db.query<LeaderboardRow>(query, [limit, offset]);
     return result.rows;
   }
 
@@ -59,12 +87,16 @@ export async function getLeaderboard(
     ORDER BY points DESC, address ASC
     LIMIT $1 OFFSET $2;
   `;
-  const result = await pool.query<LeaderboardRow>(query, [limit, offset]);
+  const result = await db.query<LeaderboardRow>(query, [limit, offset]);
   return result.rows;
 }
 
-export async function getLeaderboardTotal(pool: Pool): Promise<number> {
-  const result = await pool.query<{ total: string }>(
+export function getLeaderboardTotal(): Promise<number>;
+export function getLeaderboardTotal(db: Queryable): Promise<number>;
+export async function getLeaderboardTotal(
+  db: Queryable = getDefaultReadDb(),
+): Promise<number> {
+  const result = await db.query<{ total: string }>(
     "SELECT COUNT(*)::text AS total FROM leaderboard;",
     [],
   );
@@ -106,6 +138,13 @@ export function upsertLeaderboardEntry(
   }
 
   store.set(address, entry);
+
+  // A leaderboard mutation is still a write from the caller's perspective:
+  // any read that follows it in the same session must observe it, so keep the
+  // session on the primary. Optional access keeps this module usable when the
+  // pool module is partially mocked.
+  (poolModule as { markWrite?: () => void }).markWrite?.();
+
   return { success: true, hash: generateId() };
 }
 

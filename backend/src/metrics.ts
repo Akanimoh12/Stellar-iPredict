@@ -583,10 +583,10 @@ export function serializeMetrics(): string {
  * `db_query_duration_ms` histogram (see {@link serializeDbQueryMetrics}).
  */
 export async function serializePoolMetrics(): Promise<string> {
-  const { getPoolMetrics } = await import("./db/pool.js");
-  const { total, idle, waiting, max } = getPoolMetrics();
+  const poolModule = await import("./db/pool.js");
+  const { total, idle, waiting, max } = poolModule.getPoolMetrics();
 
-  return [
+  const primary = [
     "# HELP db_pool_connections Database connection pool occupancy",
     "# TYPE db_pool_connections gauge",
     `db_pool_connections_total ${total}`,
@@ -596,6 +596,25 @@ export async function serializePoolMetrics(): Promise<string> {
     "# TYPE db_pool_connections_max gauge",
     `db_pool_connections_max ${max}`,
   ].join("\n");
+
+  // Replica health/lag/routing is emitted alongside the primary-pool gauges.
+  // Partial test mocks of db/pool.js (which only export `pool`/
+  // `getPoolMetrics`) do not define `serializeReplicaMetrics`, and vitest's
+  // module namespace throws on reading an undefined export, so probe the
+  // property inside a try/catch rather than just checking `typeof`.
+  let serializeReplica: (() => string) | undefined;
+  try {
+    const candidate = (
+      poolModule as { serializeReplicaMetrics?: () => string }
+    ).serializeReplicaMetrics;
+    if (typeof candidate === "function") serializeReplica = candidate;
+  } catch {
+    serializeReplica = undefined;
+  }
+
+  const replica = serializeReplica ? serializeReplica() : "";
+
+  return replica ? `${primary}\n${replica}` : primary;
 }
 
 // ---------------------------------------------------------------------------

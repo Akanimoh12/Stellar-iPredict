@@ -422,7 +422,7 @@ export async function* iterateCouncilAudit(pool: QueryablePool): AsyncGenerator<
   let after: string | null = null;
 
   for (;;) {
-    const finalized = await pool.query<FinalizedMarketRow>(
+    const finalized: { rows: FinalizedMarketRow[] } = await pool.query<FinalizedMarketRow>(
       `SELECT market_id::text AS market_id,
               decision,
               tx_hash,

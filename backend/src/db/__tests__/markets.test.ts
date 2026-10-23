@@ -49,27 +49,27 @@ describe("getMarkets ORDER BY clause", () => {
   it("newest → ORDER BY created_at DESC", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "newest", filter: "all" }, db);
-    expect(extractOrderBy(calls[0])).toBe("created_at DESC");
+    expect(extractOrderBy(calls[0])).toBe("created_at DESC, id ASC");
   });
 
-  it("volume → ORDER BY (total_yes + total_no) DESC, created_at DESC", async () => {
+  it("volume → ORDER BY (total_yes + total_no) DESC, created_at DESC, id ASC", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "volume", filter: "all" }, db);
     expect(extractOrderBy(calls[0])).toBe(
-      "(total_yes + total_no) DESC, created_at DESC"
+      "(total_yes + total_no) DESC, created_at DESC, id ASC"
     );
   });
 
-  it("ending_soon → ORDER BY end_time ASC", async () => {
+  it("ending_soon → ORDER BY end_time ASC, id ASC", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "ending_soon", filter: "all" }, db);
-    expect(extractOrderBy(calls[0])).toBe("end_time ASC");
+    expect(extractOrderBy(calls[0])).toBe("end_time ASC, id ASC");
   });
 
-  it("bettors → ORDER BY bet_count DESC, created_at DESC", async () => {
+  it("bettors → ORDER BY bet_count DESC, created_at DESC, id ASC", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "bettors", filter: "all" }, db);
-    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC");
+    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC, id ASC");
   });
 });
 
@@ -158,7 +158,7 @@ describe("ORDER BY expressions match migration 0028 index definitions", () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "newest", filter: "all" }, db);
     // idx_markets_created_at ON markets (created_at DESC)
-    expect(extractOrderBy(calls[0])).toBe("created_at DESC");
+    expect(extractOrderBy(calls[0])).toBe("created_at DESC, id ASC");
   });
 
   it("volume ORDER BY matches idx_markets_volume_tiebreak definition", async () => {
@@ -166,7 +166,7 @@ describe("ORDER BY expressions match migration 0028 index definitions", () => {
     await getMarkets({ sort: "volume", filter: "all" }, db);
     // idx_markets_volume_tiebreak ON markets ((total_yes + total_no) DESC, created_at DESC)
     expect(extractOrderBy(calls[0])).toBe(
-      "(total_yes + total_no) DESC, created_at DESC"
+      "(total_yes + total_no) DESC, created_at DESC, id ASC"
     );
   });
 
@@ -175,14 +175,14 @@ describe("ORDER BY expressions match migration 0028 index definitions", () => {
     await getMarkets({ sort: "bettors", filter: "all" }, db);
     // idx_markets_bettors ON markets (bet_count DESC, created_at DESC)
     // WHERE resolved = FALSE AND cancelled = FALSE
-    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC");
+    expect(extractOrderBy(calls[0])).toBe("bet_count DESC, created_at DESC, id ASC");
   });
 
   it("ending_soon ORDER BY matches idx_markets_active_partial definition", async () => {
     const { db, calls } = makeCapture();
     await getMarkets({ sort: "ending_soon", filter: "all" }, db);
     // idx_markets_active_partial ON markets (end_time) WHERE resolved = FALSE AND cancelled = FALSE
-    expect(extractOrderBy(calls[0])).toBe("end_time ASC");
+    expect(extractOrderBy(calls[0])).toBe("end_time ASC, id ASC");
   });
 });
 

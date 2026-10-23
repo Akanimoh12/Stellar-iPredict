@@ -70,10 +70,20 @@ const MARKET_COLUMNS = `
  * immutable, which makes every sort a total order.
  */
 const ORDER_BY: Record<MarketSort, string> = {
-  newest: "created_at DESC, id DESC",
-  volume: "(total_yes + total_no) DESC, created_at DESC, id DESC",
+  newest: "created_at DESC, id ASC",
+  volume: "(total_yes + total_no) DESC, created_at DESC, id ASC",
   ending_soon: "end_time ASC, id ASC",
-  bettors: "bet_count DESC, created_at DESC, id DESC",
+  bettors: "bet_count DESC, created_at DESC, id ASC",
+};
+
+const ACTIVE_CLAUSE = "resolved = false AND cancelled = false AND end_time > EXTRACT(EPOCH FROM NOW())::BIGINT";
+
+const FILTER_CLAUSES: Record<MarketFilter, string> = {
+  active: ACTIVE_CLAUSE,
+  resolved: "resolved = true",
+  ended: "resolved = false AND cancelled = false AND end_time <= EXTRACT(EPOCH FROM NOW())::BIGINT",
+  cancelled: "cancelled = true",
+  all: "",
 };
 
 /**

@@ -187,7 +187,7 @@ export function normalizeQueryShape(query: string): string {
   normalized = normalized.replace(/\$\d+/g, "?");
 
   // 5. Collapse IN (?) lists: IN (?, ?, ..., ?) -> IN (?)
-  normalized = normalized.replace(/\bIN\s*\(\s*(?:\?\s*,\s*)*\?\s*\)/gi, "IN (?)");
+  normalized = normalized.replace(/\bIN\s*\(\s*(?:(?:\?|'\?')\s*,\s*)*(?:\?|'\?')\s*\)/gi, "IN (?)");
 
   // 6. Collapse multi-value lists in VALUES: VALUES (?), (?) -> VALUES (?)
   normalized = normalized.replace(

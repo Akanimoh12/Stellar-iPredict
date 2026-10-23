@@ -172,15 +172,29 @@ const oddsResponseSchema = {
 
 const errorResponseSchema = {
   type: "object",
-  additionalProperties: false,
+  additionalProperties: true,
   properties: {
+    type: { type: "string" },
+    title: { type: "string" },
+    status: { type: "number" },
+    instance: { type: "string" },
     error: {
       type: "object",
-      additionalProperties: false,
       properties: {
         code: { type: "string" },
         message: { type: "string" },
         requestId: { type: "string" },
+        details: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              message: { type: "string" },
+            },
+            required: ["field", "message"],
+          },
+        },
       },
       required: ["code", "message", "requestId"],
     },

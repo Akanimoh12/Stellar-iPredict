@@ -422,11 +422,12 @@ describe("runMonitor", () => {
     const lines: string[] = [];
     const logger = createLogger({ level: "debug", sink: (line) => lines.push(line) });
     let queries = 0;
+    const basePool = fakePool();
     const pool: QueryablePool = {
-      async query<T extends Row = Row>(): Promise<{ rows: T[] }> {
+      async query<T extends Row = Row>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
         queries += 1;
         if (queries === 1) throw new Error("connection terminated unexpectedly");
-        return { rows: [] as T[] };
+        return basePool.query(text, values);
       },
     };
 

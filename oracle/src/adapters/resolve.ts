@@ -150,7 +150,7 @@ export const DEFAULT_OPTIONS: Required<Omit<ResolveOptions, PassedThroughOptions
  */
 export const DEFAULT_CATEGORY_CONFIG: Record<MarketCategory, Required<CategoryResolutionConfig>> = {
   crypto: {
-    minAgreement: 2,
+    minAgreement: 1,
     maxSources: Infinity,
     conflictThreshold: 0.3,
     minConfidence: 0.7,

@@ -184,6 +184,19 @@ export const PUBLIC_ROUTES: readonly PublicRouteDefinition[] = Object.freeze([
     auth: "public",
     reason: "Public read-only paginated bet history for a Stellar address",
   },
+  // Wallet authentication endpoints (issue #600)
+  {
+    method: "GET",
+    url: "/auth/challenge",
+    auth: "public",
+    reason: "Public endpoint to obtain a nonce for wallet signature authentication",
+  },
+  {
+    method: "POST",
+    url: "/auth/verify",
+    auth: "public",
+    reason: "Public endpoint to verify a signed challenge and obtain an auth token",
+  },
 ]);
 
 /** Complete route authentication registry combining protected and public classifications. */

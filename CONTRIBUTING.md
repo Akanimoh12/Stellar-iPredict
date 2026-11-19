@@ -6,6 +6,8 @@ happens on the **`implementation-drips`** branch — not `main`.
 > **Security issues:** do not file vulnerabilities as public issues or PRs.
 > Follow [SECURITY.md](SECURITY.md) and use GitHub private vulnerability reporting.
 
+All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Workflow
 
 1. **Find an issue.** Browse [open issues](../../issues). Filter by `area:` label

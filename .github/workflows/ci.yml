@@ -187,6 +187,11 @@ jobs:
         working-directory: backend
         run: npm run typecheck
 
+      - name: Check API reference matches the OpenAPI spec
+        # Fails when docs/API.md is stale; regenerate with `npm run docs:api`.
+        working-directory: backend
+        run: npm run docs:api:check
+
       - name: Run backend tests with coverage
         working-directory: backend
         env:

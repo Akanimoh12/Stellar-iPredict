@@ -92,425 +92,374 @@ no such route is currently registered, so no endpoint requires a token today.
 
 ## Endpoints
 
-- `GET /healthz` — liveness probe
-- `GET /readyz` — readiness probe (DB + Redis)
-- `GET /status` — public status feed for a status page
-- `GET /api/docs` — OpenAPI 3.1 specification (JSON)
-- `GET /api/markets` — list markets (filter/sort/paginate)
-- `GET /api/markets/:id` — market detail
-- `GET /api/markets/:id/odds` — derived odds and implied probability
-- `GET /api/leaderboard` — player rankings
-- `GET /api/stats` — global platform statistics
-- `GET /api/v1/profile/:address` — a user's bets + leaderboard totals
-
----
-
-### GET /healthz
-
-**Description:** Liveness probe. Returns a fixed `200` with a static body
-unless the process itself is down.
-
-**Authentication:** none.
-
-**Query Parameters:** none.
-
-**Response** `200 OK`:
-```json
-{ "status": "ok" }
-```
-
----
-
-### GET /readyz
-
-**Description:** Readiness probe. Verifies that PostgreSQL and Redis are
-reachable. Returns `200` when both are healthy and `503` otherwise.
-
-**Authentication:** none.
-
-**Query Parameters:** none.
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ready",
-  "checks": {
-    "db":   { "ok": true,  "latencyMs": 2 },
-    "redis":{ "ok": true,  "latencyMs": 3 }
-  }
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 503 | Either `db.ok` or `redis.ok` is `false`. Body: `{ "status": "not ready", "checks": { "db": { "ok": false, "error": "..." }, "redis": { ... } } }` |
-
----
-
-### GET /status
-
-**Description:** Public status feed for an external status page: API health,
-indexer progress, and the most recently resolved market.
-
-Unlike `/readyz`, this endpoint is meant to be published. It carries **no error
-strings, hostnames, connection details, or user addresses** — a failing
-dependency reports `ok: false` and nothing more. The detailed reason stays in
-`/readyz`, which is an internal probe.
-
-It **always returns `200`**, including during an outage; a status page must stay
-readable when things are broken. Read the `status` field, not the HTTP code:
-
-| `status` | Meaning |
-|----------|---------|
-| `ok` | Everything is working. |
-| `degraded` | Serving traffic, but the cache is down or the indexer is behind, so market data may be stale. |
-| `down` | PostgreSQL is unreachable; the API cannot serve real data. |
-
-`indexer.lagSeconds` is the age of the newest indexed event, not the gap to the
-chain head — it needs no RPC call, so the feed stays cheap. The indexer is
-reported as `ok: false` once that exceeds **300 seconds**, and when nothing has
-been indexed yet (in which case the ledger and lag fields are `null` rather than
-a fabricated zero).
-
-**Authentication:** none.
-
-**Query Parameters:** none.
-
-**Caching:** responses carry
-`Cache-Control: public, max-age=15, stale-while-revalidate=30` and are cached in
-Redis for 15s, so a polling status page and any CDN in front of it are cheap.
-`generatedAt` is the real observation time and may trail the request by up to
-the TTL.
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "generatedAt": "2026-01-02T03:04:05.000Z",
-  "api": {
-    "ok": true,
-    "db":    { "ok": true, "latencyMs": 2 },
-    "redis": { "ok": true, "latencyMs": 1 }
-  },
-  "indexer": {
-    "ok": true,
-    "lastIndexedLedger": 5150,
-    "lastEventAt": "2026-01-02T03:03:55.000Z",
-    "lagSeconds": 10
-  },
-  "lastResolvedMarket": {
-    "id": 42,
-    "question": "Will it rain tomorrow?",
-    "outcome": "yes",
-    "resolvedAt": "2026-01-02T02:00:00.000Z"
-  }
-}
-```
-
-`lastResolvedMarket` is `null` when no market has resolved yet.
-
-**Error Responses:** none — failures are reported in the body as `degraded` or
-`down`.
+- `GET /api/docs` — OpenAPI specification for this API
+- `GET /api/leaderboard` — Leaderboard rankings
+- `GET /api/markets` — List markets with filtering, sorting and pagination
+- `GET /api/markets/resolution-status` — Whether market resolution is currently delayed
+- `GET /api/markets/unmappable` — Open markets that may be unresolvable, soonest to expire first
+- `GET /api/markets/{id}` — Get details of a market from its ID
+- `GET /api/markets/{id}/bets` — List bets for a market, paginated
+- `GET /api/markets/{id}/odds` — Get derived odds and implied probabilities for a market
+- `POST /api/oracle/submit` — [DEPRECATED] Use /api/v1/oracle/submit instead
+- `GET /api/stats` — Platform-wide aggregate stats
+- `POST /api/v1/oracle/submit` — Provider submission intake
+- `GET /api/v1/profile/{address}` — Get a user's profile: their bets and leaderboard stats
+- `GET /api/v1/profile/{address}/bets` — Get a user's paginated bet history
+- `GET /healthz` — Liveness probe
+- `GET /resolution-status` — Oracle resolution health — detects aggregator unavailability from overdue markets
+- `GET /status` — Public status feed for a status page
 
 ---
 
 ### GET /api/docs
 
-**Description:** Returns the generated OpenAPI 3.1 specification as JSON.
-Generated from the `schema` attached to each route, so it cannot drift from the
-implementation.
+OpenAPI specification for this API
+
+**Tags:** system
 
 **Authentication:** none.
 
-**Query Parameters:** none.
+**Parameters:** none.
 
-**Response** `200 OK`:
-```json
-{
-  "openapi": "3.1.0",
-  "info": { "title": "iPredict API", "version": "0.1.0" },
-  "paths": { ... }
-}
-```
+**Responses:**
 
----
-
-### GET /api/markets
-
-**Description:** List markets with filtering, sorting, and pagination. This is
-the hot read path the frontend market list and the synthetic probes use.
-
-**Authentication:** none.
-
-**Query Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `filter` | `string` | no | `all` | One of `active`, `resolved`, `ended`, `cancelled`, `all`. |
-| `category` | `string` | no | — | One of `Crypto`, `Sports`, `Politics`, `Entertainment`, `Science`. |
-| `sort` | `string` | no | `newest` | One of `newest`, `volume`, `ending_soon`, `bettors`. |
-| `page` | `integer` | no | `1` | 1-indexed page number (min 1). |
-| `limit` | `integer` | no | `20` | Results per page (1–100). |
-
-**Filter semantics** (from `backend/src/db/markets.ts`):
-
-| filter | SQL condition |
-|--------|---------------|
-| `active` | `resolved = false AND cancelled = false AND end_time > now()` |
-| `resolved` | `resolved = true` |
-| `ended` | `resolved = false AND cancelled = false AND end_time <= now()` |
-| `cancelled` | `cancelled = true` |
-| `all` | *(no filter)* |
-
-**Sort semantics:** `newest` → `created_at DESC`; `volume` →
-`(total_yes + total_no) DESC`; `ending_soon` → `end_time ASC`; `bettors` →
-`bet_count DESC`.
-
-**Response** `200 OK`:
-```json
-{
-  "markets": [
-    {
-      "id": 1,
-      "question": "Will Stellar XLM reach $1 in 2026?",
-      "image_url": "https://example.com/image.png",
-      "category": "Crypto",
-      "end_time": "1735689600",
-      "total_yes": "100.0000000",
-      "total_no": "50.0000000",
-      "resolved": false,
-      "outcome": null,
-      "cancelled": false,
-      "creator": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "bet_count": 5,
-      "created_at": "2026-01-01T00:00:00.000Z",
-      "updated_at": "2026-01-01T00:00:00.000Z"
-    }
-  ],
-  "total": 1,
-  "page": 1,
-  "limit": 20
-}
-```
-
-`total` is the count of rows across all pages; `page` and `limit` echo the
-requested (or default) values.
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | Invalid `filter`/`category`/`sort`, or `page`/`limit` out of range (e.g. `limit > 100`, `page = 0`). Body: `{ "error": { "code": "BAD_REQUEST", "message": "Invalid query parameters", "issues": [...] } }` |
-| 429 | Rate limit exceeded (60 req/min window per IP for this route). |
-
----
-
-### GET /api/markets/:id/odds
-
-**Description:** Returns derived YES/NO odds and implied probabilities for a market by its integer id. Handles zero-pool markets gracefully by defaulting probabilities to 0.5 (50%/50%).
-
-**Authentication:** none.
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | `string` | Positive integer market id. |
-
-**Query Parameters:** none.
-
-**Response** `200 OK`:
-```json
-{
-  "market_id": 42,
-  "total_yes": "60.0000000",
-  "total_no": "40.0000000",
-  "total_pool": "100.0000000",
-  "yes_odds": 0.6,
-  "no_odds": 0.4,
-  "implied_probability": {
-    "yes": 0.6,
-    "no": 0.4
-  }
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | `id` is not a positive integer (e.g. `GET /api/markets/not-a-number/odds`). |
-| 404 | Market not found. Body: `{ "error": { "code": "NOT_FOUND", "message": "Market not found" } }` |
-
----
-
-### GET /api/markets/:id
-
-**Description:** Returns a single market by its integer id, or `404` if it does
-not exist.
-
-**Authentication:** none.
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | `string` | Positive integer market id. |
-
-**Query Parameters:** none.
-
-**Response** `200 OK`:
-```json
-{
-  "id": 42,
-  "question": "Will the price of ETH exceed $4,000?",
-  "image_url": null,
-  "category": "Crypto",
-  "end_time": "1735689600",
-  "total_yes": "60.0000000",
-  "total_no": "40.0000000",
-  "resolved": false,
-  "outcome": null,
-  "cancelled": false,
-  "creator": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-  "bet_count": 3,
-  "created_at": "2026-01-01T00:00:00.000Z",
-  "updated_at": "2026-01-01T00:00:00.000Z"
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | `id` is not a positive integer (e.g. `GET /api/markets/not-a-number`). |
-| 404 | Market not found. Body: `{ "error": { "code": "NOT_FOUND", "message": "Market not found" } }` |
-| 429 | Rate limit exceeded (120 req/min window for this route). |
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
 
 ---
 
 ### GET /api/leaderboard
 
-**Description:** Returns paginated, sortable player rankings from the
-`leaderboard` snapshot table.
+Returns a paginated leaderboard of top players by points or bet count. This is aggregate, non-user-specific data safe for shared caches.
+
+**Tags:** leaderboard
 
 **Authentication:** none.
 
-**Query Parameters:**
+**Parameters:**
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `offset` | `integer` | no | `0` | 0-based offset (min 0). |
-| `limit` | `integer` | no | `20` | Results per page (1–100). |
-| `sort` | `string` | no | `points` | One of `points`, `bets`. |
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `offset` | query | integer | no | Pagination offset (maximum 10000; use cursor-based pagination for deeper results) |
+| `limit` | query | integer | no | Page size (maximum 100) |
+| `sort` | query | string | no | Sort field. One of `points`, `bets`. |
 
-**Sort semantics:** `points` → `points DESC`; `bets` →
-`(won_bets + lost_bets) DESC`.
+**Responses:**
 
-**Response** `200 OK`:
-```json
-{
-  "players": [
-    {
-      "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "display_name": "best_bettor",
-      "points": "83",
-      "won_bets": 30,
-      "lost_bets": 2,
-      "updated_at": "2026-01-01T00:00:00.000Z"
-    }
-  ],
-  "total": 1
-}
-```
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 304 | Not modified — ETag matched | none |
+| 400 | Default Response | object |
 
-Note: `points` is returned as a string (`BIGINT`), while `won_bets` /
-`lost_bets` are numbers. `total` is the total number of leaderboard rows.
+---
 
-**Error Responses:**
+### GET /api/markets
 
-| Status | Condition |
-|--------|-----------|
-| 400 | Invalid query parameters. Body (flat shape): `{ "code": "BAD_REQUEST", "message": "Invalid leaderboard query parameters", "issues": [...] }` |
-| 429 | Rate limit exceeded (this route falls under the default 30 req/min). |
+List markets with filtering, sorting and pagination
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:**
+
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `filter` | query | string | no | Filter markets by status. One of `active`, `resolved`, `ended`, `cancelled`, `all`. |
+| `category` | query | string | no | Filter by market category. Accepts: Crypto, Sports, Politics, Entertainment, Science. Case-insensitive and whitespace-trimming. |
+| `sort` | query | string | no | Sort order. One of `newest`, `volume`, `ending_soon`, `bettors`. |
+| `page` | query | integer | no | Page number (1-indexed). (page - 1) × limit must not exceed 10000; use cursor-based pagination for deeper results. |
+| `limit` | query | integer | no | Results per page (maximum 100) |
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 304 | Not Modified | none |
+| 400 | Default Response | object |
+
+---
+
+### GET /api/markets/resolution-status
+
+Whether market resolution is currently delayed
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:** none.
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+
+---
+
+### GET /api/markets/unmappable
+
+Candidate set for the oracle's mappability sweep (#745). The backend does not know which markets an adapter can query, so it returns open, un-cancelled markets ordered by end_time ascending. Markets already past end_time lead the list: they are the ones holding stakes with no resolution path.
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:** none.
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+
+---
+
+### GET /api/markets/{id}
+
+Get details of a market from its ID
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:**
+
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `id` | path | string | yes | Positive integer market id |
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+| 404 | Default Response | object |
+
+---
+
+### GET /api/markets/{id}/bets
+
+List bets for a market, paginated
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:**
+
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `page` | query | integer | no | Page number (1-indexed). (page - 1) × limit must not exceed 10000; use cursor-based pagination for deeper results. |
+| `limit` | query | integer | no | Results per page (maximum 100) |
+| `id` | path | string | yes | Positive integer market id |
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+| 404 | Default Response | object |
+
+---
+
+### GET /api/markets/{id}/odds
+
+Get derived odds and implied probabilities for a market
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:**
+
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `id` | path | string | yes | Positive integer market id |
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+| 404 | Default Response | object |
+
+---
+
+### POST /api/oracle/submit
+
+Legacy endpoint. Migrating to versioned API.
+
+**Tags:** oracle
+
+**Authentication:** bearer token (oracleApiKey).
+
+**Parameters:** none.
+
+**Request body:** object (required).
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+| 401 | Default Response | object |
+| 409 | Default Response | object |
 
 ---
 
 ### GET /api/stats
 
-**Description:** Returns global platform statistics computed from the database.
+Platform-wide aggregate stats
+
+**Tags:** stats
 
 **Authentication:** none.
 
-**Query Parameters:** none.
+**Parameters:** none.
 
-**Response** `200 OK`:
-```json
-{
-  "totalMarkets": 7,
-  "totalVolume": "12345.6780000",
-  "totalUsers": 31,
-  "totalBets": 120
-}
-```
+**Responses:**
 
-`totalVolume` is a string (sum of `total_yes + total_no` across markets).
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 429 | Rate limit exceeded (default 30 req/min). |
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 304 | Not modified — ETag matched | none |
 
 ---
 
-### GET /api/v1/profile/:address
+### POST /api/v1/oracle/submit
 
-**Description:** Returns a user's bet history and leaderboard aggregates
-(points, wins, losses). Unregistered addresses return empty bet history and
-zeroed aggregates rather than an error.
+Submit an oracle outcome for a market guarded by API-key auth with replay protection
+
+**Tags:** oracle
+
+**Authentication:** bearer token (oracleApiKey).
+
+**Parameters:** none.
+
+**Request body:** object (required).
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+| 401 | Default Response | object |
+| 403 | Default Response | object |
+| 404 | Default Response | object |
+| 409 | Default Response | object |
+
+---
+
+### GET /api/v1/profile/{address}
+
+Returns public leaderboard aggregates (points, wins, losses) and the bet history for the given Stellar address. **This is user-specific data — the response is marked no-store and must never be cached by a shared proxy or CDN.**
+
+**Tags:** markets
 
 **Authentication:** none.
 
-**Path Parameters:**
+**Parameters:**
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `address` | `string` | Stellar public key: starts with `G`, 56 characters, Base32. Matched by `^G[A-Z2-7]{55}$`. |
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `address` | path | string | yes | A Stellar public key (G…, 56 Base32 characters). |
 
-**Query Parameters:** none.
+**Responses:**
 
-**Response** `200 OK`:
-```json
-{
-  "bets": [
-    {
-      "market_id": "1",
-      "bettor": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "net_amount": "10.0000000",
-      "gross_amount": "10.2040816",
-      "is_yes": true,
-      "claimed": false,
-      "created_at": "2026-01-01T00:00:00.000Z"
-    }
-  ],
-  "points": "83",
-  "won_bets": 30,
-  "lost_bets": 2
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | `address` does not match the Stellar address format. Body (flat shape): `{ "error": "Bad Request", "message": "Invalid Stellar address format" }` |
-| 500 | Failed to fetch profile data. Body (flat shape): `{ "error": "Internal Server Error", "message": "Failed to fetch user profile data" }` |
-| 429 | Rate limit exceeded (default 30 req/min). |
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
 
 ---
+
+### GET /api/v1/profile/{address}/bets
+
+Returns the bets placed by a Stellar address, newest first. This user-specific response is never cached.
+
+**Tags:** markets
+
+**Authentication:** none.
+
+**Parameters:**
+
+| Name | In | Type | Required | Description |
+|------|----|------|----------|-------------|
+| `page` | query | integer | no | — |
+| `limit` | query | integer | no | — |
+| `address` | path | string | yes | A Stellar public key. |
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 400 | Default Response | object |
+
+---
+
+### GET /healthz
+
+Liveness probe
+
+**Tags:** system
+
+**Authentication:** none.
+
+**Parameters:** none.
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+
+---
+
+### GET /resolution-status
+
+Oracle resolution health — detects aggregator unavailability from overdue markets
+
+**Tags:** system
+
+**Authentication:** none.
+
+**Parameters:** none.
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
+| 503 | Default Response | object |
+
+---
+
+### GET /status
+
+Health of the API, indexer progress, and the last resolved market. Always returns 200 — read the `status` field, not the HTTP code.
+
+**Tags:** system
+
+**Authentication:** none.
+
+**Parameters:** none.
+
+**Responses:**
+
+| Status | Description | Body |
+|--------|-------------|------|
+| 200 | Default Response | object |
 
 ## Health Check
 

@@ -11,8 +11,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getMarkets } from "../markets.js";
-import type { Queryable } from "../markets.js";
+import { getMarkets } from "./markets.js";
+import type { Queryable } from "./markets.js";
 
 /** Capture every SQL string passed to db.query(). */
 function makeCapture(): { db: Queryable; calls: string[] } {

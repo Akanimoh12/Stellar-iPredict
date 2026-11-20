@@ -6,7 +6,7 @@
  * conversion layer agrees — no silent rounding, truncation or floating-point
  * drift anywhere along the path.
  *
- * Where: test/amount-precision.test.ts
+ * Where: backend/src/lib/amount-precision.test.ts
  */
 
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import {
   xlmToStroops,
   addXlmAmounts,
   STROOPS_PER_XLM,
-} from "../src/lib/amount.js";
+} from "./amount.js";
 
 // ── Shared test vectors ───────────────────────────────────────────────────────
 //

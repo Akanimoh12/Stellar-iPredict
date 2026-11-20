@@ -141,7 +141,7 @@ describe("amount conversion", () => {
 
     it("is an identity transform, so a boundary value survives it unchanged", () => {
       // Cross-boundary coverage for this parser lives in
-      // test/amount-precision.test.ts; these cases pin the contract it relies
+      // src/lib/amount-precision.test.ts; these cases pin the contract it relies
       // on — the parser never converts, formats, or rounds.
       const setTypeParserMock = vi.fn();
       configurePgNumericParser({ setTypeParser: setTypeParserMock, builtins: { NUMERIC: 1700 } });
@@ -164,7 +164,7 @@ describe("amount conversion", () => {
    * P0 — cross-boundary coverage.
    *
    * The full contract → indexer → database → API path is exercised in
-   * `backend/test/amount-precision.test.ts`, which is the only test able to
+   * `backend/src/lib/amount-precision.test.ts`, which is the only test able to
    * reach both packages. What is pinned here is the invariant that whole
    * stack rests on: a value too large for a JS number stays exact through
    * every conversion, and the one documented lossy escape hatch refuses to

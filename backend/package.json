@@ -11,6 +11,8 @@
     "test:openapi:update": "vitest run src/api/openapi.test.ts -u",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
+    "docs:api": "tsx scripts/generate-api-reference.ts",
+    "docs:api:check": "tsx scripts/generate-api-reference.ts --check",
     "lint": "tsc --noEmit",
     "test:contract": "vitest run src/api/contract.test.ts src/api/contract-helpers.test.ts src/api/frontend-contract.test.ts",
     "analyze:slow-queries": "tsx ../scripts/analyze-slow-queries.ts"

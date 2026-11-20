@@ -39,7 +39,7 @@ type SeedLeaderboard = {
 type SeedOracleSubmission = {
   market_id: number;
   submitter: string;
-  outcome: "yes" | "no";
+  outcome: "YES" | "NO";
   bond_amount: string;
   status: "submitted" | "challenged" | "finalized" | "rejected";
   decision: string | null;
@@ -49,7 +49,7 @@ type SeedOracleDispute = {
   market_id: number;
   submitter: string;
   challenger: string;
-  outcome: "yes" | "no";
+  outcome: "YES" | "NO";
   submitter_bond: string;
   challenger_bond: string;
   status: "challenged" | "escalated";
@@ -118,7 +118,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: false,
-    creator: "GS100000000000000000000000000000000000000000000000000000",
+    creator: "GSBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   },
   {
@@ -132,7 +132,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: false,
-    creator: "GS200000000000000000000000000000000000000000000000000000",
+    creator: "GSCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   },
   {
@@ -146,7 +146,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: false,
-    creator: "GS300000000000000000000000000000000000000000000000000000",
+    creator: "GSDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   },
   {
@@ -160,7 +160,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: false,
-    creator: "GS100000000000000000000000000000000000000000000000000000",
+    creator: "GSBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   },
   {
@@ -174,7 +174,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: true,
-    creator: "GS400000000000000000000000000000000000000000000000000000",
+    creator: "GSEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   },
   {
@@ -188,7 +188,7 @@ const SEED_MARKETS: SeedMarket[] = [
     resolved: false,
     outcome: null,
     cancelled: false,
-    creator: "GS300000000000000000000000000000000000000000000000000000",
+    creator: "GSDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     bet_count: 0
   }
 ];
@@ -254,18 +254,18 @@ const SEED_LEADERBOARD: SeedLeaderboard[] = [
 
 // Deterministic oracle fixtures so tests can assert against stable IDs.
 // Submitter/challenger/council addresses are 56-char Stellar-style keys.
-const SUBMITTER_1 = "GS100000000000000000000000000000000000000000000000000000";
-const SUBMITTER_2 = "GS200000000000000000000000000000000000000000000000000000";
-const SUBMITTER_3 = "GS300000000000000000000000000000000000000000000000000000";
-const SUBMITTER_4 = "GS400000000000000000000000000000000000000000000000000000";
-const CHALLENGER_1 = "GC100000000000000000000000000000000000000000000000000000";
-const CHALLENGER_2 = "GC200000000000000000000000000000000000000000000000000000";
-const CHALLENGER_3 = "GC300000000000000000000000000000000000000000000000000000";
-const COUNCIL_MEMBER_1 = "GCOUNCIL100000000000000000000000000000000000000000000000";
-const COUNCIL_MEMBER_2 = "GCOUNCIL200000000000000000000000000000000000000000000000";
-const COUNCIL_MEMBER_3 = "GCOUNCIL300000000000000000000000000000000000000000000000";
-const COUNCIL_MEMBER_4 = "GCOUNCIL400000000000000000000000000000000000000000000000";
-const COUNCIL_MEMBER_5 = "GCOUNCIL500000000000000000000000000000000000000000000000";
+const SUBMITTER_1 = "GSBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const SUBMITTER_2 = "GSCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const SUBMITTER_3 = "GSDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const SUBMITTER_4 = "GSEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const CHALLENGER_1 = "GCBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const CHALLENGER_2 = "GC2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const CHALLENGER_3 = "GC3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const COUNCIL_MEMBER_1 = "GCOUNCILBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const COUNCIL_MEMBER_2 = "GCOUNCIL2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const COUNCIL_MEMBER_3 = "GCOUNCIL3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const COUNCIL_MEMBER_4 = "GCOUNCIL4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const COUNCIL_MEMBER_5 = "GCOUNCIL5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 // One oracle submission per market (oracle_submissions is UNIQUE on
 // market_id), one per status so the full lifecycle is represented.
@@ -273,7 +273,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 4,
     submitter: SUBMITTER_1,
-    outcome: "yes",
+    outcome: "YES",
     bond_amount: "1000000000",
     status: "submitted",
     decision: null,
@@ -281,7 +281,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 5,
     submitter: SUBMITTER_1,
-    outcome: "yes",
+    outcome: "YES",
     bond_amount: "1000000000",
     status: "challenged",
     decision: null,
@@ -289,7 +289,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 6,
     submitter: SUBMITTER_2,
-    outcome: "yes",
+    outcome: "YES",
     bond_amount: "1500000000",
     status: "challenged",
     decision: null,
@@ -297,7 +297,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 7,
     submitter: SUBMITTER_1,
-    outcome: "yes",
+    outcome: "YES",
     bond_amount: "1000000000",
     status: "finalized",
     decision: "finalized",
@@ -305,7 +305,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 8,
     submitter: SUBMITTER_4,
-    outcome: "no",
+    outcome: "NO",
     bond_amount: "1200000000",
     status: "rejected",
     decision: "rejected",
@@ -313,7 +313,7 @@ const SEED_ORACLE_SUBMISSIONS: SeedOracleSubmission[] = [
   {
     market_id: 9,
     submitter: SUBMITTER_3,
-    outcome: "no",
+    outcome: "NO",
     bond_amount: "1200000000",
     status: "challenged",
     decision: null,
@@ -327,7 +327,7 @@ const SEED_ORACLE_DISPUTES: SeedOracleDispute[] = [
     market_id: 5,
     submitter: SUBMITTER_1,
     challenger: CHALLENGER_1,
-    outcome: "yes",
+    outcome: "YES",
     submitter_bond: "1000000000",
     challenger_bond: "2000000000",
     status: "challenged",
@@ -339,7 +339,7 @@ const SEED_ORACLE_DISPUTES: SeedOracleDispute[] = [
     market_id: 6,
     submitter: SUBMITTER_2,
     challenger: CHALLENGER_2,
-    outcome: "yes",
+    outcome: "YES",
     submitter_bond: "1500000000",
     challenger_bond: "3000000000",
     status: "escalated",
@@ -351,7 +351,7 @@ const SEED_ORACLE_DISPUTES: SeedOracleDispute[] = [
     market_id: 9,
     submitter: SUBMITTER_3,
     challenger: CHALLENGER_3,
-    outcome: "no",
+    outcome: "NO",
     submitter_bond: "1200000000",
     challenger_bond: "2500000000",
     status: "escalated",

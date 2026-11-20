@@ -15,7 +15,8 @@
     "docs:api:check": "tsx scripts/generate-api-reference.ts --check",
     "lint": "tsc --noEmit",
     "test:contract": "vitest run src/api/contract.test.ts src/api/contract-helpers.test.ts src/api/frontend-contract.test.ts",
-    "analyze:slow-queries": "tsx ../scripts/analyze-slow-queries.ts"
+    "analyze:slow-queries": "tsx ../scripts/analyze-slow-queries.ts",
+    "examples:verify": "node examples/verify-examples.mjs"
   },
   "dependencies": {
     "@ipredict/shared": "*",

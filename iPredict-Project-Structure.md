@@ -149,9 +149,10 @@ ipredict-stellar/
 │   └── .env.local
 ├── docs/
 │   ├── ARCHITECTURE.md
-│   ├── USER-FEEDBACK.md
 │   ├── DEPLOYMENT-GUIDE.md
-│   └── ITERATION-LOG.md
+│   ├── notes/
+│   │   ├── USER-FEEDBACK.md
+│   │   └── ITERATION-LOG.md
 ├── .gitignore
 ├── README.md
 └── LICENSE
@@ -971,7 +972,7 @@ Vercel auto-deploys from GitHub integration on push to `main` (no deploy job nee
 - Data flow for bet → resolve → claim cycle
 - Storage layout per contract
 
-### `docs/USER-FEEDBACK.md`
+### `docs/notes/USER-FEEDBACK.md`
 - Template for documenting feedback from 5+ testnet users
 - Format: User wallet address | Feedback | Date | Action taken
 - Required for Level 5 submission
@@ -986,7 +987,7 @@ Vercel auto-deploys from GitHub integration on push to `main` (no deploy job nee
 - Vercel deployment config
 - Seed market creation commands
 
-### `docs/ITERATION-LOG.md`
+### `docs/notes/ITERATION-LOG.md`
 - Changelog documenting each improvement iteration
 - Before/after for user-feedback-driven changes
 - Commit references for each iteration
@@ -1014,11 +1015,11 @@ The root `README.md` should contain these sections for Level 5 validation:
 14. CI/CD Pipeline explanation
 15. User Validation (required):
     - 5+ real testnet user wallet addresses (verifiable on Stellar Explorer)
-    - Link to USER-FEEDBACK.md
+    - Link to docs/notes/USER-FEEDBACK.md
     - Summary of 1 iteration completed based on feedback
 16. Smart Contract function listings per contract
 17. Roadmap
-18. License (MIT)
+18. License (Apache License 2.0)
 19. Author attribution
 ```
 

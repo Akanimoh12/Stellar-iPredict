@@ -23,7 +23,7 @@ const config: Config = {
         },
         accent: {
           green: "#22c55e",
-          red: "#ef4444",
+          red: "#f87171",
           yellow: "#eab308",
         },
         surface: {

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/AkanEf);/ipredict-stellar/actions"><img src="https://img.shields.io/github/actions/workflow/status/AkanEf);/ipredict-stellar/ci.yml?branch=main&label=CI&logo=github" alt="CI" /></a>
   <img src="https://img.shields.io/badge/Stellar-Soroban-blue?logo=stellar" alt="Stellar" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
   <img src="https://img.shields.io/badge/tests-207%20passing-brightgreen" alt="Tests" />
 </p>
 
@@ -230,8 +230,9 @@ ipredict-stellar/
 │   ├── ARCHITECTURE.md
 │   ├── DEPLOYMENT-GUIDE.md
 │   ├── LOCAL_DEV.md
-│   ├── USER-FEEDBACK.md
-│   └── ITERATION-LOG.md
+│   └── notes/
+│       ├── USER-FEEDBACK.md
+│       └── ITERATION-LOG.md
 └── README.md
 ```
 
@@ -307,6 +308,9 @@ cd contracts && cargo test
 # Frontend tests
 cd frontend && npm test
 
+# Key-screen visual regression layout guards
+cd frontend && npm run test:visual
+
 # Frontend tests with coverage
 cd frontend && npx vitest run --coverage
 ```
@@ -331,7 +335,7 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main
 
 ### Feedback & Iteration
 
-See [docs/USER-FEEDBACK.md](docs/USER-FEEDBACK.md) for the full feedback log.
+See [docs/notes/USER-FEEDBACK.md](docs/notes/USER-FEEDBACK.md) for the full feedback log.
 
 **Iteration Summary:** After initial testnet deployment, user feedback on loading states led to replacing spinner-only loading indicators with content-aware skeleton placeholders across leaderboard, profile, and market detail pages — improving perceived performance and reducing layout shift.
 
@@ -434,7 +438,7 @@ through GitHub's *Report a vulnerability* form on the Security tab. See
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
 
 ---
 

@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
+    "test:visual": "vitest run src/__tests__/visual-regression.test.tsx",
     "test:watch": "vitest"
   },
   "dependencies": {

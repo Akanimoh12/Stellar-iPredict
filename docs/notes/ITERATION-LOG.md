@@ -12,7 +12,7 @@ This document tracks each iteration of improvements made to the iPredict platfor
 ### Iteration N: [Title]
 
 **Date:** YYYY-MM-DD
-**Triggered by:** User Feedback #X (from USER-FEEDBACK.md) / Internal QA / Code review
+**Triggered by:** User Feedback #X (from [USER-FEEDBACK.md](USER-FEEDBACK.md)) / Internal QA / Code review
 **Priority:** High / Medium / Low
 
 #### Problem
@@ -85,5 +85,5 @@ Before marking an iteration complete:
 - [ ] Files changed documented
 - [ ] Before/after evidence captured
 - [ ] Changes committed with descriptive message
-- [ ] USER-FEEDBACK.md updated with action taken
+- [ ] [USER-FEEDBACK.md](USER-FEEDBACK.md) updated with action taken
 - [ ] Deployed to testnet for re-validation

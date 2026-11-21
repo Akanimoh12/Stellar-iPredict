@@ -207,6 +207,19 @@ export const metrics = {
   pollDuration: new Histogram([0.1, 0.5, 1, 2.5, 5, 10, 30, 60]),
   deadLetterQueueDepth: new Gauge(),
   deadLetterQueueRefreshFailures: new Counter(),
+
+  // Issue #636: adaptive backpressure. These never skip work; they only make
+  // the loop's rate and page size visible while it sheds load.
+  backpressureLevel: new Gauge(),
+  backpressureSustained: new Gauge(),
+  backpressureAlerts: new Counter(),
+  effectivePollIntervalMs: new Gauge(),
+  effectiveEventsPerPage: new Gauge(),
+
+  // Issue #637: the shared Soroban RPC breaker.
+  rpcCircuitBreakerState: new Gauge(),
+  rpcCircuitBreakerOpens: new Counter(),
+  rpcCircuitBreakerRejections: new Counter(),
 };
 
 function escapeLabel(value: string): string {
@@ -312,6 +325,34 @@ export function serializeMetrics(): string {
     }
   }
 
+  // Adaptive backpressure (issue #636)
+  lines.push("# HELP indexer_backpressure_level 0 when keeping pace, above 0 while shedding load");
+  lines.push("# TYPE indexer_backpressure_level gauge");
+  lines.push(`indexer_backpressure_level ${metrics.backpressureLevel.get()}`);
+  lines.push("# HELP indexer_backpressure_sustained 1 after sustained backpressure was detected");
+  lines.push("# TYPE indexer_backpressure_sustained gauge");
+  lines.push(`indexer_backpressure_sustained ${metrics.backpressureSustained.get()}`);
+  lines.push("# HELP indexer_backpressure_alerts_total Number of sustained backpressure episodes");
+  lines.push("# TYPE indexer_backpressure_alerts_total counter");
+  lines.push(`indexer_backpressure_alerts_total ${metrics.backpressureAlerts.get()}`);
+  lines.push("# HELP indexer_effective_poll_interval_ms Current adaptive poll interval");
+  lines.push("# TYPE indexer_effective_poll_interval_ms gauge");
+  lines.push(`indexer_effective_poll_interval_ms ${metrics.effectivePollIntervalMs.get()}`);
+  lines.push("# HELP indexer_effective_events_per_page Current adaptive event page size");
+  lines.push("# TYPE indexer_effective_events_per_page gauge");
+  lines.push(`indexer_effective_events_per_page ${metrics.effectiveEventsPerPage.get()}`);
+
+  // Shared RPC circuit breaker (issue #637)
+  lines.push("# HELP soroban_rpc_circuit_breaker_state 0 closed, 1 half-open, 2 open");
+  lines.push("# TYPE soroban_rpc_circuit_breaker_state gauge");
+  lines.push(`soroban_rpc_circuit_breaker_state{service="indexer"} ${metrics.rpcCircuitBreakerState.get()}`);
+  lines.push("# HELP soroban_rpc_circuit_breaker_opens_total Number of times the RPC breaker opened");
+  lines.push("# TYPE soroban_rpc_circuit_breaker_opens_total counter");
+  lines.push(`soroban_rpc_circuit_breaker_opens_total{service="indexer"} ${metrics.rpcCircuitBreakerOpens.get()}`);
+  lines.push("# HELP soroban_rpc_circuit_breaker_rejections_total Calls failed fast while open");
+  lines.push("# TYPE soroban_rpc_circuit_breaker_rejections_total counter");
+  lines.push(`soroban_rpc_circuit_breaker_rejections_total{service="indexer"} ${metrics.rpcCircuitBreakerRejections.get()}`);
+
   return lines.join("\n") + "\n";
 }
 
@@ -329,6 +370,45 @@ export function resetMetrics(): void {
   metrics.pollDuration.reset();
   metrics.deadLetterQueueDepth.reset();
   metrics.deadLetterQueueRefreshFailures.reset();
+  metrics.backpressureLevel.reset();
+  metrics.backpressureSustained.reset();
+  metrics.backpressureAlerts.reset();
+  metrics.effectivePollIntervalMs.reset();
+  metrics.effectiveEventsPerPage.reset();
+  metrics.rpcCircuitBreakerState.reset();
+  metrics.rpcCircuitBreakerOpens.reset();
+  metrics.rpcCircuitBreakerRejections.reset();
+}
+
+/** Values exported by the adaptive poll controller for Prometheus. */
+export interface BackpressureMetricsInput {
+  level: number;
+  sustained: boolean;
+  shouldAlert: boolean;
+  pollIntervalMs: number;
+  eventsPerPage: number;
+}
+
+/** Publishes the adaptive controller's current decision and alert episode. */
+export function recordBackpressureState(input: BackpressureMetricsInput): void {
+  metrics.backpressureLevel.set(Math.max(0, Math.min(1, input.level)));
+  metrics.backpressureSustained.set(input.sustained ? 1 : 0);
+  metrics.effectivePollIntervalMs.set(input.pollIntervalMs);
+  metrics.effectiveEventsPerPage.set(input.eventsPerPage);
+  if (input.shouldAlert) metrics.backpressureAlerts.inc();
+}
+
+/** Circuit-breaker states, kept numeric for a dependency-free Prometheus gauge. */
+export type CircuitBreakerMetricState = "closed" | "half-open" | "open";
+
+/** Publishes the shared RPC breaker's state and transition counters. */
+export function recordCircuitBreakerState(
+  state: CircuitBreakerMetricState,
+  event?: "open" | "reject",
+): void {
+  metrics.rpcCircuitBreakerState.set(state === "open" ? 2 : state === "half-open" ? 1 : 0);
+  if (event === "open") metrics.rpcCircuitBreakerOpens.inc();
+  if (event === "reject") metrics.rpcCircuitBreakerRejections.inc();
 }
 
 /** Record one chain-tip/cursor observation and preserve cursor-advance time. */

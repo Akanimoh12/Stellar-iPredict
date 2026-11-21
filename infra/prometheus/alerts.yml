@@ -211,3 +211,42 @@ groups:
           summary: Distributed oracle API-key guessing attempt
           description: "Unrecognised keys are failing at {{ $value | humanize }}/s from 5 or more distinct client origins. This is the signature of a credential-guessing attempt, not a misconfiguration; the attempted keys are never logged, so use the source addresses in the oracle auth-failure lines to identify the traffic."
           runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/main/docs/SECRET-ROTATION.md"
+
+      # ── Issue #635: heap growth trend, not absolute usage ────────────────────
+      # A process that has always used 400 MB is healthy; one gaining 10 MB an
+      # hour is not. The monitor exports the trend and a sustained flag, and
+      # `for` gives the in-process detector a second confirmation window.
+      - alert: SustainedHeapGrowth
+        expr: process_heap_sustained_growth{service=~"indexer|oracle-aggregator"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.service }} heap is growing persistently'
+          description: "The in-process monitor has seen sustained heap growth over its sampling window. Check process_heap_growth_bytes_per_hour for the rate, then capture a V8 snapshot via POST /debug/heap-snapshot before restarting; absolute heap size is not the signal."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/implementation-drips/docs/MEMORY_LEAK_PREVENTION.md"
+
+      # ── Issue #636: indexer backpressure ─────────────────────────────────────
+      - alert: IndexerBackpressureSustained
+        expr: indexer_backpressure_sustained == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: indexer
+        annotations:
+          summary: Indexer is shedding load because the database cannot keep pace
+          description: "The adaptive poll controller has reduced page size and slowed intake for several consecutive iterations. Events are NOT being skipped; check database latency and indexer_effective_poll_interval_ms before increasing throughput."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/implementation-drips/docs/INDEXER_RUNBOOK.md"
+
+      # ── Issue #637: one mechanism, both services ─────────────────────────────
+      # 2 == open. The breaker itself also sends a webhook/SEV2 alert when it
+      # opens; this rule catches the case where the alert channel is broken.
+      - alert: SorobanRpcCircuitBreakerOpen
+        expr: soroban_rpc_circuit_breaker_state{service=~"indexer|oracle"} >= 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.service }} Soroban RPC circuit breaker is open'
+          description: "RPC calls are failing fast. The breaker probes periodically and will close on recovery; verify the RPC endpoint before overriding thresholds."
+          runbook_url: "https://github.com/Akanimoh12/Stellar-iPredict/blob/implementation-drips/docs/ORACLE_RUNBOOK.md"

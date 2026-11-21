@@ -19,6 +19,7 @@
  */
 
 import { createServer, type Server } from "node:http";
+import { HeapMonitor, type CircuitBreakerState } from "@ipredict/shared";
 import type { QueryablePool } from "./tally.js";
 
 export interface ResolutionMetricStore {
@@ -189,6 +190,11 @@ export class AggregatorMetrics {
   private _lastPollCompletedAt: number | null = null;
   private _consecutivePollFailures = 0;
 
+  /** Shared Soroban RPC breaker state (issue #637), mirrored from its hook. */
+  private _rpcCircuitBreakerState: CircuitBreakerState = "closed";
+  private _rpcCircuitBreakerOpens = 0;
+  private _rpcCircuitBreakerRejections = 0;
+
   constructor(lagBuckets: readonly number[] = DEFAULT_LAG_BUCKETS_HOURS) {
     this.lagBuckets = lagBuckets;
     this.lagBucketCounts = new Array(lagBuckets.length).fill(0);
@@ -246,6 +252,16 @@ export class AggregatorMetrics {
   /** Record a market failing processing or erroring. */
   recordMarketFailed(): void {
     this._marketsFailed += 1;
+  }
+
+  /** Mirror a transition of the shared RPC circuit breaker (issue #637). */
+  recordRpcCircuitBreakerState(
+    state: CircuitBreakerState,
+    event?: "open" | "reject",
+  ): void {
+    this._rpcCircuitBreakerState = state;
+    if (event === "open") this._rpcCircuitBreakerOpens += 1;
+    if (event === "reject") this._rpcCircuitBreakerRejections += 1;
   }
 
   get marketsProcessed(): number {
@@ -500,6 +516,23 @@ export class AggregatorMetrics {
       lines.push(line);
     }
 
+    // Shared Soroban RPC circuit breaker (issue #637)
+    const breakerValue =
+      this._rpcCircuitBreakerState === "open"
+        ? 2
+        : this._rpcCircuitBreakerState === "half-open"
+          ? 1
+          : 0;
+    lines.push("# HELP soroban_rpc_circuit_breaker_state 0 closed, 1 half-open, 2 open");
+    lines.push("# TYPE soroban_rpc_circuit_breaker_state gauge");
+    lines.push(`soroban_rpc_circuit_breaker_state{service="oracle"} ${breakerValue}`);
+    lines.push("# HELP soroban_rpc_circuit_breaker_opens_total Number of times the RPC breaker opened");
+    lines.push("# TYPE soroban_rpc_circuit_breaker_opens_total counter");
+    lines.push(`soroban_rpc_circuit_breaker_opens_total{service="oracle"} ${this._rpcCircuitBreakerOpens}`);
+    lines.push("# HELP soroban_rpc_circuit_breaker_rejections_total Calls failed fast while open");
+    lines.push("# TYPE soroban_rpc_circuit_breaker_rejections_total counter");
+    lines.push(`soroban_rpc_circuit_breaker_rejections_total{service="oracle"} ${this._rpcCircuitBreakerRejections}`);
+
     return lines.join("\n") + "\n";
   }
 }
@@ -508,33 +541,68 @@ export interface AggregatorMetricsServerOptions {
   metrics: AggregatorMetrics;
   port?: number;
   host?: string;
+  /** Inject a preconfigured heap monitor; one is created when omitted. */
+  heapMonitor?: HeapMonitor;
 }
 
 /**
- * Scrape server exposing aggregator metrics at GET /metrics.
+ * Scrape server exposing aggregator metrics at GET /metrics, the heap trend at
+ * GET /debug/heap and a V8 heap snapshot at POST /debug/heap-snapshot (#635).
  */
 export class AggregatorMetricsServer {
   private server: Server | null = null;
   private readonly port: number;
   private readonly host: string;
   private readonly metrics: AggregatorMetrics;
+  private readonly heapMonitor: HeapMonitor;
 
   constructor(options: AggregatorMetricsServerOptions) {
     this.metrics = options.metrics;
     this.port = options.port ?? 9102;
     this.host = options.host ?? "0.0.0.0";
+    this.heapMonitor =
+      options.heapMonitor ??
+      new HeapMonitor({
+        service: "oracle-aggregator",
+        onAlert: (assessment) => {
+          console.warn("[ipredict-oracle] sustained heap growth detected", {
+            growthBytesPerHour: Math.round(assessment.growthBytesPerHour),
+            sustainedMs: assessment.sustainedMs,
+            sampleCount: assessment.sampleCount,
+          });
+        },
+      });
+  }
+
+  /** The monitor fed by this server. */
+  getHeapMonitor(): HeapMonitor {
+    return this.heapMonitor;
   }
 
   start(): Promise<void> {
+    this.heapMonitor.start();
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
         const path = (req.url ?? "").split("?")[0];
         if (path === "/metrics") {
-          const body = this.metrics.toPrometheus();
+          const body =
+            [this.metrics.toPrometheus(), ...this.heapMonitor.serializePrometheus()].join("\n") + "\n";
           res.writeHead(200, {
             "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
           });
           res.end(body);
+        } else if (path === "/debug/heap") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(this.heapMonitor.assessment()));
+        } else if (path === "/debug/heap-snapshot" && (req.method === "POST" || req.method === "GET")) {
+          const snapshot = this.heapMonitor.writeSnapshot();
+          if (snapshot === null) {
+            res.writeHead(429, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "rate_limited" }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(snapshot));
         } else if (path === "/health") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok" }));
@@ -559,6 +627,7 @@ export class AggregatorMetricsServer {
   }
 
   stop(): Promise<void> {
+    this.heapMonitor.stop();
     return new Promise((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => {

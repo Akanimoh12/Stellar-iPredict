@@ -345,6 +345,24 @@ These are dependency-free in-process values; wire them into whatever sink the
 deployment uses (Prometheus text format, JSON log, etc.). See the metric
 catalogue in [`docs/ORACLE_AND_BACKEND.md`](ORACLE_AND_BACKEND.md#monitoring).
 
+### Backpressure and circuit breaker
+
+When Postgres cannot keep pace, `AdaptivePollController` lengthens the poll
+interval and shrinks `EVENTS_PER_PAGE`. It never advances the cursor past
+unprocessed events, so no event is lost; it walks both values back to baseline
+after several fast iterations. Watch `indexer_backpressure_sustained`,
+`indexer_effective_poll_interval_ms` and `indexer_effective_events_per_page` on
+`GET /metrics`.
+
+`SorobanRpcCircuitBreakerOpen` means the shared breaker has opened after three
+consecutive exhausted RPC retry budgets. Calls now fail fast; the breaker
+admits one probe every `RPC_CIRCUIT_RESET_TIMEOUT_MS` and closes automatically
+on success. Verify the RPC endpoint before raising thresholds.
+
+Heap growth is alerted on trend, not absolute size. See
+[`MEMORY_LEAK_PREVENTION.md`](MEMORY_LEAK_PREVENTION.md) for the snapshot
+endpoint (`POST /debug/heap-snapshot`) and the list of structures to inspect.
+
 ### Uptime checks
 
 For liveness/readiness of the overall stack, see the synthetic monitoring

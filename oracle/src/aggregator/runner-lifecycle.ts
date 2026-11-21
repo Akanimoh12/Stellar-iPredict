@@ -19,6 +19,7 @@ import { AggregatorHealthServer } from "./health.js";
 import { alertContractWasmResults } from "./wasm-integrity.js";
 import { createProductionDependencies } from "./runner-dependencies.js";
 import { runAggregator } from "./runner-loop.js";
+import { configureSorobanRpcCircuitBreaker } from "./rpc-circuit-breaker.js";
 
 export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = loadAggregatorConfig(env);
@@ -50,6 +51,25 @@ export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Pro
   let healthServer: AggregatorHealthServer | undefined;
   let lastPollCompletedAt: number | null = null;
   const aggregatorMetrics = new AggregatorMetrics();
+
+  // Issue #637: the oracle uses the same breaker implementation as the
+  // indexer, with this service's alert channel and metric sink attached.
+  configureSorobanRpcCircuitBreaker({
+    logger,
+    alertWebhookUrl: config.ALERT_WEBHOOK_URL,
+    onStateChange: (state, snapshot) => {
+      aggregatorMetrics.recordRpcCircuitBreakerState(state, state === "open" ? "open" : undefined);
+      if (state === "open") {
+        logger.warn("soroban rpc breaker opened", {
+          breaker: snapshot.name,
+          failures: snapshot.failures,
+        });
+      }
+    },
+    onReject: () => {
+      aggregatorMetrics.recordRpcCircuitBreakerState("open", "reject");
+    },
+  });
 
   const dependencies = createProductionDependencies(config, logger, {
     council: councilConfig,

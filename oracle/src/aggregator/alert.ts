@@ -158,6 +158,12 @@ interface DedupeEntry {
 /** Default cooldown: do not re-fire the same (marketId, severity) within 15 minutes. */
 const DEFAULT_COOLDOWN_MS = 15 * 60 * 1_000;
 
+/**
+ * Hard cap on cooldown bookkeeping (issue #635). Without it, one distinct
+ * market ID per alert would grow the map for the lifetime of the process.
+ */
+const MAX_DEDUPE_ENTRIES = 1_000;
+
 function makeDedupeKey(marketId: string, severity: Severity, channelIndex: number): DedupeKey {
   return `${severity}:${marketId}:${channelIndex}`;
 }
@@ -205,6 +211,24 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
   }
   const dedupeMap = new Map<DedupeKey, DedupeEntry>();
   const inFlight = new Map<DedupeKey, Promise<void>>();
+
+  const rememberDelivery = (key: DedupeKey): void => {
+    if (cooldownMs <= 0) return;
+    if (dedupeMap.size >= MAX_DEDUPE_ENTRIES) {
+      // Evict the least recently fired key. An alert older than the cooldown
+      // is no longer suppressing anything, so it is always safe to forget.
+      let oldestKey: DedupeKey | undefined;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [candidate, entry] of dedupeMap) {
+        if (entry.lastFiredAt < oldestAt) {
+          oldestAt = entry.lastFiredAt;
+          oldestKey = candidate;
+        }
+      }
+      if (oldestKey !== undefined) dedupeMap.delete(oldestKey);
+    }
+    dedupeMap.set(key, { lastFiredAt: Date.now() });
+  };
 
   return async (alert) => {
     const severity = classifyAlertSeverity(alert);
@@ -254,9 +278,7 @@ export function createAlertRouter(options: AlertRouterOptions): AlertSender {
           for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
             try {
               await ch.send(payload);
-              if (cooldownMs > 0) {
-                dedupeMap.set(key, { lastFiredAt: Date.now() });
-              }
+              rememberDelivery(key);
               return;
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);

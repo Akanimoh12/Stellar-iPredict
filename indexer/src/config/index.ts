@@ -43,6 +43,62 @@ const configSchema = z.object({
     .int("BACKFILL_WINDOW_LEDGERS must be an integer")
     .positive("BACKFILL_WINDOW_LEDGERS must be positive")
     .default(DEFAULT_BACKFILL_WINDOW_LEDGERS),
+
+  // Issue #636: adaptive backpressure. The indexer never advances its cursor
+  // past unprocessed events; these knobs only slow the rate and shrink pages
+  // while the database is the bottleneck.
+  BACKPRESSURE_MIN_POLL_INTERVAL_MS: z.coerce
+    .number()
+    .int("BACKPRESSURE_MIN_POLL_INTERVAL_MS must be an integer")
+    .positive("BACKPRESSURE_MIN_POLL_INTERVAL_MS must be positive")
+    .default(1_000),
+  BACKPRESSURE_MAX_POLL_INTERVAL_MS: z.coerce
+    .number()
+    .int("BACKPRESSURE_MAX_POLL_INTERVAL_MS must be an integer")
+    .positive("BACKPRESSURE_MAX_POLL_INTERVAL_MS must be positive")
+    .default(60_000),
+  BACKPRESSURE_MIN_EVENTS_PER_PAGE: z.coerce
+    .number()
+    .int("BACKPRESSURE_MIN_EVENTS_PER_PAGE must be an integer")
+    .positive("BACKPRESSURE_MIN_EVENTS_PER_PAGE must be positive")
+    .default(25),
+  BACKPRESSURE_PRESSURE_RATIO: z.coerce
+    .number()
+    .min(0.1, "BACKPRESSURE_PRESSURE_RATIO must be at least 0.1")
+    .max(1, "BACKPRESSURE_PRESSURE_RATIO must be at most 1")
+    .default(0.8),
+  BACKPRESSURE_RECOVERY_RATIO: z.coerce
+    .number()
+    .min(0.1, "BACKPRESSURE_RECOVERY_RATIO must be at least 0.1")
+    .max(1, "BACKPRESSURE_RECOVERY_RATIO must be at most 1")
+    .default(0.4),
+  BACKPRESSURE_SUSTAINED_SAMPLES: z.coerce
+    .number()
+    .int("BACKPRESSURE_SUSTAINED_SAMPLES must be an integer")
+    .positive("BACKPRESSURE_SUSTAINED_SAMPLES must be positive")
+    .default(3),
+  BACKPRESSURE_RECOVERY_SAMPLES: z.coerce
+    .number()
+    .int("BACKPRESSURE_RECOVERY_SAMPLES must be an integer")
+    .positive("BACKPRESSURE_RECOVERY_SAMPLES must be positive")
+    .default(5),
+
+  // Issue #637: shared circuit breaker, configured identically per service.
+  RPC_CIRCUIT_FAILURE_THRESHOLD: z.coerce
+    .number()
+    .int("RPC_CIRCUIT_FAILURE_THRESHOLD must be an integer")
+    .positive("RPC_CIRCUIT_FAILURE_THRESHOLD must be positive")
+    .default(3),
+  RPC_CIRCUIT_RESET_TIMEOUT_MS: z.coerce
+    .number()
+    .int("RPC_CIRCUIT_RESET_TIMEOUT_MS must be an integer")
+    .positive("RPC_CIRCUIT_RESET_TIMEOUT_MS must be positive")
+    .default(30_000),
+  RPC_CIRCUIT_HALF_OPEN_SUCCESSES: z.coerce
+    .number()
+    .int("RPC_CIRCUIT_HALF_OPEN_SUCCESSES must be an integer")
+    .positive("RPC_CIRCUIT_HALF_OPEN_SUCCESSES must be positive")
+    .default(1),
 });
 
 export type Config = z.infer<typeof configSchema>;

@@ -435,6 +435,7 @@ const tx = new TransactionBuilder(sourceAccount, { fee: "100000", networkPassphr
 | `CouncilWindowExceeded` | Escalated market > 72 h without ruling | `council-inactivity-monitor.ts` |
 | `ConflictingSubmissions` | Two adapters return opposite outcomes at high confidence | `conflict-detection.ts` |
 | `SubmitFailed` | Submission failed after all retries | `submit-with-retry.ts` |
+| `SorobanRpcCircuitBreakerOpen` | Shared RPC breaker opened after 3 exhausted retry budgets | `aggregator/rpc-circuit-breaker.ts` |
 | `AggregatorDown` | Aggregator process not running | Infrastructure monitor |
 
 Both retry paths in the oracle — `adapters/httpRetry.ts` (provider HTTP
@@ -442,6 +443,28 @@ calls) and `aggregator/submit-with-retry.ts` (on-chain submissions) — use the
 shared retry utility in `@ipredict/shared` (issue #641). The backoff curve, the
 jitter and the rule that decides retryability from the failure's type are the
 same everywhere; each call site only states its own budget.
+
+### Soroban RPC circuit breaker (issue #637)
+
+The oracle and indexer share the same circuit breaker state machine in
+`shared/src/circuitBreaker.ts`. After three consecutive exhausted retry
+budgets, the breaker opens and on-chain submissions fail fast (logged, not
+reported as a second `SubmitFailed` alert). One probe is admitted every
+`RPC_CIRCUIT_RESET_TIMEOUT_MS` (default 30s); a success closes the breaker, a
+failure re-opens it with a fresh window. `ALERT_WEBHOOK_URL` receives a SEV2
+`oracle.aggregator.circuit_breaker_open` alert on each opening. Metrics are
+exported as `soroban_rpc_circuit_breaker_state{service="oracle"}` (0 closed,
+1 half-open, 2 open) plus `..._opens_total` and `..._rejections_total`.
+
+### Heap trends (issue #635)
+
+`GET /metrics` on the aggregator metrics port also exports the trend-based heap
+series `process_heap_growth_bytes_per_hour` and
+`process_heap_sustained_growth`. `GET /debug/heap` returns the current
+assessment as JSON; `POST /debug/heap-snapshot` captures a V8 snapshot to
+`HEAP_SNAPSHOT_DIR`. See [`MEMORY_LEAK_PREVENTION.md`](MEMORY_LEAK_PREVENTION.md)
+for the alert thresholds and the list of structures to inspect before
+restarting a leaking process.
 
 Webhook alerts POST JSON to `FINALIZE_WEBHOOK_URL`. A webhook failure is
 logged and swallowed — it never blocks the poll loop.

@@ -63,6 +63,10 @@ npm run dev                 # starts the API on :4000
 You need Postgres and Redis running locally (see
 [`infra/`](../infra) for a docker-compose that starts both).
 
+Worked client examples (listing markets, paging, ETags, rate limits, errors) live in
+[`../docs/API_EXAMPLES.md`](../docs/API_EXAMPLES.md). They are verified against a running instance with
+`IPREDICT_API_URL=http://127.0.0.1:4000 npm run examples:verify`.
+
 ## Endpoints
 
 See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md#api-endpoints) for the architecture specification.

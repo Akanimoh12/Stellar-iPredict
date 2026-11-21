@@ -23,6 +23,10 @@ export const LEGACY_MIGRATION_GROUPS: Record<string, readonly string[]> = {
     "0022_oracle_resolution_lag.sql",
     "0022_oracle_submissions_request_id.sql"
   ],
+  "0026": [
+    "0026_bet_anomaly_alerts.sql",
+    "0026_dead_letter_events_timestamptz.sql"
+  ],
   "0028": [
     "0028_adapter_raw_payloads.sql",
     "0028_markets_sort_indexes.sql"

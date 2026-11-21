@@ -42,6 +42,7 @@ is_frozen_legacy_group() {
     "0014:0014_markets_active_partial_index.sql 0014_oracle_dispute_bond_constraints.sql 0014_oracle_providers.sql" | \
     "0015:0015_idempotency_keys.sql 0015_oracle_disputes_total_bond_generated.sql 0015_oracle_updated_at.sql" | \
     "0022:0022_oracle_resolution_lag.sql 0022_oracle_submissions_request_id.sql" | \
+    "0026:0026_bet_anomaly_alerts.sql 0026_dead_letter_events_timestamptz.sql" | \
     "0028:0028_adapter_raw_payloads.sql 0028_markets_sort_indexes.sql" | \
     "0029:0029_dead_letter_retry_cap.sql 0029_markets_sort_indexes.sql")
       return 0

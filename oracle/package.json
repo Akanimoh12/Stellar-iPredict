@@ -1,6 +1,7 @@
 {
   "name": "ipredict-oracle",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "iPredict oracle \u2014 council aggregator, data adapters, submitter, monitor",
   "type": "module",

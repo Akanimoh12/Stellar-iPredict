@@ -1,5 +1,16 @@
 export { resolveMarket, DEFAULT_CATEGORY_CONFIG, DEFAULT_OPTIONS } from "./resolve.js";
 export type { ResolutionResult, SourceResult, ResolutionStatus, ResolveOptions, CategoryResolutionConfig, RawPayloadSink } from "./resolve.js";
+export {
+  logAdapterError,
+  logResolutionProvenance,
+  buildResolutionProvenance,
+  consoleAdapterLogger,
+} from "./logging.js";
+export type {
+  AdapterLogger,
+  ResolutionProvenanceItem,
+  ResolutionDecisionLog,
+} from "./logging.js";
 export { FileProvenanceStore, InMemoryProvenanceStore, computePayloadHash } from "./provenance.js";
 export type { ProvenanceRecord, ProvenanceStore } from "./provenance.js";
 export {

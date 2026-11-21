@@ -1,6 +1,7 @@
 {
   "name": "stellar-ipredict",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "workspaces": [
     "backend",
@@ -19,6 +20,7 @@
     "smoke:list": "tsx test/smoke/run.ts --list",
     "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",
     "audit": "npx audit-ci --config ./audit-ci.jsonc",
+    "license:check": "node scripts/check-dependency-licenses.js",
     "analyze:slow-queries": "tsx scripts/analyze-slow-queries.ts"
   },
   "overrides": {

@@ -1,6 +1,7 @@
 import { selectAdaptersForMarket, type DataAdapter, type Market, type MarketCategory } from "./index.js";
 import { reviewItem, type ManualReviewQueue } from "./reviewQueue.js";
 import { createProvenanceRecord, sanitizeProvenanceValue, type ProvenanceStore } from "./provenance.js";
+import { logResolutionProvenance, type AdapterLogger, consoleAdapterLogger } from "./logging.js";
 import {
   type MappabilityOverride,
   type MappabilityVerdict,
@@ -116,6 +117,8 @@ export interface ResolveOptions {
   mappabilityRegistry?: MarketMappabilityRegistry;
   /** Operator overrides for mappability, from `MappabilityOverrides.load()`. */
   mappabilityOverrides?: MappabilityOverride;
+  /** Optional logger for structured provenance output. Defaults to consoleAdapterLogger. */
+  logger?: AdapterLogger;
 }
 
 /** Options carried through as-is, rather than defaulted per category. */
@@ -126,7 +129,8 @@ type PassedThroughOptions =
   | "categoryConfigs"
   | "checkMappability"
   | "mappabilityRegistry"
-  | "mappabilityOverrides";
+  | "mappabilityOverrides"
+  | "logger";
 
 export interface CategoryResolutionConfig {
   minAgreement?: number;
@@ -256,6 +260,7 @@ export async function resolveMarket(
     checkMappability: options?.checkMappability,
     mappabilityRegistry: options?.mappabilityRegistry,
     mappabilityOverrides: options?.mappabilityOverrides,
+    logger: options?.logger,
   };
 
   // Every exit path runs through `finish`, so a payload is persisted whatever
@@ -266,6 +271,17 @@ export async function resolveMarket(
   const finish = async (result: ResolutionResult): Promise<ResolutionResult> => {
     await opts.rawPayloadSink?.(market.id, result.sources);
     await opts.provenanceStore?.save(createProvenanceRecord(market.id, result));
+    logResolutionProvenance(
+      {
+        marketId: market.id,
+        status: result.status,
+        outcome: result.outcome,
+        confidence: result.confidence,
+        threshold: market.params?.threshold,
+      },
+      result.sources,
+      opts.logger ?? consoleAdapterLogger,
+    );
     return result;
   };
 

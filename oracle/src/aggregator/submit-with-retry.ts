@@ -1,5 +1,15 @@
-import { SUBMIT_RETRY_CONFIG, createRetryRunner, type RetryOptions as SharedRetryOptions } from "@ipredict/shared";
+import {
+  CircuitBreakerOpenError,
+  SUBMIT_RETRY_CONFIG,
+  classifyFailure,
+  createRetryRunner,
+  type RetryOptions as SharedRetryOptions,
+} from "@ipredict/shared";
 import type { Logger } from "../log.js";
+import {
+  reportSorobanRpcCircuitRejection,
+  sorobanRpcCircuitBreaker,
+} from "./rpc-circuit-breaker.js";
 
 export interface RetryOptions {
   maxRetries: number;
@@ -44,6 +54,24 @@ export async function submitWithRetry(
   options: RetryOptions,
 ): Promise<boolean> {
   const logger = options.logger;
+
+  // Issue #637: fail fast when the shared RPC breaker is open. The breaker's
+  // own onOpen hook has already alerted, so this is not a persistent-submit
+  // failure and must not fire a second, misleading alert.
+  try {
+    sorobanRpcCircuitBreaker.assertAllowed();
+  } catch (error) {
+    if (error instanceof CircuitBreakerOpenError) {
+      reportSorobanRpcCircuitRejection();
+      logger?.warn("submit skipped: Soroban RPC circuit breaker is open", {
+        marketId,
+        retryAfterMs: Math.round(error.retryAfterMs),
+      });
+      return false;
+    }
+    throw error;
+  }
+
   let lastError: unknown;
   let attempts = 0;
 
@@ -94,7 +122,7 @@ export async function submitWithRetry(
   };
 
   try {
-    return await runSubmitRetry<boolean>(async (attempt) => {
+    const result = await runSubmitRetry<boolean>(async (attempt) => {
       try {
         await submit(marketId);
         logger?.info("submit succeeded", { marketId, attempt: attempt + 1 });
@@ -110,9 +138,23 @@ export async function submitWithRetry(
         throw error;
       }
     }, retryOptions);
+
+    // A successful retry sequence proves the RPC endpoint is reachable again.
+    sorobanRpcCircuitBreaker.recordSuccess();
+    return result;
   } catch (error) {
     // The retry budget is spent.
     lastError = lastError ?? error;
+
+    // Only transient failures say anything about RPC availability. A domain
+    // error (already finalized, bad request) is a healthy response, so it
+    // clears the failure streak instead of opening the breaker.
+    const classification = classifyFailure(lastError, {
+      permanentErrorNames: SUBMIT_RETRY_CONFIG.permanentErrorNames,
+    });
+    if (classification.retryable) sorobanRpcCircuitBreaker.recordFailure(lastError);
+    else sorobanRpcCircuitBreaker.recordSuccess();
+
     logger?.error("submit failed persistently", { marketId, attempts, error: lastError });
 
     if (attempts >= options.alertThreshold) {

@@ -21,16 +21,21 @@
  */
 
 import {
+  CircuitBreakerOpenError,
   RPC_RETRY_CONFIG,
   classifyFailure,
+  createCircuitBreaker,
   createRetryRunner,
   withRetry as runWithRetry,
+  type CircuitBreaker,
   type RetryAttempt,
   type RetryOptions,
 } from "@ipredict/shared";
+import { recordCircuitBreakerState } from "../metrics.js";
 
 export type { RetryAttempt, RetryOptions };
 export {
+  CircuitBreakerOpenError,
   RetryExhaustedError,
   getRetryAfterMs,
   getStatusCode,
@@ -38,6 +43,44 @@ export {
 } from "@ipredict/shared";
 
 const runRpcRetry = createRetryRunner(RPC_RETRY_CONFIG);
+
+function positiveEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * One breaker for every indexer RPC call (issue #637).
+ *
+ * It records one outcome per retry *sequence*: a whole budget spent against a
+ * down node is one transient failure. Three consecutive exhausted budgets open
+ * the breaker, so a later outage fails immediately instead of multiplying a
+ * 30-second retry budget across every poll. A single successful probe after
+ * the reset window closes it again.
+ */
+export const indexerRpcCircuitBreaker: CircuitBreaker = createCircuitBreaker({
+  name: "indexer-soroban-rpc",
+  failureThreshold: positiveEnv("RPC_CIRCUIT_FAILURE_THRESHOLD", 3),
+  resetTimeoutMs: positiveEnv("RPC_CIRCUIT_RESET_TIMEOUT_MS", 30_000),
+  halfOpenSuccesses: positiveEnv("RPC_CIRCUIT_HALF_OPEN_SUCCESSES", 1),
+  permanentErrorNames: RPC_RETRY_CONFIG.permanentErrorNames,
+  onOpen: (snapshot) => {
+    recordCircuitBreakerState("open", "open");
+    console.warn("[ipredict-indexer] Soroban RPC circuit breaker opened", {
+      breaker: snapshot.name,
+      failures: snapshot.failures,
+      retryAfterMs: positiveEnv("RPC_CIRCUIT_RESET_TIMEOUT_MS", 30_000),
+    });
+  },
+  onHalfOpen: () => {
+    recordCircuitBreakerState("half-open");
+    console.info("[ipredict-indexer] Soroban RPC circuit breaker probing recovery");
+  },
+  onClose: () => {
+    recordCircuitBreakerState("closed");
+    console.info("[ipredict-indexer] Soroban RPC circuit breaker closed");
+  },
+});
 
 /**
  * True when the error represents an HTTP 429 (rate limited).
@@ -71,5 +114,12 @@ export function isTransientError(error: unknown): boolean {
  * @throws {RetryExhaustedError} once attempts are exhausted, wrapping the last error.
  */
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions<T> = {}): Promise<T> {
-  return runRpcRetry(fn, options);
+  try {
+    return await indexerRpcCircuitBreaker.run(() => runRpcRetry(fn, options));
+  } catch (error) {
+    if (error instanceof CircuitBreakerOpenError) {
+      recordCircuitBreakerState("open", "reject");
+    }
+    throw error;
+  }
 }

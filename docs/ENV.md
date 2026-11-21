@@ -30,6 +30,10 @@ All Node services utilize [`loadSecrets()`](../shared/src/secrets.ts) before con
 | `LOG_LEVEL` | All | Optional | `info` | Logging verbosity: `debug`, `info`, `warn`, `error`. |
 | `SECRETS_BACKEND` | `backend`, `indexer`, `oracle` | Optional | `env` | Source of secrets: `env` (ambient), `env-file` (reads `SECRETS_ENV_FILE`), or `vault`. |
 | `SECRETS_ENV_FILE` | `backend`, `indexer`, `oracle` | Optional | `.env` | File path when `SECRETS_BACKEND=env-file`. |
+| `RPC_CIRCUIT_FAILURE_THRESHOLD` | `indexer`, `oracle` | Optional | `3` | Consecutive exhausted RPC retry budgets before the shared breaker opens (#637). |
+| `RPC_CIRCUIT_RESET_TIMEOUT_MS` | `indexer`, `oracle` | Optional | `30000` (30s) | How long the breaker stays open before one recovery probe (#637). |
+| `RPC_CIRCUIT_HALF_OPEN_SUCCESSES` | `indexer`, `oracle` | Optional | `1` | Successful probes required to close the breaker (#637). |
+| `HEAP_SNAPSHOT_DIR` | `indexer`, `oracle` | Optional | `heap-snapshots` | Snapshot output directory for both services' `/debug/heap-snapshot` endpoint (#635). |
 
 ---
 
@@ -101,6 +105,14 @@ Deployed Soroban contract addresses (C... format) from deployment manifests (`de
 | `EVENTS_PER_PAGE` | Optional | `200` | Maximum event batch size per RPC query page (positive integer, at most `1000`). Values above `1000` are rejected at startup to bound backfill memory usage. |
 | `METRICS_PORT` | Optional | `9091` | Port exposing Prometheus metrics (`GET /metrics`). |
 | `METRICS_HOST` | Optional | `0.0.0.0` | Bind host for metrics endpoint. |
+| `HEAP_SNAPSHOT_DIR` | Optional | `heap-snapshots` | Directory for `POST /debug/heap-snapshot` captures (#635). |
+| `BACKPRESSURE_MIN_POLL_INTERVAL_MS` | Optional | `1000` | Fastest adaptive poll interval (#636). |
+| `BACKPRESSURE_MAX_POLL_INTERVAL_MS` | Optional | `60000` | Slowest adaptive poll interval when the DB is saturated (#636). |
+| `BACKPRESSURE_MIN_EVENTS_PER_PAGE` | Optional | `25` | Smallest adaptive event page (#636). |
+| `BACKPRESSURE_PRESSURE_RATIO` | Optional | `0.8` | Iteration duration / poll interval that counts as pressure (#636). |
+| `BACKPRESSURE_RECOVERY_RATIO` | Optional | `0.4` | Iteration duration / poll interval that counts as recovery (#636). |
+| `BACKPRESSURE_SUSTAINED_SAMPLES` | Optional | `3` | Consecutive slow iterations before alerting (#636). |
+| `BACKPRESSURE_RECOVERY_SAMPLES` | Optional | `5` | Consecutive fast iterations before widening the page again (#636). |
 
 ---
 

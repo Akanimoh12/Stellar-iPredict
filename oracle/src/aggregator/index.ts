@@ -20,6 +20,32 @@ export {
   type BetPatternAlertSender,
 } from "./alert.js";
 
+// ── Shared Soroban RPC circuit breaker (#637) ────────────────────────────────
+export {
+  configureSorobanRpcCircuitBreaker,
+  reportSorobanRpcCircuitRejection,
+  resetSorobanRpcCircuitBreaker,
+  sorobanRpcCircuitBreaker,
+  type ConfigureSorobanRpcCircuitBreakerOptions,
+} from "./rpc-circuit-breaker.js";
+export {
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+  createCircuitBreaker,
+  type CircuitBreakerSnapshot,
+  type CircuitBreakerState,
+} from "@ipredict/shared";
+
+// ── Trend-based heap diagnostics (#635) ──────────────────────────────────────
+export {
+  createHeapMonitor,
+  HeapMonitor,
+  type HeapGrowthAssessment,
+  type HeapMonitorOptions,
+  type HeapSample,
+  type HeapSnapshotResult,
+} from "@ipredict/shared";
+
 // ── Aggregator Runner & Lifecycle ───────────────────────────────────────────
 export {
   runAggregator,
@@ -106,6 +132,7 @@ export {
   notifyFinalized,
   createPostgresNotificationStore,
   failedWebhookNotificationsTableSql,
+  submitWithRetry,
   computeTally,
   createPostgresSubmissionStore,
   SubmissionTracker,

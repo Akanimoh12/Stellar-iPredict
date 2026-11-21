@@ -47,6 +47,9 @@ in the alert payload.
 | `OracleMetricsStale` | warning | Oracle metrics collector is stuck; check oracle process health | [Oracle & Backend Docs](ORACLE_AND_BACKEND.md) |
 | `OracleAuthFailureMisconfiguredProvider` | warning | Concentrated 4xx from one origin — check recent key rotations | [Secrets Guide](SECRETS.md) |
 | `OracleAuthFailureDistributedGuessing` | critical | Distributed key-guessing attack — rotate keys and investigate source IPs | [Secrets Guide](SECRETS.md) · [Secret Rotation](SECRET-ROTATION.md) |
+| `SustainedHeapGrowth` | warning | Capture a heap snapshot before restarting; compare growth trend, not absolute RSS | [Memory Leak Prevention](MEMORY_LEAK_PREVENTION.md) |
+| `IndexerBackpressureSustained` | warning | Check DB latency; the adaptive loop is slowing intake but not skipping events | [Indexer Runbook](INDEXER_RUNBOOK.md) |
+| `SorobanRpcCircuitBreakerOpen` | critical | Verify the RPC endpoint; the breaker probes automatically and closes on recovery | [Oracle Runbook](ORACLE_RUNBOOK.md) · [Indexer Runbook](INDEXER_RUNBOOK.md) |
 
 ---
 
@@ -64,6 +67,7 @@ None live inside `oracle/src/` or `oracle/src/aggregator/`.
 | [`docs/INDEXER_RUNBOOK.md`](INDEXER_RUNBOOK.md) | Indexer: run, backfill, recover, monitor |
 | [`docs/LEADERBOARD_REBUILD_RUNBOOK.md`](LEADERBOARD_REBUILD_RUNBOOK.md) | Leaderboard full rebuild procedure |
 | [`docs/ORACLE_RUNBOOK.md`](ORACLE_RUNBOOK.md) | Merged oracle overview (council + optimistic) |
+| [`docs/MEMORY_LEAK_PREVENTION.md`](MEMORY_LEAK_PREVENTION.md) | Heap trend alerts, snapshot capture, known unbounded structures |
 | [`docs/SECRET-ROTATION.md`](SECRET-ROTATION.md) | Secret and key rotation procedures |
 | [`docs/SECURITY_BACKEND.md`](SECURITY_BACKEND.md) | Backend threat model |
 | [`infra/monitoring/synthetic.md`](../infra/monitoring/synthetic.md) | Uptime probes for `/healthz` and `/api/markets` |

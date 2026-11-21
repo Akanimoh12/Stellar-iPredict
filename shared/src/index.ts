@@ -11,6 +11,14 @@ export * from "./wasm-integrity.js";
  */
 export * from "./retry.js";
 
+/**
+ * Shared circuit breaker for out-of-process dependencies (issue #637) and
+ * trend-based heap monitoring (issue #635). Both long-running services use
+ * these implementations so behaviour and thresholds stay consistent.
+ */
+export * from "./circuitBreaker.js";
+export * from "./heapMonitor.js";
+
 /** Error hierarchy: transient / permanent / programming — issue #633. */
 export * from "./errors.js";
 

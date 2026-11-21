@@ -170,12 +170,16 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
     stellar,
     { pool: dbPool, processLedgerBatchWithCheckpoint },
     { writeEventsToDb },
+    { AdaptivePollController, recordBackpressureState },
+    { withRetry },
   ] = await Promise.all([
     import("./config/index.js"),
     import("./backfill.js"),
     import("@stellar/stellar-sdk"),
     import("./db.js"),
     import("./event-router.js"),
+    import("./poll-loop.js"),
+    import("./rpc/retry.js"),
   ]);
   const { rpc, scValToNative } = stellar;
   // Live indexing has historically run without a Redis dependency. Keep cache
@@ -186,17 +190,41 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
   console.log(`[ipredict-indexer] Starting live polling loop from ledger ${fromLedger}...`);
   let currentLedger = fromLedger;
   const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  // Issue #636: slow DB iterations shrink the page and lengthen the wait.
+  // The durable checkpoint is still the only cursor source, so no event is
+  // skipped when the rate changes.
+  const backpressure = new AdaptivePollController({
+    basePollIntervalMs: config.POLL_INTERVAL_MS,
+    maxEventsPerPage: config.EVENTS_PER_PAGE,
+    minPollIntervalMs: config.BACKPRESSURE_MIN_POLL_INTERVAL_MS,
+    maxPollIntervalMs: config.BACKPRESSURE_MAX_POLL_INTERVAL_MS,
+    minEventsPerPage: config.BACKPRESSURE_MIN_EVENTS_PER_PAGE,
+    pressureRatio: config.BACKPRESSURE_PRESSURE_RATIO,
+    recoveryRatio: config.BACKPRESSURE_RECOVERY_RATIO,
+    sustainedSamples: config.BACKPRESSURE_SUSTAINED_SAMPLES,
+    recoverySamples: config.BACKPRESSURE_RECOVERY_SAMPLES,
+  });
+  let decision = backpressure.current();
 
   while (!signal?.aborted) {
+    const iterationStartedAt = Date.now();
+    let eventsWritten = 0;
+    let observedLag: number | undefined;
     try {
-      const latest = await server.getLatestLedger();
+      // Issue #637: every RPC call shares one circuit breaker. While it is
+      // open these calls reject immediately instead of spending the retry
+      // budget against a node that is already known to be down.
+      const latest = await withRetry(() => server.getLatestLedger());
+      observedLag = Math.max(0, latest.sequence - currentLedger);
       if (latest.sequence > currentLedger) {
         console.log(`[live-poll] Fetching events from ${currentLedger + 1} to ${latest.sequence}`);
-        const response = await server.getEvents({
-          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
-          startLedger: currentLedger + 1,
-          limit: config.EVENTS_PER_PAGE,
-        });
+        const response = await withRetry(() =>
+          server.getEvents({
+            filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+            startLedger: currentLedger + 1,
+            limit: decision.eventsPerPage,
+          }),
+        );
 
         const decodedEvents: DecodedContractEvent[] = [];
         await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
@@ -222,10 +250,30 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
             writeEventsToDb(events, client as DbClient, redis),
         );
         currentLedger = response.latestLedger;
+        eventsWritten = decodedEvents.length;
       }
+      decision = backpressure.observe({
+        durationMs: Date.now() - iterationStartedAt,
+        eventsWritten,
+        lagLedgers: observedLag,
+      });
     } catch (err) {
+      decision = backpressure.observe({
+        durationMs: Date.now() - iterationStartedAt,
+        failed: true,
+      });
       console.error("[live-poll] Error in polling loop:", err);
     }
+
+    recordBackpressureState(decision);
+    if (decision.shouldAlert) {
+      console.warn("[live-poll] sustained backpressure detected", {
+        pollIntervalMs: decision.pollIntervalMs,
+        eventsPerPage: decision.eventsPerPage,
+        consecutivePressureSamples: decision.consecutivePressureSamples,
+      });
+    }
+
     if (process.env.NODE_ENV === "test") {
       break;
     }
@@ -233,7 +281,7 @@ export async function startLivePolling(fromLedger: number, signal?: AbortSignal)
       const timer = setTimeout(() => {
         signal?.removeEventListener("abort", onAbort);
         resolve();
-      }, config.POLL_INTERVAL_MS);
+      }, decision.pollIntervalMs);
       const onAbort = () => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);

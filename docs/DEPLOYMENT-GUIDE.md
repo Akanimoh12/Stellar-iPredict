@@ -661,6 +661,15 @@ for every public endpoint and every internal TLS service. Do this **in the same
 session as the deploy** — the monitor is useless if it is added later.
 ## Post-deployment smoke suite
 
+The `test/smoke` suite is no longer a manual step. `infra/scripts/deploy.sh`
+runs it as a gate, and the contract deploy scripts
+(`scripts/deploy-testnet.sh`, `scripts/deploy-mainnet.sh`) call
+`scripts/run-post-deploy-smoke.sh` after writing their output. A nonzero smoke
+result exits the deploy script nonzero, so CI or the operator sees a failed
+rollout. Set `SMOKE_BASE_URL` (or `API_PUBLIC_URL`) to enable the gate;
+contract-only runs can set `SKIP_SMOKE=1` explicitly. Extra CLI flags can be
+passed via `SMOKE_ARGS` (for example `--strict --timeout-ms 20000`).
+
 - [ ] Landing page loads with live stats
 - [ ] Markets page shows seed markets
 - [ ] Market detail page shows odds and betting panel

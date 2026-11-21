@@ -1,84 +1,94 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, types, type PoolClient, type QueryResult } from "pg";
-import { logSlowQuery, redactDatabaseUrl } from "../lib/log.js";
+import { formatLogLine, logSlowQuery, redactDatabaseUrl } from "../lib/log.js";
 import { observeDbQuery, recordAbandonedQuery } from "../metrics.js";
 
 // Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
 types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
 
-const DEFAULT_POOL_SIZE = Number.parseInt(process.env.DB_POOL_SIZE ?? "10", 10);
-const READ_POOL_SIZE = Number.parseInt(
-  process.env.DB_READ_POOL_SIZE ?? process.env.DB_POOL_SIZE ?? "10",
-  10,
-);
-const IDLE_TIMEOUT_MS = Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS ?? "30000", 10);
-const CONNECTION_TIMEOUT_MS = Number.parseInt(
-  process.env.DB_CONNECTION_TIMEOUT_MS ?? "5000",
-  10,
-);
-export const SLOW_QUERY_THRESHOLD_MS = Number.parseInt(
-  process.env.DB_SLOW_QUERY_THRESHOLD_MS ?? "200",
-  10,
-);
 /**
- * Statement timeout for Postgres sessions (30s default).
+ * Every pool tunable, read from the environment on first use (issue #632).
  *
- * Pairing with Fastify server request timeout (issue #474):
- * Fastify's `requestTimeout` closes the HTTP connection when a client is slow.
- * Server-side timeouts alone do not cancel an in-flight query; the database connection
- * stays busy until the query finishes or its own `statement_timeout` fires.
- * This pairs with `queryWithCancel` (which cancels queries on client disconnect)
- * and `STATEMENT_TIMEOUT_MS` below (which acts as the hard safety net on the database side
- * preventing runaway queries from exhausting the connection pool).
+ * These used to be read at import time. Import order then decided the values:
+ * `process.env` was frozen before `loadSecrets()` had populated it, so a
+ * file-backed `DB_POOL_SIZE` was silently ignored. Reading them lazily makes
+ * the startup order explicit instead of load-bearing.
  */
-const STATEMENT_TIMEOUT_MS = Number.parseInt(
-  process.env.DB_STATEMENT_TIMEOUT_MS ?? "30000",
-  10,
-);
-const IDLE_IN_TRANSACTION_TIMEOUT_MS = Number.parseInt(
-  process.env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS ?? "60000",
-  10,
-);
+export interface PoolSettings {
+  defaultPoolSize: number;
+  readPoolSize: number;
+  idleTimeoutMs: number;
+  connectionTimeoutMs: number;
+  slowQueryThresholdMs: number;
+  /** Statement timeout for Postgres sessions (30s default). */
+  statementTimeoutMs: number;
+  idleInTransactionTimeoutMs: number;
+  /**
+   * How long a process-wide read-after-write guard keeps reads on the primary.
+   * Session-scoped writes are stricter: once a session has written, every
+   * subsequent read in that session goes to the primary for the rest of the
+   * session. The window only applies to writes outside an explicit read
+   * session, where there is no session boundary to know about.
+   */
+  readAfterWriteWindowMs: number;
+  /** Maximum acceptable replica replay lag before reads go to the primary. */
+  replicaMaxLagMs: number;
+  /** How often the replica's replay position is sampled. */
+  replicaLagPollIntervalMs: number;
+  /** Backoff after a failed replica check before the replica is tried again. */
+  replicaFailureCooldownMs: number;
+}
+
+function readInt(value: string | undefined, fallback: number): number {
+  return Number.parseInt(value ?? String(fallback), 10);
+}
+
+/** Parses pool settings from an environment. Pure: safe to call anywhere. */
+export function readPoolSettings(env: NodeJS.ProcessEnv = process.env): PoolSettings {
+  return {
+    defaultPoolSize: readInt(env.DB_POOL_SIZE, 10),
+    readPoolSize: readInt(env.DB_READ_POOL_SIZE ?? env.DB_POOL_SIZE, 10),
+    idleTimeoutMs: readInt(env.DB_IDLE_TIMEOUT_MS, 30000),
+    connectionTimeoutMs: readInt(env.DB_CONNECTION_TIMEOUT_MS, 5000),
+    slowQueryThresholdMs: readInt(env.DB_SLOW_QUERY_THRESHOLD_MS, 200),
+    statementTimeoutMs: readInt(env.DB_STATEMENT_TIMEOUT_MS, 30000),
+    idleInTransactionTimeoutMs: readInt(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS, 60000),
+    readAfterWriteWindowMs: readInt(
+      env.READ_AFTER_WRITE_WINDOW_MS ?? env.READ_AFTER_WRITE_MS,
+      2000,
+    ),
+    replicaMaxLagMs: readInt(env.REPLICA_MAX_LAG_MS ?? env.REPLICA_LAG_THRESHOLD_MS, 5000),
+    replicaLagPollIntervalMs: readInt(env.REPLICA_LAG_POLL_INTERVAL_MS, 15000),
+    replicaFailureCooldownMs: readInt(env.REPLICA_FAILURE_COOLDOWN_MS, 5000),
+  };
+}
+
+let settings: PoolSettings | null = null;
+
+/** The settings in force, read from the environment on first call. */
+export function getPoolSettings(): PoolSettings {
+  if (settings === null) settings = readPoolSettings();
+  return settings;
+}
+
+/** Forgets cached settings so the next use re-reads the environment (tests). */
+export function resetPoolSettings(): void {
+  settings = null;
+}
+
+let pgTypeParsersConfigured = false;
 
 /**
- * How long a process-wide read-after-write guard keeps reads on the primary.
+ * Makes pg return NUMERIC as a string rather than a lossy JS number (issue #632).
  *
- * Session-scoped writes are stricter: once a session has written, *every*
- * subsequent read in that session goes to the primary for the rest of the
- * session (which is a request in the HTTP layer). The window below only
- * applies to writes performed outside an explicit read session, where there
- * is no session boundary to know about.
+ * `types` is process-wide state in the `pg` driver, so it used to be set at
+ * import time. It is now set explicitly, once, before the first pool is built.
  */
-export const READ_AFTER_WRITE_WINDOW_MS = Number.parseInt(
-  process.env.READ_AFTER_WRITE_WINDOW_MS ??
-    process.env.READ_AFTER_WRITE_MS ??
-    "2000",
-  10,
-);
-
-/**
- * Maximum acceptable replica replay lag. Above this, tolerant reads are sent
- * to the primary until the replica catches up. A read served from a replica
- * that is minutes behind is worse than a slightly slower read from the primary.
- */
-export const REPLICA_MAX_LAG_MS = Number.parseInt(
-  process.env.REPLICA_MAX_LAG_MS ??
-    process.env.REPLICA_LAG_THRESHOLD_MS ??
-    "5000",
-  10,
-);
-
-/** How often the replica's replay position is sampled for metrics/fallback. */
-const REPLICA_LAG_POLL_INTERVAL_MS = Number.parseInt(
-  process.env.REPLICA_LAG_POLL_INTERVAL_MS ?? "15000",
-  10,
-);
-
-/** Backoff after a failed replica check before the replica is tried again. */
-const REPLICA_FAILURE_COOLDOWN_MS = Number.parseInt(
-  process.env.REPLICA_FAILURE_COOLDOWN_MS ?? "5000",
-  10,
-);
+export function configurePgTypeParsers(): void {
+  if (pgTypeParsersConfigured) return;
+  types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
+  pgTypeParsersConfigured = true;
+}
 
 let _pool: Pool | null = null;
 let _readPool: Pool | null = null;
@@ -90,16 +100,17 @@ function createPool(
   max: number,
   label: "primary" | "replica",
 ): Pool {
+  configurePgTypeParsers();
   const instance = new Pool({
     connectionString,
     max,
-    idleTimeoutMillis: IDLE_TIMEOUT_MS,
-    connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+    idleTimeoutMillis: getPoolSettings().idleTimeoutMs,
+    connectionTimeoutMillis: getPoolSettings().connectionTimeoutMs,
   });
 
   instance.on("connect", async (client) => {
-    await client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
-    await client.query(`SET idle_in_transaction_session_timeout = ${IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
+    await client.query(`SET statement_timeout = ${getPoolSettings().statementTimeoutMs}`);
+    await client.query(`SET idle_in_transaction_session_timeout = ${getPoolSettings().idleInTransactionTimeoutMs}`);
   });
 
   instance.on("error", (err) => {
@@ -116,7 +127,7 @@ function getPool(): Pool {
       throw new Error("DATABASE_URL environment variable is required");
     }
 
-    _pool = createPool(process.env.DATABASE_URL, DEFAULT_POOL_SIZE, "primary");
+    _pool = createPool(process.env.DATABASE_URL, getPoolSettings().defaultPoolSize, "primary");
   }
   return _pool;
 }
@@ -168,7 +179,7 @@ export function getReplicaPool(): Pool {
       // blocking the caller on connection teardown.
       void _readPool.end().catch(() => undefined);
     }
-    _readPool = createPool(connectionString, READ_POOL_SIZE, "replica");
+    _readPool = createPool(connectionString, getPoolSettings().readPoolSize, "replica");
     _readPoolUrl = connectionString;
     startReplicaLagMonitor();
   }
@@ -243,7 +254,7 @@ export function shouldReadFromPrimary(now: number = Date.now()): boolean {
   }
   return (
     lastGlobalWriteAt > 0 &&
-    now - lastGlobalWriteAt < READ_AFTER_WRITE_WINDOW_MS
+    now - lastGlobalWriteAt < getPoolSettings().readAfterWriteWindowMs
   );
 }
 
@@ -365,7 +376,7 @@ export async function checkReplicaLag(): Promise<number | null> {
     const lagMs = Math.max(0, Number(rows[0]?.lag_ms ?? 0));
     replicaState.lagMs = Number.isFinite(lagMs) ? lagMs : null;
     replicaState.health =
-      replicaState.lagMs !== null && replicaState.lagMs > REPLICA_MAX_LAG_MS
+      replicaState.lagMs !== null && replicaState.lagMs > getPoolSettings().replicaMaxLagMs
         ? "lagging"
         : "healthy";
     replicaState.lastCheckedAt = Date.now();
@@ -374,11 +385,9 @@ export async function checkReplicaLag(): Promise<number | null> {
 
     if (replicaState.health === "lagging") {
       console.warn(
-        JSON.stringify({
-          level: "warn",
-          msg: "read replica lag exceeds threshold; routing reads to primary",
+        formatLogLine("warn", "read replica lag exceeds threshold; routing reads to primary", {
           lagMs: replicaState.lagMs,
-          thresholdMs: REPLICA_MAX_LAG_MS,
+          thresholdMs: getPoolSettings().replicaMaxLagMs,
         }),
       );
     }
@@ -390,11 +399,9 @@ export async function checkReplicaLag(): Promise<number | null> {
     replicaState.lastError = redactDatabaseUrl(
       error instanceof Error ? error.message : String(error),
     );
-    replicaState.unreachableUntil = Date.now() + REPLICA_FAILURE_COOLDOWN_MS;
+    replicaState.unreachableUntil = Date.now() + getPoolSettings().replicaFailureCooldownMs;
     console.error(
-      JSON.stringify({
-        level: "error",
-        msg: "read replica lag check failed; routing reads to primary",
+      formatLogLine("error", "read replica lag check failed; routing reads to primary", {
         error: replicaState.lastError,
       }),
     );
@@ -420,7 +427,7 @@ export function canUseReplica(now: number = Date.now()): boolean {
   if (replicaState.health === "unreachable") return false;
   if (
     replicaState.lagMs !== null &&
-    replicaState.lagMs > REPLICA_MAX_LAG_MS
+    replicaState.lagMs > getPoolSettings().replicaMaxLagMs
   ) {
     return false;
   }
@@ -436,7 +443,7 @@ function startReplicaLagMonitor(): void {
   void checkReplicaLag();
   lagMonitor = setInterval(() => {
     void checkReplicaLag();
-  }, REPLICA_LAG_POLL_INTERVAL_MS);
+  }, getPoolSettings().replicaLagPollIntervalMs);
   lagMonitor.unref?.();
 }
 
@@ -550,11 +557,11 @@ export async function queryRead<Row extends object>(
   const result = await runQuery<Row>(target, text, params);
   const durationMs = performance.now() - startedAt;
 
-  if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
+  if (durationMs > getPoolSettings().slowQueryThresholdMs) {
     logSlowQuery({
       query: text,
       durationMs,
-      thresholdMs: SLOW_QUERY_THRESHOLD_MS,
+      thresholdMs: getPoolSettings().slowQueryThresholdMs,
     });
   }
 
@@ -659,13 +666,13 @@ export interface PoolMetrics {
  */
 export function getPoolMetrics(): PoolMetrics {
   if (!_pool) {
-    return { total: 0, idle: 0, waiting: 0, max: DEFAULT_POOL_SIZE };
+    return { total: 0, idle: 0, waiting: 0, max: getPoolSettings().defaultPoolSize };
   }
   return {
     total: _pool.totalCount,
     idle: _pool.idleCount,
     waiting: _pool.waitingCount,
-    max: DEFAULT_POOL_SIZE,
+    max: getPoolSettings().defaultPoolSize,
   };
 }
 
@@ -676,16 +683,16 @@ export interface ReadPoolMetrics extends PoolMetrics {
 
 export function getReadPoolMetrics(): ReadPoolMetrics {
   if (!isReplicaConfigured()) {
-    return { total: 0, idle: 0, waiting: 0, max: READ_POOL_SIZE, configured: false };
+    return { total: 0, idle: 0, waiting: 0, max: getPoolSettings().readPoolSize, configured: false };
   }
   if (!_readPool) {
-    return { total: 0, idle: 0, waiting: 0, max: READ_POOL_SIZE, configured: true };
+    return { total: 0, idle: 0, waiting: 0, max: getPoolSettings().readPoolSize, configured: true };
   }
   return {
     total: _readPool.totalCount,
     idle: _readPool.idleCount,
     waiting: _readPool.waitingCount,
-    max: READ_POOL_SIZE,
+    max: getPoolSettings().readPoolSize,
     configured: true,
   };
 }
@@ -707,7 +714,7 @@ export function getReplicaMetrics(): ReplicaMetrics {
     configured: isReplicaConfigured(),
     health: getReplicaHealth(),
     lagMs: getReplicaLagMs(),
-    maxLagMs: REPLICA_MAX_LAG_MS,
+    maxLagMs: getPoolSettings().replicaMaxLagMs,
     lastCheckedAt: replicaState.lastCheckedAt,
     lastError: replicaState.lastError,
     readPool: getReadPoolMetrics(),
@@ -772,11 +779,11 @@ export async function query<Row extends object>(
   const result = await pool.query(text, params);
   const durationMs = performance.now() - startedAt;
 
-  if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
+  if (durationMs > getPoolSettings().slowQueryThresholdMs) {
     logSlowQuery({
       query: text,
       durationMs,
-      thresholdMs: SLOW_QUERY_THRESHOLD_MS,
+      thresholdMs: getPoolSettings().slowQueryThresholdMs,
     });
   }
 
@@ -806,8 +813,8 @@ export async function shutdown(): Promise<void> {
   ]);
 }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+// Process signals are not handled here (issue #632). `startServer` installs the
+// SIGTERM/SIGINT handlers and closes these pools as part of graceful shutdown.
 
 // ---------------------------------------------------------------------------
 // Cancellable queries (#475)
@@ -942,8 +949,8 @@ export async function queryWithCancel<Row extends object>(
     } finally {
       const durationMs = performance.now() - startedAt;
       observeDbQuery(durationMs);
-      if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-        logSlowQuery({ query: text, durationMs, thresholdMs: SLOW_QUERY_THRESHOLD_MS });
+      if (durationMs > getPoolSettings().slowQueryThresholdMs) {
+        logSlowQuery({ query: text, durationMs, thresholdMs: getPoolSettings().slowQueryThresholdMs });
       }
     }
   } catch (error) {

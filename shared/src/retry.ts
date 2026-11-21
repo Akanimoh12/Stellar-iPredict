@@ -42,6 +42,8 @@
  * taken fresh for every attempt, never once per sequence.
  */
 
+import { PermanentError, ServiceError, isProgrammingError } from "./errors.js";
+
 // ---------------------------------------------------------------------------
 // Error taxonomy
 // ---------------------------------------------------------------------------
@@ -77,21 +79,11 @@ export interface RetryClassification {
 }
 
 /**
- * Base class for failures that must never be retried.
- *
- * Domain errors that are permanent by nature (a ledger gap, a rejected
- * request, a validation failure) extend this so the shared classifier treats
- * them as permanent *by type* instead of by sniffing their message.
+ * Thrown by callers that want a failure to be treated as permanent by type.
+ * Defined in `errors.ts` (issue #633) and re-exported here so existing imports
+ * from the retry module keep working.
  */
-export class PermanentError extends Error {
-  /** Read by {@link classifyFailure}; `false` always means "do not retry". */
-  readonly retryable = false;
-
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = "PermanentError";
-  }
-}
+export { PermanentError };
 
 /**
  * Thrown when the retry budget is spent, or when the failure was not
@@ -260,7 +252,23 @@ export function classifyFailure(
   const retryAfterMs = getRetryAfterMs(error);
   const base = { status, retryAfterMs };
 
+  // A bug is never retried: repeating it only hides it behind a delay (#633).
+  if (isProgrammingError(error)) {
+    return { ...base, kind: "permanent", retryable: false };
+  }
+
   if (error instanceof PermanentError) {
+    return { ...base, kind: "permanent", retryable: false };
+  }
+
+  if (error instanceof ServiceError) {
+    if (error.classification === "transient") {
+      // Transient by declaration; the kind only refines the status where one
+      // is known, and anything else (425, no status) is treated as network.
+      const kind: RetryFailureKind =
+        status === undefined || kindForStatus(status) === "client" ? "network" : kindForStatus(status);
+      return { ...base, kind, retryable: true };
+    }
     return { ...base, kind: "permanent", retryable: false };
   }
 

@@ -32,7 +32,12 @@ import { registerRateLimiter } from "./cache/rateLimiter.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
 import { registerCancellationHook } from "./lib/cancellation.js";
 import { rpc } from "@stellar/stellar-sdk";
-import { parseExpectedWasmHashes, verifyContractWasm, type WasmCheckResult } from "@ipredict/shared";
+import {
+  LOG_FIELDS,
+  parseExpectedWasmHashes,
+  verifyContractWasm,
+  type WasmCheckResult,
+} from "@ipredict/shared";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -167,6 +172,8 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
       const server = Fastify({
     logger: options.logger ?? createLoggerOptions(),
     genReqId,
+    // Same request-id key the shared logger uses (issue #630).
+    requestIdLogLabel: LOG_FIELDS.requestId,
     // The onResponse hook in registerRequestLogging is the single per-request
     // log line; Fastify's built-in pair would just duplicate it.
     disableRequestLogging: true,
@@ -410,7 +417,7 @@ export function registerGracefulShutdown(
       await Promise.race([closePromise, drainTimeout]);
     } catch (error) {
       failure = error;
-      server.log.error({ err: error, signal }, "Error closing HTTP server during shutdown");
+      server.log.error({ error, signal }, "Error closing HTTP server during shutdown");
     }
 
     if (timedOut) {
@@ -439,12 +446,12 @@ export function registerGracefulShutdown(
         await shutdownFn();
       } catch (error) {
         failure ??= error;
-        server.log.error({ err: error, signal }, "Error closing database pool during shutdown");
+        server.log.error({ error, signal }, "Error closing database pool during shutdown");
       }
     }
 
     if (failure) {
-      server.log.error({ err: failure, signal }, "Graceful shutdown failed");
+      server.log.error({ error: failure, signal }, "Graceful shutdown failed");
       if (exitProcess) {
         process.exit(1);
       }
@@ -526,7 +533,7 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
   // Background, so a slow RPC node never delays serving (#610). Malformed
   // EXPECTED_WASM_HASHES is already rejected by config validation.
   verifyDeployedWasm(server.log).catch((error) =>
-    server.log.warn({ err: error }, "contract wasm hash could not be verified"),
+    server.log.warn({ error }, "contract wasm hash could not be verified"),
   );
 
   return server;

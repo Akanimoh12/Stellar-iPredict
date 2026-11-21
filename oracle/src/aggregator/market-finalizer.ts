@@ -10,6 +10,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import type { Pool } from "pg";
+import { PermanentError, TransientError } from "@ipredict/shared";
 import type { Logger } from "../log.js";
 import type { CouncilVote } from "./threshold.js";
 import { notifyFinalized, type FinalizeNotifierOptions } from "./finalize-notifier.js";
@@ -23,14 +24,19 @@ export interface FinalizeTrace {
   logger?: Logger;
 }
 
-export class MarketAlreadyFinalizedError extends Error {
+/**
+ * The market is already finalized. Permanent: no retry can change that, so the
+ * submitter treats it as success-or-stop, never as something to resend.
+ */
+export class MarketAlreadyFinalizedError extends PermanentError {
   constructor(marketId: string) {
     super(`Market ${marketId} already finalized`);
     this.name = "MarketAlreadyFinalizedError";
   }
 }
 
-export class FinalizationOutcomeMismatchError extends Error {
+/** The market was resolved with the opposite outcome. Permanent (issue #633). */
+export class FinalizationOutcomeMismatchError extends PermanentError {
   constructor(marketId: string, intended: boolean, actual: boolean) {
     super(
       `Market ${marketId} is already resolved with outcome ${actual ? "YES" : "NO"}, ` +
@@ -130,15 +136,17 @@ export async function submitResolutionTransaction(
   const response = await server.sendTransaction(parsedTx);
 
   if (response.status === "ERROR") {
-    throw new Error(`Transaction rejected: ${extractSendError(response)}`);
+    // Transient on purpose: the submitter retries rejected sends, and its
+    // on-chain state check before each retry prevents a duplicate bond.
+    throw new TransientError(`Transaction rejected: ${extractSendError(response)}`);
   }
 
   if (response.status === "TRY_AGAIN_LATER") {
-    throw new Error("Network busy — please try again later");
+    throw new TransientError("Network busy — please try again later");
   }
 
   if (!response.hash) {
-    throw new Error("Transaction was submitted successfully but no hash was returned");
+    throw new TransientError("Transaction was submitted successfully but no hash was returned");
   }
 
   // Persist the hash before confirmation. A crash or timeout after this point
@@ -157,7 +165,10 @@ async function waitForConfirmation(server: rpc.Server, hash: string): Promise<vo
       const txResponse = await server.getTransaction(hash);
       if (txResponse.status === rpc.Api.GetTransactionStatus.SUCCESS) return;
       if (txResponse.status === rpc.Api.GetTransactionStatus.FAILED) {
-        throw new Error(`Transaction failed on-chain: ${JSON.stringify(txResponse)}`);
+        // Transient for the market: it is still unfinalized, so a fresh
+        // submission may succeed. The state check before each retry guards
+        // against a duplicate if the failed transaction did land.
+        throw new TransientError(`Transaction failed on-chain: ${JSON.stringify(txResponse)}`);
       }
     } catch (error) {
       // Keep waiting if the transaction is not yet visible.
@@ -165,7 +176,7 @@ async function waitForConfirmation(server: rpc.Server, hash: string): Promise<vo
     }
     await delay(POLL_INTERVAL_MS);
   }
-  throw new Error(`Timed out waiting for transaction confirmation: ${hash}`);
+  throw new TransientError(`Timed out waiting for transaction confirmation: ${hash}`);
 }
 
 export interface FinalizationAttempt {

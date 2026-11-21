@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseConfig } from "@ipredict/shared";
 import { normalizeEnvironment, optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
@@ -110,13 +111,12 @@ const schema = z.object({
 });
 
 export type AggregatorConfig = z.infer<typeof schema>;
+/**
+ * Validates the aggregator's environment (issue #631).
+ *
+ * Throws a `ConfigError` on failure; the entrypoint decides to exit. Schema and
+ * defaults stay in this file, the error shape is the shared one.
+ */
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
-  const result = schema.safeParse(normalizeEnvironment(env));
-  if (!result.success) {
-    const details = result.error.issues
-      .map((issue) => `  ${issue.path.join(".") || "config"}: ${issue.message}`)
-      .join("\n");
-    throw new Error(`[ipredict-oracle] invalid configuration:\n${details}`);
-  }
-  return result.data;
+  return parseConfig("ipredict-oracle", schema, normalizeEnvironment(env));
 }

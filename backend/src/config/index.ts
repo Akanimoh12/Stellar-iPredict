@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parseExpectedWasmHashes } from "@ipredict/shared";
+import { ConfigError, parseExpectedWasmHashes } from "@ipredict/shared";
 import { parseCorsOrigins } from "../lib/cors.js";
 import {
   OracleApiKeyConfigError,
@@ -208,10 +208,7 @@ export function loadConfig(): Config {
 
   const result = envSchema.safeParse(envToParse);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
-      .join("\n");
-    cachedError = new Error(`[ipredict-backend] invalid configuration:\n${issues}`);
+    cachedError = new ConfigError("ipredict-backend", result.error.issues);
     throw cachedError;
   }
 
@@ -228,11 +225,12 @@ export function loadConfig(): Config {
         process.stderr.write(`[ipredict-backend] ${message}\n`),
     });
   } catch (error) {
+    // Throw, never exit: the entrypoint reports the failure (issue #631).
     if (error instanceof OracleApiKeyConfigError) {
-      process.stderr.write(
-        `[ipredict-backend] invalid configuration:\n  ${error.message}\n`,
-      );
-      process.exit(1);
+      cachedError = new ConfigError("ipredict-backend", [
+        { path: [], message: error.message },
+      ]);
+      throw cachedError;
     }
     throw error;
   }

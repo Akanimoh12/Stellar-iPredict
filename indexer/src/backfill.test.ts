@@ -33,6 +33,7 @@ import { rpc } from "@stellar/stellar-sdk";
 // Mock config
 vi.mock("./config/index.js", () => {
   return {
+    initConfig: () => undefined,
     config: {
       DATABASE_URL: "postgres://localhost:5432/db",
       SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",

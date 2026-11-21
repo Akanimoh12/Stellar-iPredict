@@ -225,7 +225,7 @@ describe("queryWithCancel", () => {
 
     expect(warnSpy).toHaveBeenCalled();
     const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string);
-    expect(logged.msg).toBe("slow db query");
+    expect(logged.message).toBe("slow db query");
     expect(logged.query).toBe("SELECT * FROM slow_table");
     expect(logged.durationMs).toBe(350);
 

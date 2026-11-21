@@ -1,4 +1,4 @@
-import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
+import { loadSecrets, reportStartupFailure, summariseSecretsLoad } from "@ipredict/shared";
 import { startAggregator } from "./aggregator/index.js";
 import { createResolverKeyProvider } from "./aggregator/key-rotation.js";
 
@@ -21,6 +21,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error("[ipredict-oracle] fatal:", error);
+  reportStartupFailure("ipredict-oracle", error);
   process.exit(1);
 });

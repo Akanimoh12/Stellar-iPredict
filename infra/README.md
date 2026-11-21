@@ -795,3 +795,52 @@ infra/scripts/restore.sh infra/backups/ipredict-20261021T000000Z.dump.enc
 infra/scripts/restore.sh --yes --encryption-key "secret" infra/backups/ipredict-20261021T000000Z.dump.enc
 ```
 
+## Automated Scheduled Restore Verification (`verify-backup.sh`)
+
+An untested backup is a hypothesis. `infra/scripts/verify-backup.sh` stands up an isolated scratch PostgreSQL container, restores the newest dump (or a specified dump) into it, runs integrity, schema currency, and foreign key sanity checks, measures RTO/RPO metrics, and tears the scratch container down.
+
+```
+infra/
+├── scripts/
+│   └── verify-backup.sh          Automated restore verification script
+├── systemd/
+│   ├── ipredict-verify-backup.service
+│   └── ipredict-verify-backup.timer
+├── cron/
+│   └── verify-backup.cron
+└── .github/workflows/
+    └── verify-backup.yml         Daily CI scheduled verification workflow
+```
+
+### Automation options
+
+1. **GitHub Actions Workflow (`.github/workflows/verify-backup.yml`)**:
+   Runs automatically daily at 03:00 UTC and on manual dispatch (`workflow_dispatch`). If verification fails, it sends an alert to `$BACKUP_ALERT_WEBHOOK_URL` and records a detailed step summary.
+
+2. **Systemd Timer (recommended on Linux hosts)**:
+   ```bash
+   # Copy systemd units
+   sudo cp infra/systemd/ipredict-verify-backup.{service,timer} /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now ipredict-verify-backup.timer
+   ```
+   Configured to trigger daily at 03:15 UTC (`RandomizedDelaySec=15m`, `Persistent=true`).
+
+3. **Cron Job**:
+   ```bash
+   sudo cp infra/cron/verify-backup.cron /etc/cron.d/ipredict-verify-backup
+   ```
+
+### Alerting on failure
+
+Any check failure exits non-zero and automatically delivers a webhook notification if `BACKUP_ALERT_WEBHOOK_URL` (or `ALERT_WEBHOOK_URL`) is configured:
+
+```bash
+# Configure environment
+cat <<'EOF' | sudo tee /etc/ipredict/verify-backup.env
+BACKUP_DIR=/srv/backups/ipredict
+BACKUP_ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
+BACKUP_ALERT_WEBHOOK_FORMAT=slack
+EOF
+```
+

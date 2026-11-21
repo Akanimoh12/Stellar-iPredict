@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import { LOG_FIELDS, REQUEST_ID_HEADER, isValidRequestId, serializeError } from "@ipredict/shared";
 import type { IncomingHttpHeaders } from "node:http";
 import type { FastifyInstance } from "fastify";
 import type {
@@ -19,14 +21,9 @@ import type {
  * frontend → API hop — but only after validation, since it lands in log output.
  */
 
-/** Header carrying the correlation id, both inbound and outbound. */
-export const REQUEST_ID_HEADER = "x-request-id";
-
-/** Upper bound on an accepted inbound id; generated ids are 36 chars. */
-export const MAX_REQUEST_ID_LENGTH = 128;
-
-/** Conservative charset — keeps control characters out of log lines. */
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+// The request-id contract is shared with the oracle and indexer (issue #630).
+// Re-exported so existing backend imports keep working.
+export { MAX_REQUEST_ID_LENGTH, REQUEST_ID_HEADER, isValidRequestId } from "@ipredict/shared";
 
 /** Stellar account addresses must not appear in logged query strings. */
 const STELLAR_ADDRESS_PATTERN = /G[A-Z2-7]{55}/i;
@@ -154,16 +151,6 @@ export interface RawRequestLike {
   headers: IncomingHttpHeaders;
 }
 
-/** True when `value` is safe to use as a correlation id. */
-export function isValidRequestId(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= MAX_REQUEST_ID_LENGTH &&
-    REQUEST_ID_PATTERN.test(value)
-  );
-}
-
 /** Reuses a valid inbound correlation id, otherwise mints a fresh one. */
 export function resolveRequestId(header: string | string[] | undefined): string {
   const candidate = Array.isArray(header) ? header[0] : header;
@@ -175,14 +162,46 @@ export function genReqId(req: RawRequestLike): string {
   return resolveRequestId(req.headers[REQUEST_ID_HEADER]);
 }
 
+/** Options Fastify passes to its pino logger. */
 export interface LoggerOptions {
   level: string;
   redact: { paths: string[]; censor: string };
+  messageKey: string;
+  timestamp: () => string;
+  formatters: { level: (label: string) => { level: string } };
+  serializers: { error: (value: unknown) => unknown };
+  base: { service: string; pid: number; hostname: string };
+}
+
+/** Service name bound to every backend log line. */
+export const BACKEND_SERVICE_NAME = "backend";
+
+/**
+ * One structured line in the shared field format, for code that writes directly
+ * to the console rather than through the request logger (issue #630).
+ */
+export function formatLogLine(
+  level: "info" | "warn" | "error",
+  message: string,
+  fields: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    [LOG_FIELDS.timestamp]: new Date().toISOString(),
+    [LOG_FIELDS.level]: level,
+    [LOG_FIELDS.message]: message,
+    [LOG_FIELDS.service]: BACKEND_SERVICE_NAME,
+    ...fields,
+  });
 }
 
 /**
- * Logger options for the Fastify factory. Tests run silent so suites are not
- * drowned in request logs.
+ * Logger options for the Fastify factory (issue #630).
+ *
+ * The backend logs through Fastify's pino instance, which by default writes
+ * `msg`, numeric `level` and `time`. Those names are remapped to the shared
+ * field set (see `LOG_FIELDS` in `@ipredict/shared`) so one query works across
+ * services: `message`, a string `level` and an ISO `timestamp`. Application
+ * errors go under `error`. Tests run silent so suites are not drowned in logs.
  */
 export function createLoggerOptions(env: NodeJS.ProcessEnv = process.env): LoggerOptions {
   const level = env.NODE_ENV === "test" ? "silent" : (env.LOG_LEVEL ?? "info");
@@ -190,7 +209,18 @@ export function createLoggerOptions(env: NodeJS.ProcessEnv = process.env): Logge
   return {
     level,
     redact: { paths: REDACTED_HEADERS, censor: "[redacted]" },
+    messageKey: LOG_FIELDS.message,
+    // pino accepts a JSON fragment that begins with a comma; the key is ours.
+    timestamp: () => `,"${LOG_FIELDS.timestamp}":"${new Date().toISOString()}"`,
+    formatters: { level: (label) => ({ [LOG_FIELDS.level]: label }) },
+    serializers: { error: serializeLogError },
+    base: { service: BACKEND_SERVICE_NAME, pid: process.pid, hostname: hostname() },
   };
+}
+
+/** Serialises an Error under the `error` key; any other value passes through. */
+export function serializeLogError(value: unknown): unknown {
+  return value instanceof Error ? serializeError(value) : value;
 }
 
 export interface RequestLoggingOptions {
@@ -272,7 +302,7 @@ export function registerRequestLogging(
         requestId: request.id,
         method: request.method,
         url: sanitizeUrl(request.url, allowedQueryParams),
-        err: error,
+        error,
       },
       "request failed",
     );
@@ -303,9 +333,7 @@ export interface SlowQueryLogEntry {
  */
 export function logSlowQuery(entry: SlowQueryLogEntry): void {
   console.warn(
-    JSON.stringify({
-      level: "warn",
-      msg: "slow db query",
+    formatLogLine("warn", "slow db query", {
       durationMs: Math.round(entry.durationMs * 10) / 10,
       thresholdMs: entry.thresholdMs,
       query: entry.query,

@@ -1,6 +1,6 @@
 
-import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
-import { config } from "./config/index.js";
+import { loadSecrets, reportStartupFailure, summariseSecretsLoad } from "@ipredict/shared";
+import { config, initConfig } from "./config/index.js";
 import { runBackfill } from "./backfill.js";
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
@@ -267,6 +267,10 @@ export async function main(): Promise<void> {
   const secrets = await loadSecrets();
   console.info(`[ipredict-indexer] secrets: ${summariseSecretsLoad(secrets)}`);
 
+  // Validate configuration once, explicitly, before anything reads `config`.
+  // A ConfigError propagates to the catch below, which reports it and exits.
+  initConfig();
+
   const [{ pool }, { acquireIndexerLock }] = await Promise.all([
     import("./db.js"),
     import("./lock.js"),
@@ -317,7 +321,7 @@ export async function main(): Promise<void> {
 // Only invoke main when run directly, not when imported in tests.
 if (process.env.NODE_ENV !== "test") {
   main().catch((err) => {
-    console.error("[ipredict-indexer] fatal:", err);
+    reportStartupFailure("ipredict-indexer", err);
     process.exit(1);
   });
 }

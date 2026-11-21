@@ -755,7 +755,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
       if (nonce !== undefined && Math.random() < 0.1) {
         cleanupExpiredNonces(config.ORACLE_NONCE_RETENTION_SEC, db).catch(
           (err) =>
-            request.log.error({ err }, "Failed to cleanup expired nonces"),
+            request.log.error({ error: err }, "Failed to cleanup expired nonces"),
         );
       }
 
@@ -765,7 +765,7 @@ export const oracleRoutes: FastifyPluginAsync = async (routes) => {
           config.ORACLE_IDEMPOTENCY_RETENTION_SEC,
           db,
         ).catch((err) =>
-          request.log.error({ err }, "Failed to cleanup expired idempotency keys"),
+          request.log.error({ error: err }, "Failed to cleanup expired idempotency keys"),
         );
       }
 
@@ -1070,7 +1070,7 @@ export function registerOracleRoutes(
       if (nonce !== undefined && Math.random() < 0.1) {
         cleanupExpiredNonces(config.ORACLE_NONCE_RETENTION_SEC, db).catch(
           (err) =>
-            request.log.error({ err }, "Failed to cleanup expired nonces"),
+            request.log.error({ error: err }, "Failed to cleanup expired nonces"),
         );
       }
 

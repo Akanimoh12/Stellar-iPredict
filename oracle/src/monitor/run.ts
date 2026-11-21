@@ -1,4 +1,4 @@
-import { loadSecrets, summariseSecretsLoad } from "@ipredict/shared";
+import { loadSecrets, reportStartupFailure, summariseSecretsLoad } from "@ipredict/shared";
 import { startMonitor } from "./index.js";
 
 async function main(): Promise<void> {
@@ -12,6 +12,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error("[ipredict-oracle-monitor] fatal:", error);
+  reportStartupFailure("ipredict-oracle-monitor", error);
   process.exit(1);
 });

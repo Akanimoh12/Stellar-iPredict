@@ -1,5 +1,5 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
-import { config } from "./config/index.js";
+import { config, initConfig } from "./config/index.js";
 import { pool, ensureCheckpointTable, getCheckpointLedger, saveCheckpointLedger } from "./db.js";
 import { insertProcessedEvent } from "./handlers/idempotency.js";
 import {
@@ -10,7 +10,7 @@ import {
   checkRetentionBoundary,
   DEFAULT_RETENTION_ALERT_THRESHOLD,
 } from "./rpc/getEvents.js";
-import { PermanentError } from "@ipredict/shared";
+import { PermanentError, reportStartupFailure } from "@ipredict/shared";
 import { jitteredDelayMs, withRetry } from "./rpc/retry.js";
 import { refreshDeadLetterQueueDepthFromDb } from "./metrics.js";
 import type { Logger } from "./log.js";
@@ -717,10 +717,13 @@ export async function runFullReindex(options: ReindexOptions = {}): Promise<Rein
 
 // Direct CLI entry point if executed directly
 if (process.argv[1]?.endsWith("backfill.ts") || process.argv.includes("--reindex")) {
-  runFullReindex()
+  Promise.resolve()
+    // Configuration is validated here, explicitly, before the reindex reads it.
+    .then(() => initConfig())
+    .then(() => runFullReindex())
     .then(() => pool.end())
     .catch((err) => {
-      console.error("[reindex] Fatal error:", err);
+      reportStartupFailure("ipredict-indexer", err);
       pool.end().finally(() => {
         process.exitCode = 1;
       });

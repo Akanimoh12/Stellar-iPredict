@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProgrammingError, parseConfig } from "@ipredict/shared";
 
 /**
  * Upper bound for `EVENTS_PER_PAGE`.
@@ -44,20 +45,50 @@ const configSchema = z.object({
     .default(DEFAULT_BACKFILL_WINDOW_LEDGERS),
 });
 
-let parsed;
-try {
-  parsed = configSchema.parse(process.env);
-} catch (error) {
-  if (error instanceof z.ZodError) {
-    console.error("❌ Invalid environment configuration:");
-    error.issues.forEach((err) => {
-      console.error(`  - ${err.path.join(".")}: ${err.message}`);
-    });
-  } else {
-    console.error("❌ Configuration validation failed:", error);
-  }
-  process.exit(1);
+export type Config = z.infer<typeof configSchema>;
+
+/**
+ * Validates an environment against the indexer schema (issue #631).
+ *
+ * Pure: it throws a `ConfigError` and never exits, so tests and tools can call
+ * it freely. The entrypoint decides what a failure means.
+ */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  return parseConfig("ipredict-indexer", configSchema, env);
 }
 
-export const config = parsed;
-export type Config = z.infer<typeof configSchema>;
+let current: Config | null = null;
+
+/**
+ * Validates and stores the configuration for this process (issue #632).
+ *
+ * Called once, explicitly, at the start of each entrypoint. Importing this
+ * module does nothing on its own.
+ */
+export function initConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  current = loadConfig(env);
+  return current;
+}
+
+/**
+ * The configuration stored by {@link initConfig}.
+ *
+ * @throws {ProgrammingError} when read before initialisation: that is a wiring
+ * bug in the entrypoint, not a retryable condition.
+ */
+export function getConfig(): Config {
+  if (current === null) {
+    throw new ProgrammingError("indexer config read before initConfig() was called");
+  }
+  return current;
+}
+
+/**
+ * Lazy view of the stored configuration, so existing `config.KEY` call sites
+ * keep working. Reads still go through {@link getConfig}.
+ */
+export const config: Config = new Proxy({} as Config, {
+  get(_target, prop) {
+    return Reflect.get(getConfig(), prop);
+  },
+});

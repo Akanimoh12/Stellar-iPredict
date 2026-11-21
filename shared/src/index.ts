@@ -11,6 +11,15 @@ export * from "./wasm-integrity.js";
  */
 export * from "./retry.js";
 
+/** Error hierarchy: transient / permanent / programming — issue #633. */
+export * from "./errors.js";
+
+/** One configuration pattern with one error shape — issue #631. */
+export * from "./config.js";
+
+/** The shared logger and its canonical field names — issue #630. */
+export * from "./log.js";
+
 /** Canonical market categories stored on-chain and in PostgreSQL. */
 export const MARKET_CATEGORIES = [
   "Crypto",

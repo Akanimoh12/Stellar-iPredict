@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use crate::{IPredictTokenContract, IPredictTokenContractClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger, LedgerInfo},
+    token::TokenClient as Sep41Client, Address, Env, MuxedAddress, String,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -197,7 +200,7 @@ fn test_transfer_between_accounts() {
 
     client.mint(&minter, &alice, &100_0000000_i128);
 
-    client.transfer(&alice, &bob, &30_0000000_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &30_0000000_i128);
 
     assert_eq!(client.balance(&alice), 70_0000000_i128);
     assert_eq!(client.balance(&bob), 30_0000000_i128);
@@ -226,7 +229,7 @@ fn test_reject_transfer_insufficient_balance() {
     client.mint(&minter, &alice, &10_0000000_i128);
 
     // Attempt to transfer more than balance
-    client.transfer(&alice, &bob, &20_0000000_i128); // panics
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &20_0000000_i128); // panics
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -273,12 +276,15 @@ fn test_total_supply_tracking() {
     client.mint(&minter, &alice, &100_0000000_i128);
     assert_eq!(client.total_supply(), 100_0000000_i128);
 
+    client.transfer(&alice, &MuxedAddress::from(alice.clone()), &10_0000000_i128);
+    assert_eq!(client.balance(&alice), 100_0000000_i128);
+
     // Mint 50 to Bob → supply = 150
     client.mint(&minter, &bob, &50_0000000_i128);
     assert_eq!(client.total_supply(), 150_0000000_i128);
 
     // Transfer 20 from Alice to Bob → supply unchanged = 150
-    client.transfer(&alice, &bob, &20_0000000_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &20_0000000_i128);
     assert_eq!(client.total_supply(), 150_0000000_i128);
 
     // Alice burns 30 → supply = 120
@@ -292,6 +298,66 @@ fn test_total_supply_tracking() {
     // Final: Alice = 100 - 20 - 30 = 50, Bob = 50 + 20 - 10 = 60
     assert_eq!(client.balance(&alice), 50_0000000_i128);
     assert_eq!(client.balance(&bob), 60_0000000_i128);
+}
+
+#[test]
+fn test_sep41_allowance_transfer_from_and_burn_from() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_id = env.register_contract(None, IPredictTokenContract);
+    let client = IPredictTokenContractClient::new(&env, &token_id);
+    let minter = init(&env, &client);
+    client.set_minter(&minter);
+    let sep41 = Sep41Client::new(&env, &token_id);
+
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.mint(&minter, &owner, &100_i128);
+    assert_eq!(sep41.name(), String::from_str(&env, "IPREDICT"));
+    assert_eq!(sep41.symbol(), String::from_str(&env, "IPRED"));
+    assert_eq!(sep41.decimals(), 7);
+    assert_eq!(sep41.balance(&owner), 100);
+
+    let expiration = env.ledger().sequence() + 10;
+    sep41.approve(&owner, &spender, &60_i128, &expiration);
+    assert_eq!(sep41.allowance(&owner, &spender), 60);
+
+    sep41.transfer_from(&spender, &owner, &recipient, &25_i128);
+    assert_eq!(sep41.balance(&owner), 75);
+    assert_eq!(sep41.balance(&recipient), 25);
+    assert_eq!(sep41.allowance(&owner, &spender), 35);
+
+    sep41.burn_from(&spender, &owner, &15_i128);
+    assert_eq!(sep41.balance(&owner), 60);
+    assert_eq!(client.total_supply(), 85);
+    assert_eq!(sep41.allowance(&owner, &spender), 20);
+}
+
+#[test]
+fn test_sep41_allowance_expires_after_ledger() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let current = env.ledger().sequence();
+    let expiration = current + 1;
+
+    client.approve(&owner, &spender, &40_i128, &expiration);
+    assert_eq!(client.allowance(&owner, &spender), 40);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 26,
+        sequence_number: expiration + 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
+    assert_eq!(client.allowance(&owner, &spender), 0);
 }
 
 

@@ -382,7 +382,7 @@ export function createMarketsRoutes(
     async (_request, reply) => {
       const status = await getResolutionDelayStatus(db);
       // Short cache — this is a coarse signal and the query hits `markets`.
-      reply.header("Cache-Control", "public, max-age=30");
+      reply.header("Cache-Control", cacheControlPublic(30));
       return reply.status(200).send(status);
     }
   );
@@ -439,7 +439,7 @@ export function createMarketsRoutes(
     async (_request, reply) => {
       // Short cache: this drives a periodic sweep, not a user-facing view, and
       // an operator running it repeatedly should not hammer `markets`.
-      reply.header("Cache-Control", "public, max-age=60");
+      reply.header("Cache-Control", cacheControlPublic(60));
       return getUnmappableCandidates(db);
     }
   );

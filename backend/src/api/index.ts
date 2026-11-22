@@ -162,6 +162,18 @@ export const PUBLIC_ROUTES: readonly PublicRouteDefinition[] = Object.freeze([
   },
   {
     method: "GET",
+    url: "/api/markets/live",
+    auth: "public",
+    reason: "Public real-time Server-Sent Events (SSE) stream for live market odds and pool updates (#1014)",
+  },
+  {
+    method: "GET",
+    url: "/api/markets/:id/live",
+    auth: "public",
+    reason: "Public real-time Server-Sent Events (SSE) stream for single-market live updates (#1014)",
+  },
+  {
+    method: "GET",
     url: "/api/leaderboard",
     auth: "public",
     reason: "Public global player ranking and points leaderboard",

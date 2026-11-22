@@ -13,23 +13,23 @@ use referral_registry::ReferralRegistryContract;
 
 // ── Test Infrastructure ───────────────────────────────────────────────────────
 
-struct TestSetup {
-    env: Env,
-    client: PredictionMarketContractClient<'static>,
-    admin: Address,
-    market_id: Address,
-    token_id: Address,
-    leaderboard_id: Address,
-    referral_id: Address,
-    xlm_sac_id: Address,
-    xlm_admin: StellarAssetClient<'static>,
-    xlm: TokenClient<'static>,
-    token_client: ipredict_token::IPredictTokenContractClient<'static>,
-    leaderboard_client: leaderboard::LeaderboardContractClient<'static>,
-    referral_client: referral_registry::ReferralRegistryContractClient<'static>,
+pub(crate) struct TestSetup {
+    pub(crate) env: Env,
+    pub(crate) client: PredictionMarketContractClient<'static>,
+    pub(crate) admin: Address,
+    pub(crate) market_id: Address,
+    pub(crate) token_id: Address,
+    pub(crate) leaderboard_id: Address,
+    pub(crate) referral_id: Address,
+    pub(crate) xlm_sac_id: Address,
+    pub(crate) xlm_admin: StellarAssetClient<'static>,
+    pub(crate) xlm: TokenClient<'static>,
+    pub(crate) token_client: ipredict_token::IPredictTokenContractClient<'static>,
+    pub(crate) leaderboard_client: leaderboard::LeaderboardContractClient<'static>,
+    pub(crate) referral_client: referral_registry::ReferralRegistryContractClient<'static>,
 }
 
-fn setup() -> TestSetup {
+pub(crate) fn setup() -> TestSetup {
     let env = Env::default();
     env.mock_all_auths();
     env.budget().reset_unlimited();
@@ -165,11 +165,11 @@ impl Drop for TestSetup {
     }
 }
 
-fn fund_user(t: &TestSetup, user: &Address, amount: i128) {
+pub(crate) fn fund_user(t: &TestSetup, user: &Address, amount: i128) {
     t.xlm_admin.mint(user, &amount);
 }
 
-fn create_test_market(t: &TestSetup) -> u64 {
+pub(crate) fn create_test_market(t: &TestSetup) -> u64 {
     t.client.create_market(
         &t.admin,
         &String::from_str(&t.env, "Will BTC hit 100k?"),
@@ -179,7 +179,7 @@ fn create_test_market(t: &TestSetup) -> u64 {
     )
 }
 
-fn advance_time(env: &Env, secs: u64) {
+pub(crate) fn advance_time(env: &Env, secs: u64) {
     let current = env.ledger().timestamp();
     env.ledger().set(LedgerInfo {
         timestamp: current + secs,

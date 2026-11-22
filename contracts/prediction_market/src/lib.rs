@@ -1455,7 +1455,10 @@ impl PredictionMarketContract {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod invariant;

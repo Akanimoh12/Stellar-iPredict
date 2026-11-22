@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { pingDb, withHealthTimeout } from "../db/health.js";
 import { pingRedis } from "../db/redis.js";
 import { getResolutionDelayStatus } from "../db/markets.js";
+import { cacheControlNoStore, cacheControlPublic } from "../cache/cacheControl.js";
 
 interface CheckResult {
   ok: boolean;
@@ -141,6 +142,7 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
         checks: { db: toPublicResult(db), redis: toPublicResult(redis) },
       };
 
+      reply.header("Cache-Control", cacheControlNoStore());
       reply.status(ready ? 200 : 503).send(body);
     }
   );
@@ -184,8 +186,10 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
     async (_req, reply) => {
       try {
         const status = await getResolutionDelayStatus();
+        reply.header("Cache-Control", cacheControlPublic(30));
         reply.status(200).send(status);
       } catch (error) {
+        reply.header("Cache-Control", cacheControlNoStore());
         reply.status(503).send({
           status: "unknown",
           error: error instanceof Error ? error.message : String(error),

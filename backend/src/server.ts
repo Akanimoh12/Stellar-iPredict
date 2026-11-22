@@ -25,10 +25,12 @@ import {
 import { config } from "./config/index.js";
 
 import { createMarketsRoutes } from "./api/markets.js";
+import { registerLiveMarketRoutes, broadcastMarketUpdate } from "./api/live.js";
 import { registerStatsRoutes } from "./api/stats.js";
 import { registerStatusRoutes } from "./api/status.js";
 import { registerOracleRoutes } from "./api/oracle.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
+import { registerCacheControlHook } from "./cache/cacheControl.js";
 import { registerMetricsHook, registerMetricsEndpoint } from "./metrics.js";
 import { registerCancellationHook } from "./lib/cancellation.js";
 import { rpc } from "@stellar/stellar-sdk";
@@ -46,6 +48,7 @@ export {
   parseCorsOrigins,
   validateCorsAllowlist,
   validateCorsOrigin,
+  broadcastMarketUpdate,
 };
 
 declare module "fastify" {
@@ -308,6 +311,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   // middleware does real work. Registered after helmet and CORS so that a 429
   // still carries security and CORS headers; see the ordering note above.
   registerRateLimiter(server);
+  registerCacheControlHook(server);
 
   // OpenAPI spec at /api/docs. Every route plugin below must be registered
   // after this: registerOpenApi's onRoute hook only sees routes registered
@@ -349,6 +353,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
     }
 
     createMarketsRoutes(routes, readDatabasePool, redis);
+    registerLiveMarketRoutes(routes, readDatabasePool, redis);
   });
 
   // Readiness probe: verifies DB and Redis are reachable.

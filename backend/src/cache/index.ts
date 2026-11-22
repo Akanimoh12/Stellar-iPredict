@@ -35,6 +35,10 @@ export {
   cacheControlPublic,
   cacheControlPrivate,
   cacheControlNoStore,
+  ROUTE_CACHE_POLICIES,
+  getRouteCacheControl,
+  registerCacheControlHook,
+  type RouteCachePolicy,
 } from "./cacheControl.js";
 
 export {

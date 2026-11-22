@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useMarket } from "@/hooks/useMarket";
 import { useClaim } from "@/hooks/useClaim";
 import { useWallet } from "@/hooks/useWallet";
 import { useToken } from "@/hooks/useToken";
+import { useLiveMarketFeed } from "@/hooks/useLiveMarketFeed";
 import { pollMarketEvents } from "@/services/events";
 import { getXlmBalance } from "@/services/soroban";
 import { displayXLM, formatXLM, calculatePayout, truncateAddress } from "@/utils/helpers";
@@ -38,10 +39,27 @@ function getStatusBadge(market: { resolved: boolean; outcome: boolean; cancelled
 export default function MarketDetailPage() {
   const params = useParams<{ id: string }>();
   const marketId = Number(params.id);
-  const { market, userBet, loading, error, refetch } = useMarket(marketId);
+  const { market: rawMarket, userBet, loading, error, refetch } = useMarket(marketId);
+  const { liveUpdate } = useLiveMarketFeed(marketId);
+
+  const market = useMemo(() => {
+    if (!rawMarket) return null;
+    if (!liveUpdate || liveUpdate.marketId !== marketId) return rawMarket;
+    return {
+      ...rawMarket,
+      totalYes: typeof liveUpdate.totalYes === "number" ? liveUpdate.totalYes : parseFloat(String(liveUpdate.totalYes)) || rawMarket.totalYes,
+      totalNo: typeof liveUpdate.totalNo === "number" ? liveUpdate.totalNo : parseFloat(String(liveUpdate.totalNo)) || rawMarket.totalNo,
+      betCount: liveUpdate.betCount ?? rawMarket.betCount,
+      resolved: liveUpdate.resolved ?? rawMarket.resolved,
+      cancelled: liveUpdate.cancelled ?? rawMarket.cancelled,
+      outcome: liveUpdate.outcome !== undefined ? (liveUpdate.outcome ?? false) : rawMarket.outcome,
+    };
+  }, [rawMarket, liveUpdate, marketId]);
   const { publicKey } = useWallet();
   const { data: tokenData } = useToken(publicKey ?? undefined);
   const { submit: claimReward, loading: claiming, stage: claimStage, error: claimError, reset: resetClaim } = useClaim();
+  const [isClaiming, setIsClaiming] = useState(false);
+  const isClaimingRef = useRef(false);
 
   const [events, setEvents] = useState<MarketEvent[]>([]);
   const [xlmBalance, setXlmBalance] = useState(0);
@@ -68,10 +86,20 @@ export default function MarketDetailPage() {
     return () => { mounted = false; };
   }, [marketId]);
 
+  const isClaimBusy = claiming || isClaiming;
+
   const handleClaim = useCallback(async () => {
-    await claimReward(marketId);
-    refetch();
-  }, [claimReward, marketId, refetch]);
+    if (isClaimingRef.current || claiming) return;
+    isClaimingRef.current = true;
+    setIsClaiming(true);
+    try {
+      await claimReward(marketId);
+      refetch();
+    } finally {
+      isClaimingRef.current = false;
+      setIsClaiming(false);
+    }
+  }, [claimReward, marketId, refetch, claiming]);
 
   const balance = xlmBalance;
 
@@ -269,10 +297,14 @@ export default function MarketDetailPage() {
                   </div>
                 </div>
 
-                {claiming ? (
+                {isClaimBusy ? (
                   <TxProgress step={claimStage === "idle" ? "building" : claimStage} />
                 ) : (
-                  <button onClick={handleClaim} className="btn-primary w-full">
+                  <button
+                    onClick={handleClaim}
+                    disabled={isClaimBusy}
+                    className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
                     Claim Rewards
                   </button>
                 )}

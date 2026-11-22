@@ -52,6 +52,8 @@ export default function BettingPanel({
   const [side, setSide] = useState<boolean>(userBet?.isYes ?? true);
   const [amountStr, setAmountStr] = useState("");
   const [showShare, setShowShare] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = React.useRef(false);
 
   // Lock side if user already has a bet
   useEffect(() => {
@@ -71,10 +73,11 @@ export default function BettingPanel({
   // Never let it go negative.
   const spendable = Math.max(0, balance - RESERVE_BUFFER_XLM);
 
+  const isBusy = loading || isSubmitting;
   const isMinValid = amount >= 1;
   const isBalanceValid = amount <= spendable;
   const canSubmit =
-    connected && isActive && isMinValid && isBalanceValid && !loading;
+    connected && isActive && isMinValid && isBalanceValid && !isBusy;
 
   // Calculate potential payout and live projected odds
   const { yesPercent, noPercent } = calculateOdds(
@@ -109,9 +112,16 @@ export default function BettingPanel({
     netAmount > 0 ? ((profit / netAmount) * 100).toFixed(0) : "0";
 
   const handleSubmit = async () => {
-    if (!canSubmit) return;
-    reset();
-    await submit(market.id, side, amount);
+    if (!canSubmit || isSubmittingRef.current || loading) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      reset();
+      await submit(market.id, side, amount);
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
   };
 
   // Show share button after confirmed
@@ -155,12 +165,12 @@ export default function BettingPanel({
       {/* YES / NO toggle */}
       <div className="grid grid-cols-2 gap-3">
         <button
-          onClick={() => !oppositeDisabled || side === true ? setSide(true) : undefined}
-          disabled={oppositeDisabled && !side}
+          onClick={() => (!oppositeDisabled || side === true) && !isBusy ? setSide(true) : undefined}
+          disabled={(oppositeDisabled && !side) || isBusy}
           className={`relative py-3 rounded-xl font-semibold text-sm transition-all duration-200 ${
             side === true
               ? "bg-accent-green/20 text-accent-green border-2 border-accent-green shadow-lg shadow-accent-green/10"
-              : oppositeDisabled
+              : oppositeDisabled || isBusy
                 ? "bg-surface-hover text-slate-600 border border-surface-border cursor-not-allowed"
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-green/50 hover:text-accent-green"
           }`}
@@ -169,12 +179,12 @@ export default function BettingPanel({
           YES ({side === true && netAmount > 0 ? projectedOdds.yesPercent : yesPercent}%)
         </button>
         <button
-          onClick={() => !oppositeDisabled || side === false ? setSide(false) : undefined}
-          disabled={oppositeDisabled && side}
+          onClick={() => (!oppositeDisabled || side === false) && !isBusy ? setSide(false) : undefined}
+          disabled={(oppositeDisabled && side) || isBusy}
           className={`relative py-3 rounded-xl font-semibold text-sm transition-all duration-200 ${
             side === false
               ? "bg-accent-red/20 text-accent-red border-2 border-accent-red shadow-lg shadow-accent-red/10"
-              : oppositeDisabled
+              : oppositeDisabled || isBusy
                 ? "bg-surface-hover text-slate-600 border border-surface-border cursor-not-allowed"
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-red/50 hover:text-accent-red"
           }`}
@@ -195,7 +205,7 @@ export default function BettingPanel({
             placeholder="0.00"
             min="1"
             step="any"
-            disabled={!isActive || loading}
+            disabled={!isActive || isBusy}
             className="w-full px-4 py-3 rounded-xl bg-surface border border-surface-border text-slate-100 text-lg font-medium placeholder-slate-600 focus:outline-none focus:border-primary-600/50 focus:ring-1 focus:ring-primary-600/25 transition-all disabled:opacity-50"
           />
         </div>
@@ -206,7 +216,7 @@ export default function BettingPanel({
             <button
               key={qa}
               onClick={() => setAmountStr(qa.toString())}
-              disabled={!isActive || loading}
+              disabled={!isActive || isBusy}
               className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-surface-card border border-surface-border text-slate-400 hover:text-white hover:border-primary-600/50 transition-colors disabled:opacity-50"
             >
               {qa}
@@ -214,7 +224,7 @@ export default function BettingPanel({
           ))}
           <button
             onClick={handleSetMax}
-            disabled={!isActive || loading || spendable <= 0}
+            disabled={!isActive || isBusy || spendable <= 0}
             className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-primary-600/15 border border-primary-600/30 text-primary-400 hover:bg-primary-600/25 transition-colors disabled:opacity-50"
           >
             MAX
@@ -347,7 +357,7 @@ export default function BettingPanel({
             ? "Connect Wallet"
             : !isActive
               ? "Market Closed"
-              : loading
+              : isBusy
                 ? "Processing..."
                 : hasExistingBet
                   ? "Increase Position"

@@ -225,4 +225,23 @@ describe("BettingPanel", () => {
     const input = screen.getByPlaceholderText("0.00") as HTMLInputElement;
     expect(input.value).toBe("5");
   });
+
+  it("prevents double submission on rapid clicks", async () => {
+    let resolveSubmit: () => void;
+    const submitPromise = new Promise<void>((resolve) => {
+      resolveSubmit = resolve;
+    });
+    mockSubmit.mockImplementation(() => submitPromise);
+
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+
+    const submitBtn = screen.getByRole("button", { name: "Place Bet" });
+    fireEvent.click(submitBtn);
+    fireEvent.click(submitBtn);
+    fireEvent.click(submitBtn);
+
+    expect(mockSubmit).toHaveBeenCalledTimes(1);
+    resolveSubmit!();
+  });
 });

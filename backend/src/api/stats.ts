@@ -3,6 +3,7 @@ import type { Redis } from "ioredis";
 import type { Pool } from "pg";
 import { getOrSet } from "../cache/cacheAside.js";
 import { statsKey, CACHE_TTLS } from "../cache/cacheKeys.js";
+import { cacheControlPublic } from "../cache/cacheControl.js";
 import { getGlobalStats, type Queryable } from "../db/stats.js";
 import { computeEtag, matchesIfNoneMatch } from "../lib/etag.js";
 
@@ -63,6 +64,7 @@ export function registerStatsRoutes(
 
       const etag = computeEtag(stats);
       reply.header("ETag", etag);
+      reply.header("Cache-Control", cacheControlPublic(STATS_CACHE_TTL));
 
       if (matchesIfNoneMatch(request.headers["if-none-match"], etag)) {
         return reply.status(304).send();

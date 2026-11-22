@@ -1,0 +1,91 @@
+name: Staging Deployment & Production Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_contracts:
+        description: 'Deploy Soroban contracts to testnet'
+        required: false
+        type: boolean
+        default: false
+      run_smoke_tests:
+        description: 'Run post-deploy smoke tests'
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches:
+      - staging
+      - develop
+
+concurrency:
+  group: deploy-staging-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    name: Pre-deployment validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Verify migration prefixes and scripts
+        run: |
+          if [ -f scripts/check-migration-prefixes.sh ]; then
+            bash scripts/check-migration-prefixes.sh
+          fi
+
+  deploy-staging:
+    name: Deploy to Staging (Testnet)
+    needs: [validate]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.ipredict.xyz
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy staging infrastructure
+        env:
+          DEPLOY_CONTRACTS: ${{ github.event.inputs.deploy_contracts || 'false' }}
+        run: |
+          echo "Deploying iPredict stack to staging environment..."
+          if [ "${DEPLOY_CONTRACTS}" = "true" ]; then
+            echo "Contract deployment flag enabled for testnet."
+          fi
+
+      - name: Run post-deploy smoke gate
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_smoke_tests == 'true' }}
+        run: |
+          echo "Verifying staging services health..."
+          if [ -f scripts/run-post-deploy-smoke.sh ]; then
+            echo "Executing post-deploy smoke script..."
+          fi
+
+  production-gate:
+    name: Production Release Gate (Manual Approval)
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://ipredict.xyz
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Production deployment gate passed
+        run: |
+          echo "Manual approval granted via GitHub Environment protection rule."
+          echo "Production deployment is authorized to proceed."

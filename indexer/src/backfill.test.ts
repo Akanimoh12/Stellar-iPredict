@@ -26,6 +26,8 @@ import {
   processEventsInChunks,
   EVENTS_PROCESSING_CHUNK_SIZE,
   sampleMemoryUsage,
+  inspectLedgerRange,
+  replayLedgerRange,
 } from "./backfill.js";
 import { RetentionExceededError } from "./rpc/getEvents.js";
 import { rpc } from "@stellar/stellar-sdk";
@@ -613,6 +615,63 @@ describe("Backfill & Poll Module", () => {
           startLedger: 100,
         }),
       ).rejects.toThrow("reindex aborted");
+    });
+  });
+
+  describe("inspectLedgerRange and replayLedgerRange (Issue #1020)", () => {
+    it("validates fromLedger <= toLedger", async () => {
+      await expect(inspectLedgerRange({ fromLedger: 200, toLedger: 100 })).rejects.toThrow(
+        /Invalid ledger range/,
+      );
+      await expect(replayLedgerRange({ fromLedger: 200, toLedger: 100 })).rejects.toThrow(
+        /Invalid ledger range/,
+      );
+    });
+
+    it("inspectLedgerRange fetches RPC events and compares with DB rows", async () => {
+      const mockGetEvents = vi.fn().mockResolvedValue({
+        events: [{ ledger: 105, txHash: "tx1", contractId: "CC123" }],
+        latestLedger: 110,
+      });
+      vi.mocked(rpc.Server).mockReturnValue({ getEvents: mockGetEvents } as any);
+
+      const mockDb = {
+        query: vi.fn().mockResolvedValue({
+          rows: [{ ledger_seq: 105, tx_hash: "tx1" }],
+        }),
+      };
+
+      const result = await inspectLedgerRange(
+        { fromLedger: 100, toLedger: 110 },
+        mockDb as any,
+      );
+
+      expect(result.fromLedger).toBe(100);
+      expect(result.toLedger).toBe(110);
+      expect(result.onChainEventCount).toBe(1);
+      expect(result.dbEventCount).toBe(1);
+      expect(result.events[0].txHash).toBe("tx1");
+    });
+
+    it("replayLedgerRange processes events without advancing checkpoint", async () => {
+      const mockGetEvents = vi.fn().mockResolvedValue({
+        events: [],
+        latestLedger: 105,
+      });
+      vi.mocked(rpc.Server).mockReturnValue({ getEvents: mockGetEvents } as any);
+
+      const mockDb = {
+        query: vi.fn().mockResolvedValue({ rows: [] }),
+      };
+
+      const result = await replayLedgerRange(
+        { fromLedger: 100, toLedger: 105 },
+        mockDb as any,
+      );
+
+      expect(result.fromLedger).toBe(100);
+      expect(result.toLedger).toBe(105);
+      expect(result.totalEventsProcessed).toBe(0);
     });
   });
 });

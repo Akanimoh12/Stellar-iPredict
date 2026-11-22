@@ -2248,3 +2248,46 @@ fn test_propose_admin_by_non_admin_rejected() {
     let next = Address::generate(&t.env);
     t.client.propose_admin(&rando, &next);
 }
+
+#[test]
+fn test_category_registry_admin_management() {
+    let t = setup();
+    // Default categories allowed
+    assert!(t.client.is_category_allowed(&Category::Crypto));
+
+    // Admin can remove a category
+    t.client.remove_category(&t.admin, &Category::Crypto);
+    assert!(!t.client.is_category_allowed(&Category::Crypto));
+
+    // Creating market with removed category fails
+    let res = t.client.try_create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Will ETH flip BTC?"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Crypto,
+        &3600_u64,
+    );
+    assert_eq!(res, Err(Ok(MarketError::InvalidCategory)));
+
+    // Admin can re-add category
+    t.client.add_category(&t.admin, &Category::Crypto);
+    assert!(t.client.is_category_allowed(&Category::Crypto));
+
+    // Creating market succeeds now
+    let market_id = t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Will ETH flip BTC?"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Crypto,
+        &3600_u64,
+    );
+    assert_eq!(market_id, 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // NotAdmin
+fn test_category_registry_non_admin_rejected() {
+    let t = setup();
+    let rando = Address::generate(&t.env);
+    t.client.remove_category(&rando, &Category::Crypto);
+}

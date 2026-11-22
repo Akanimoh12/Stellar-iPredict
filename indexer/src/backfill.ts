@@ -715,18 +715,237 @@ export async function runFullReindex(options: ReindexOptions = {}): Promise<Rein
   };
 }
 
-// Direct CLI entry point if executed directly
-if (process.argv[1]?.endsWith("backfill.ts") || process.argv.includes("--reindex")) {
-  Promise.resolve()
-    // Configuration is validated here, explicitly, before the reindex reads it.
-    .then(() => initConfig())
-    .then(() => runFullReindex())
-    .then(() => pool.end())
-    .catch((err) => {
-      reportStartupFailure("ipredict-indexer", err);
-      pool.end().finally(() => {
-        process.exitCode = 1;
-      });
+export interface LedgerRangeOptions {
+  fromLedger: number;
+  toLedger: number;
+  signal?: AbortSignal;
+}
+
+export interface InspectRangeResult {
+  fromLedger: number;
+  toLedger: number;
+  onChainEventCount: number;
+  dbEventCount: number;
+  events: Array<{
+    ledger: number;
+    txHash: string;
+    contractId?: string;
+  }>;
+}
+
+export interface ReplayRangeResult {
+  fromLedger: number;
+  toLedger: number;
+  totalEventsProcessed: number;
+  recomputedBetCounts?: boolean;
+  recomputedTotals?: boolean;
+}
+
+/**
+ * Inspects a single ledger range [fromLedger, toLedger] by fetching events from
+ * RPC and querying the local database for events in that range (#1020).
+ * Safe and read-only: does not modify DB or update checkpoints.
+ */
+export async function inspectLedgerRange(
+  options: LedgerRangeOptions,
+  db: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: any[] }> } = pool,
+): Promise<InspectRangeResult> {
+  const { fromLedger, toLedger, signal } = options;
+  if (fromLedger > toLedger) {
+    throw new Error(`Invalid ledger range: fromLedger (${fromLedger}) cannot exceed toLedger (${toLedger})`);
+  }
+
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  if (signal?.aborted) throw signal.reason ?? new Error("inspect aborted");
+
+  const request: rpc.Api.GetEventsRequest = {
+    filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+    startLedger: fromLedger,
+    endLedger: toLedger,
+    limit: config.EVENTS_PER_PAGE,
+  };
+
+  const response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async () => {
+    return await server.getEvents(request);
+  });
+
+  const onChainEvents = response.events || [];
+
+  const { rows } = await db.query(
+    `SELECT ledger_seq, tx_hash FROM events WHERE ledger_seq >= $1 AND ledger_seq <= $2 ORDER BY ledger_seq ASC`,
+    [fromLedger, toLedger],
+  );
+
+  return {
+    fromLedger,
+    toLedger,
+    onChainEventCount: onChainEvents.length,
+    dbEventCount: rows.length,
+    events: onChainEvents.map(e => ({
+      ledger: e.ledger,
+      txHash: e.txHash,
+      contractId: e.contractId,
+    })),
+  };
+}
+
+/**
+ * Replays a single ledger range [fromLedger, toLedger] for debugging (#1020).
+ * Fetches events in that range and writes them to the DB using existing idempotent handlers.
+ * Does not overwrite the service checkpoint to avoid disrupting the live indexer cursor.
+ */
+export async function replayLedgerRange(
+  options: LedgerRangeOptions & { recomputeDerived?: boolean },
+  db: { query: (sql: string, params?: readonly unknown[]) => Promise<{ rows: any[] }> } = pool,
+): Promise<ReplayRangeResult> {
+  const { fromLedger, toLedger, signal, recomputeDerived } = options;
+  if (fromLedger > toLedger) {
+    throw new Error(`Invalid ledger range: fromLedger (${fromLedger}) cannot exceed toLedger (${toLedger})`);
+  }
+
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  if (signal?.aborted) throw signal.reason ?? new Error("replay aborted");
+
+  await ensureDeadLetterTable();
+
+  let currentLedger = fromLedger;
+  let cursor: string | undefined = undefined;
+  let totalProcessed = 0;
+
+  while (currentLedger <= toLedger) {
+    if (signal?.aborted) throw signal.reason ?? new Error("replay aborted");
+    const windowEnd = Math.min(currentLedger + (config.BACKFILL_WINDOW_LEDGERS ?? 10_000) - 1, toLedger);
+
+    const request: rpc.Api.GetEventsRequest = cursor
+      ? {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          cursor,
+          limit: config.EVENTS_PER_PAGE,
+        }
+      : {
+          filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+          startLedger: currentLedger,
+          endLedger: windowEnd,
+          limit: config.EVENTS_PER_PAGE,
+        };
+
+    const response = await fetchWithRetry<rpc.Api.GetEventsResponse>(async () => {
+      return await server.getEvents(request);
     });
+
+    const events = response.events || [];
+    if (events.length === 0) {
+      if (response.latestLedger >= toLedger) break;
+      currentLedger = Math.max(currentLedger + 1, Math.min(response.latestLedger, windowEnd) + 1);
+      cursor = undefined;
+      continue;
+    }
+
+    await processEventsInChunks(events, EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
+      if (signal?.aborted) throw new Error("replay aborted");
+      let topics: any[];
+      let data: any;
+      try {
+        topics = event.topic.map((t: any) => scValToNative(t));
+        data = scValToNative(event.value);
+      } catch (err) {
+        await insertDeadLetterEvent(event, Number((event as any).eventIndex ?? eventIndex), err);
+        return;
+      }
+      await writeEventToDb(event.ledger, event.txHash, topics, data, Number((event as any).eventIndex ?? eventIndex));
+    });
+
+    totalProcessed += events.length;
+    const lastEventLedger = events[events.length - 1].ledger;
+
+    if (response.cursor && response.cursor !== cursor) {
+      cursor = response.cursor;
+    } else {
+      currentLedger = Math.max(lastEventLedger + 1, Math.min(response.latestLedger, windowEnd) + 1);
+      cursor = undefined;
+    }
+
+    if (lastEventLedger >= toLedger) break;
+  }
+
+  let recomputedBetCounts = false;
+  let recomputedTotals = false;
+  if (recomputeDerived) {
+    const { recomputeMarketBetCountsFromBets } = await import("./recomputeBetCounts.js");
+    const { recomputeMarketTotalsFromBets } = await import("./recomputeTotals.js");
+    await recomputeMarketBetCountsFromBets(db);
+    await recomputeMarketTotalsFromBets(db);
+    recomputedBetCounts = true;
+    recomputedTotals = true;
+  }
+
+  return {
+    fromLedger,
+    toLedger,
+    totalEventsProcessed: totalProcessed,
+    recomputedBetCounts,
+    recomputedTotals,
+  };
+}
+
+// Direct CLI entry point if executed directly
+if (
+  process.argv[1]?.endsWith("backfill.ts") ||
+  process.argv.includes("--reindex") ||
+  process.argv.includes("--inspect-range") ||
+  process.argv.includes("--replay-range")
+) {
+  const args = process.argv.slice(2);
+  const getArgValue = (flag: string): string | undefined => {
+    const idx = args.indexOf(flag);
+    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+  };
+
+  const isInspect = args.includes("--inspect-range") || args.includes("--inspect");
+  const isReplay = args.includes("--replay-range") || args.includes("--replay");
+  const fromStr = getArgValue("--from") ?? getArgValue("--from-ledger") ?? getArgValue("--start");
+  const toStr = getArgValue("--to") ?? getArgValue("--to-ledger") ?? getArgValue("--end");
+
+  if (isInspect || isReplay) {
+    if (!fromStr || !toStr) {
+      console.error("Usage: tsx indexer/src/backfill.ts --[inspect-range|replay-range] --from <ledger> --to <ledger>");
+      process.exit(1);
+    }
+    const fromLedger = parseInt(fromStr, 10);
+    const toLedger = parseInt(toStr, 10);
+
+    Promise.resolve()
+      .then(() => initConfig())
+      .then(async () => {
+        if (isInspect) {
+          console.log(`[inspect-range] Inspecting ledger range ${fromLedger}..${toLedger}...`);
+          const res = await inspectLedgerRange({ fromLedger, toLedger });
+          console.log(`[inspect-range] Result: on-chain events=${res.onChainEventCount}, db events=${res.dbEventCount}`);
+        } else {
+          console.log(`[replay-range] Replaying ledger range ${fromLedger}..${toLedger}...`);
+          const res = await replayLedgerRange({ fromLedger, toLedger });
+          console.log(`[replay-range] Replay completed: ${res.totalEventsProcessed} events processed`);
+        }
+      })
+      .then(() => pool.end())
+      .catch((err) => {
+        reportStartupFailure("ipredict-indexer", err);
+        pool.end().finally(() => {
+          process.exitCode = 1;
+        });
+      });
+  } else {
+    Promise.resolve()
+      // Configuration is validated here, explicitly, before the reindex reads it.
+      .then(() => initConfig())
+      .then(() => runFullReindex())
+      .then(() => pool.end())
+      .catch((err) => {
+        reportStartupFailure("ipredict-indexer", err);
+        pool.end().finally(() => {
+          process.exitCode = 1;
+        });
+      });
+  }
 }
 

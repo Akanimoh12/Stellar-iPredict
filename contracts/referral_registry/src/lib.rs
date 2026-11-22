@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
     Address, BytesN, Env, IntoVal, String, Symbol, Val,
 };
 
@@ -52,6 +52,22 @@ pub enum DataKey {
 pub struct UserProfile {
     pub display_name: String,
     pub referrer:     Option<Address>,
+}
+
+#[contractevent(topics = ["referral", "registered"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferralRegisteredEvent {
+    pub user: Address,
+    pub display_name: String,
+    pub referrer: Option<Address>,
+}
+
+#[contractevent(topics = ["referral", "credited"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferralCreditedEvent {
+    pub user: Address,
+    pub referrer: Option<Address>,
+    pub amount: i128,
 }
 
 #[contract]
@@ -136,7 +152,7 @@ impl ReferralRegistryContract {
         // Existence of Profile(user) is what is_registered() now checks.
         env.storage().persistent().set(
             &DataKey::Profile(user.clone()),
-            &UserProfile { display_name, referrer: referrer.clone() },
+            &UserProfile { display_name: display_name.clone(), referrer: referrer.clone() },
         );
         // The referrer's counter is a DIFFERENT user's entry — update in place.
         if let Some(ref ref_addr) = referrer {
@@ -145,6 +161,13 @@ impl ReferralRegistryContract {
             env.storage().persistent()
                 .set(&DataKey::ReferralCount(ref_addr.clone()), &(count + 1));
         }
+
+        ReferralRegisteredEvent {
+            user: user.clone(),
+            display_name,
+            referrer: referrer.clone(),
+        }
+        .publish(&env);
 
         let this = env.current_contract_address();
         let leaderboard: Address = env.storage().instance().get(&DataKey::LeaderboardContract).unwrap();
@@ -186,7 +209,13 @@ impl ReferralRegistryContract {
                 let earnings: i128 = env.storage().persistent()
                     .get(&DataKey::ReferralEarnings(ref_addr.clone())).unwrap_or(0);
                 env.storage().persistent()
-                    .set(&DataKey::ReferralEarnings(ref_addr), &(earnings + referral_fee));
+                    .set(&DataKey::ReferralEarnings(ref_addr.clone()), &(earnings + referral_fee));
+                ReferralCreditedEvent {
+                    user,
+                    referrer: Some(ref_addr),
+                    amount: referral_fee,
+                }
+                .publish(&env);
                 Ok(true)
             }
             None => {
@@ -196,6 +225,12 @@ impl ReferralRegistryContract {
                         &env.current_contract_address(), &caller, &referral_fee,
                     );
                 }
+                ReferralCreditedEvent {
+                    user,
+                    referrer: None,
+                    amount: referral_fee,
+                }
+                .publish(&env);
                 Ok(false)
             }
         }

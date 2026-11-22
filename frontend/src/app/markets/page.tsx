@@ -19,7 +19,12 @@ export default function MarketsPage() {
   const filtered = useMemo(() => {
     if (!search.trim()) return markets;
     const q = search.toLowerCase();
-    return markets.filter((m) => m.question.toLowerCase().includes(q));
+    return markets.filter(
+      (m) =>
+        m.question.toLowerCase().includes(q) ||
+        (m.category && m.category.toLowerCase().includes(q)) ||
+        (m.description && m.description.toLowerCase().includes(q))
+    );
   }, [markets, search]);
 
   return (

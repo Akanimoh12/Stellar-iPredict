@@ -11,6 +11,11 @@ const MIN_BET: i128 = 10_000_000; // 1 XLM in stroops
 
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
+const MAX_BETTOR_PAGE: u32 = 50; // upper bound on bettors returned per paged read (#786)
+
+/// Storage layout version. Bump with a matching `migrate` step (#791).
+/// Contracts deployed before versioning have no stored value and read as 1.
+const SCHEMA_VERSION: u32 = 1;
 
 // Fee constants — multiply before divide to avoid precision loss
 const TOTAL_FEE_BPS: i128 = 200;
@@ -106,6 +111,7 @@ pub enum MarketError {
     OracleWindowClosed = 25,          // challenge window has already elapsed
     OracleInvalidState = 26,          // transition not legal from the current state
     OracleBondTooSmall = 27,          // bond below the minimum / not larger than submitter's
+    ContractPaused     = 28,          // global pause is on: new bets and markets are rejected (#788)
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -135,6 +141,8 @@ pub enum DataKey {
     // Multisig voting (Issue #527)
     CouncilVote(u64, Address),  // market_id, member → CouncilVoteRecord
     CouncilVoteCount(u64),      // market_id → vote count
+    Paused,                     // bool: global pause for place_bet / create_market (#788)
+    SchemaVersion,              // u32: storage layout version (#790, #791)
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -407,6 +415,43 @@ impl PredictionMarketContract {
         Ok(())
     }
 
+    /// Storage migration hook (#791). Admin only and idempotent. Call it once after
+    /// `upgrade`: the swapped WASM only runs on the next invocation, so it cannot
+    /// migrate inside `upgrade` itself. Add an `if from < N { ... }` block per layout change.
+    pub fn migrate(env: Env, admin: Address) -> Result<u32, MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let from = Self::stored_schema_version(&env);
+        if from < SCHEMA_VERSION {
+            // Layout migrations go here, in order, e.g. `if from < 2 { ... }`.
+        }
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
+        Ok(SCHEMA_VERSION)
+    }
+
+    /// Storage layout version of the deployed state (#790).
+    pub fn schema_version(env: Env) -> u32 {
+        Self::stored_schema_version(&env)
+    }
+
+    /// Build version of the deployed WASM, from the crate version (#790).
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Global pause for `place_bet` and `create_market`. Admin only. (#788)
+    /// Claims, refunds and resolution stay available while paused.
+    pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
     /// Update the packed Config (token / referral / leaderboard / xlm_sac). Admin only.
     /// Used to correct an address set at initialize time.
     pub fn set_config(
@@ -612,6 +657,7 @@ impl PredictionMarketContract {
     ) -> Result<u64, MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
+        Self::require_not_paused(&env)?;
         Self::check_rate(&env)?;
 
         // OPT: single instance read for count (was already one read)
@@ -651,6 +697,7 @@ impl PredictionMarketContract {
         amount: i128,
     ) -> Result<(), MarketError> {
         user.require_auth();
+        Self::require_not_paused(&env)?;
 
         if amount < MIN_BET {
             return Err(MarketError::BetTooSmall);
@@ -1336,11 +1383,31 @@ impl PredictionMarketContract {
         env.storage().instance().get(&DataKey::MarketCount).unwrap_or(0)
     }
 
+    /// Unbounded bettor list. Only safe for small markets; prefer `get_market_bettors_page`. (#786)
     pub fn get_market_bettors(env: Env, market_id: u64) -> Result<Vec<Address>, MarketError> {
         Self::load_market(&env, market_id)?;
         let count: u32 = env.storage().persistent().get(&DataKey::BettorCount(market_id)).unwrap_or(0);
         let mut result: Vec<Address> = Vec::new(&env);
         for i in 0..count {
+            if let Some(addr) = env.storage().persistent().get::<DataKey, Address>(&DataKey::BettorAt(market_id, i)) {
+                result.push_back(addr);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Bounded bettor page: up to `limit` (capped at MAX_BETTOR_PAGE) bettors starting at index `start`. (#786)
+    pub fn get_market_bettors_page(
+        env: Env,
+        market_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<Address>, MarketError> {
+        Self::load_market(&env, market_id)?;
+        let count: u32 = env.storage().persistent().get(&DataKey::BettorCount(market_id)).unwrap_or(0);
+        let end = count.min(start.saturating_add(limit.min(MAX_BETTOR_PAGE)));
+        let mut result: Vec<Address> = Vec::new(&env);
+        for i in start..end {
             if let Some(addr) = env.storage().persistent().get::<DataKey, Address>(&DataKey::BettorAt(market_id, i)) {
                 result.push_back(addr);
             }
@@ -1468,6 +1535,17 @@ impl PredictionMarketContract {
     }
 
     #[inline]
+    fn stored_schema_version(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::SchemaVersion).unwrap_or(1)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), MarketError> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Err(MarketError::ContractPaused);
+        }
+        Ok(())
+    }
+
     fn require_admin(env: &Env, caller: &Address) -> Result<(), MarketError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(MarketError::NotInitialized)?;
         if *caller != admin { return Err(MarketError::NotAdmin); }

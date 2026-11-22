@@ -2181,3 +2181,78 @@ fn council_ruling(t: &TestSetup, caller: &Address, market_id: u64, outcome: bool
     }
     t.client.resolve_challenge(caller, &market_id, &outcome);
 }
+
+// ── Pause, paged bettors, version and migration (#786, #788, #790, #791) ──────
+
+#[test]
+fn test_pause_blocks_bets_and_market_creation() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+
+    t.client.set_paused(&t.admin, &true);
+    assert!(t.client.is_paused());
+    assert!(t.client.try_place_bet(&alice, &id, &true, &10_0000000_i128).is_err());
+    assert!(t.client.try_create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Paused?"),
+        &String::from_str(&t.env, ""),
+        &Category::Crypto,
+        &3600,
+    ).is_err());
+
+    t.client.set_paused(&t.admin, &false);
+    t.client.place_bet(&alice, &id, &true, &10_0000000_i128);
+}
+
+#[test]
+fn test_set_paused_requires_admin() {
+    let t = setup();
+    let rando = Address::generate(&t.env);
+    assert!(t.client.try_set_paused(&rando, &true).is_err());
+    assert!(!t.client.is_paused());
+}
+
+#[test]
+fn test_bettors_page_is_bounded_and_ordered() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    let charlie = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+    fund_user(&t, &charlie, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &10_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &20_0000000_i128);
+    t.client.place_bet(&charlie, &id, &true, &30_0000000_i128);
+
+    let page = t.client.get_market_bettors_page(&id, &0, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap(), alice);
+    assert_eq!(page.get(1).unwrap(), bob);
+
+    let tail = t.client.get_market_bettors_page(&id, &2, &10);
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail.get(0).unwrap(), charlie);
+
+    assert_eq!(t.client.get_market_bettors_page(&id, &5, &10).len(), 0);
+}
+
+#[test]
+fn test_version_and_schema_version() {
+    let t = setup();
+    assert_eq!(t.client.version(), String::from_str(&t.env, env!("CARGO_PKG_VERSION")));
+    assert_eq!(t.client.schema_version(), 1);
+}
+
+#[test]
+fn test_migrate_is_admin_only_and_idempotent() {
+    let t = setup();
+    let rando = Address::generate(&t.env);
+    assert!(t.client.try_migrate(&rando).is_err());
+    assert_eq!(t.client.migrate(&t.admin), 1);
+    assert_eq!(t.client.migrate(&t.admin), 1);
+    assert_eq!(t.client.schema_version(), 1);
+}

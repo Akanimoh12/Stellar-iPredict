@@ -18,6 +18,16 @@
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+/**
+ * Docker Compose E2E guard: when E2E_USE_DOCKER_COMPOSE=1 the test expects the
+ * dev stack from infra/docker-compose.dev.yml to already be running (Postgres on
+ * 5432, Redis on 6379). Start it with:
+ *   docker compose -f infra/docker-compose.dev.yml up -d --wait
+ * and tear it down afterwards with:
+ *   docker compose -f infra/docker-compose.dev.yml down -v
+ */
+const USE_DOCKER_COMPOSE = process.env.E2E_USE_DOCKER_COMPOSE === "1";
+
 vi.hoisted(() => {
   Object.assign(process.env, {
     DATABASE_URL: "postgres://postgres:postgrespassword@localhost:5432/ipredict_test",

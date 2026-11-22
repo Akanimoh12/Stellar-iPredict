@@ -172,6 +172,16 @@ pub enum Category {
 }
 
 #[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MarketStatus {
+    Open = 0,
+    Resolved = 1,
+    Cancelled = 2,
+    Expired = 3,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Market {
     pub id:        u64,
@@ -1361,6 +1371,55 @@ impl PredictionMarketContract {
             .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))
             .map(|e| e.gross)
             .unwrap_or(0)
+    }
+
+    /// Returns a paged list of markets matching the given status.
+    /// `start_id`: 1-based market id to begin the search from (0 defaults to 1).
+    /// `limit`: maximum number of matching markets to return (capped at 50 to bound gas).
+    pub fn get_markets_by_status(
+        env: Env,
+        status: MarketStatus,
+        start_id: u64,
+        limit: u32,
+    ) -> Vec<Market> {
+        let total = Self::get_market_count(env.clone());
+        let mut result = Vec::new(&env);
+        let cap = if limit == 0 { 20 } else { limit.min(50) };
+        let now = env.ledger().timestamp();
+        let start = if start_id == 0 { 1 } else { start_id };
+
+        for id in start..=total {
+            if let Ok(m) = Self::load_market(&env, id) {
+                let matches = match status {
+                    MarketStatus::Cancelled => m.cancelled,
+                    MarketStatus::Resolved => m.resolved && !m.cancelled,
+                    MarketStatus::Expired => !m.resolved && !m.cancelled && now >= m.end_time,
+                    MarketStatus::Open => !m.resolved && !m.cancelled && now < m.end_time,
+                };
+                if matches {
+                    result.push_back(m);
+                    if result.len() >= cap {
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Convenience paged getter for open markets (not resolved, not cancelled, not expired).
+    pub fn get_open_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Open, start_id, limit)
+    }
+
+    /// Convenience paged getter for resolved markets.
+    pub fn get_resolved_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Resolved, start_id, limit)
+    }
+
+    /// Convenience paged getter for cancelled markets.
+    pub fn get_cancelled_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Cancelled, start_id, limit)
     }
 
     // ── Internal Helpers ──────────────────────────────────────────────────

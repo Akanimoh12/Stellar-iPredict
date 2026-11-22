@@ -457,6 +457,9 @@ jobs:
           cd frontend
           npm audit --audit-level=high
 
+      - name: Audit dependency licenses
+        run: npm run license:check
+
   # ─── Job 9: TypeScript Typecheck across all workspaces ───────────────────────
   typecheck:
     name: Typecheck (Node 22)

@@ -438,7 +438,17 @@ through GitHub's *Report a vulnerability* form on the Security tab. See
 
 ## License
 
-[Apache License 2.0](LICENSE)
+This repository is licensed under the [Apache License 2.0](LICENSE).
+
+### Dependency License Auditing
+
+All project dependencies are audited against permissive open-source license standards (Apache-2.0, MIT, BSD, ISC, etc.) to ensure compliance and eliminate unvetted copyleft libraries.
+
+To run the dependency license check:
+
+```bash
+npm run license:check
+```
 
 ---
 

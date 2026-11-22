@@ -76,11 +76,25 @@ export default function BettingPanel({
   const canSubmit =
     connected && isActive && isMinValid && isBalanceValid && !loading;
 
-  // Calculate potential payout
+  // Calculate potential payout and live projected odds
   const { yesPercent, noPercent } = calculateOdds(
     market.totalYes,
     market.totalNo
   );
+
+  const projectedOdds = useMemo(() => {
+    if (netAmount <= 0) return { yesPercent, noPercent };
+    const simulatedYes = side ? market.totalYes + netAmount : market.totalYes;
+    const simulatedNo = !side ? market.totalNo + netAmount : market.totalNo;
+    return calculateOdds(simulatedYes, simulatedNo);
+  }, [yesPercent, noPercent, netAmount, side, market.totalYes, market.totalNo]);
+
+  const oddsShift = useMemo(() => {
+    if (netAmount <= 0) return 0;
+    return side
+      ? projectedOdds.yesPercent - yesPercent
+      : projectedOdds.noPercent - noPercent;
+  }, [netAmount, side, projectedOdds, yesPercent, noPercent]);
 
   const payout = useMemo(() => {
     const winningSide = side ? market.totalYes + netAmount : market.totalNo + netAmount;
@@ -152,7 +166,7 @@ export default function BettingPanel({
           }`}
           title={oppositeDisabled && !side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
         >
-          YES ({yesPercent}%)
+          YES ({side === true && netAmount > 0 ? projectedOdds.yesPercent : yesPercent}%)
         </button>
         <button
           onClick={() => !oppositeDisabled || side === false ? setSide(false) : undefined}
@@ -166,7 +180,7 @@ export default function BettingPanel({
           }`}
           title={oppositeDisabled && side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
         >
-          NO ({noPercent}%)
+          NO ({side === false && netAmount > 0 ? projectedOdds.noPercent : noPercent}%)
         </button>
       </div>
 
@@ -219,6 +233,38 @@ export default function BettingPanel({
       {/* Payout calculator */}
       {amount > 0 && (
         <div className="space-y-2 px-4 py-3 rounded-xl bg-surface/60 border border-surface-border">
+          {/* Live Odds Preview */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-slate-400 font-medium">Live odds preview</span>
+            <span className="text-slate-200 font-medium">
+              {side ? (
+                <>
+                  YES {yesPercent}%{" "}
+                  <span className="text-accent-green">
+                    → {projectedOdds.yesPercent}%
+                  </span>
+                  {oddsShift !== 0 && (
+                    <span className="text-xs text-slate-400 ml-1">
+                      ({oddsShift > 0 ? `+${oddsShift}` : oddsShift}%)
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  NO {noPercent}%{" "}
+                  <span className="text-accent-green">
+                    → {projectedOdds.noPercent}%
+                  </span>
+                  {oddsShift !== 0 && (
+                    <span className="text-xs text-slate-400 ml-1">
+                      ({oddsShift > 0 ? `+${oddsShift}` : oddsShift}%)
+                    </span>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
+
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-500">
               Platform fee ({TOTAL_FEE_BPS / 100}%)
@@ -233,6 +279,12 @@ export default function BettingPanel({
             <span className="text-slate-500">If you win</span>
             <span className="text-accent-green font-medium">
               {payout.toFixed(2)} XLM (+{profitPercent}%)
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-slate-500">Effective payout rate</span>
+            <span className="text-slate-300 font-medium">
+              {netAmount > 0 ? `${(payout / netAmount).toFixed(2)}x` : "-"}
             </span>
           </div>
           <div className="border-t border-surface-border my-1" />

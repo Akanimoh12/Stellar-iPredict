@@ -12,12 +12,14 @@ pub enum TokenError {
     InsufficientBalance = 4,
     InvalidAmount       = 5,
     NotAdmin            = 6,
+    NoPendingAdmin      = 7,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     AuthorizedMinter(Address),
     Balance(Address),
     TotalSupply,
@@ -142,6 +144,26 @@ impl IPredictTokenContract {
 
     pub fn decimals(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Decimals).unwrap_or(7)
+    }
+
+    /// Two-step admin transfer, step 1: current admin nominates `new_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), TokenError> {
+        let stored = Self::require_admin(&env)?;
+        if admin != stored { return Err(TokenError::NotAdmin); }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Two-step admin transfer, step 2: the nominee accepts and becomes admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), TokenError> {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&DataKey::PendingAdmin)
+            .ok_or(TokenError::NoPendingAdmin)?;
+        if pending != new_admin { return Err(TokenError::NotAdmin); }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
     }
 
     fn require_admin(env: &Env) -> Result<Address, TokenError> {

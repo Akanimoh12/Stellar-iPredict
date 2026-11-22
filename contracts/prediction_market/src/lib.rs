@@ -12,6 +12,15 @@ const MIN_BET: i128 = 10_000_000; // 1 XLM in stroops
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
 
+// Market creation bounds (#792, #793)
+const MAX_QUESTION_LEN: u32 = 200;
+const MIN_MARKET_DURATION: u64 = 3_600;        // 1h: no markets already expired or about to close
+const MAX_MARKET_DURATION: u64 = 31_536_000;   // 365d: bounded horizon
+
+// Minimum net stake each side must hold before a market can resolve (#794).
+// A one-sided pool has no winners; such markets must be cancelled instead.
+const MIN_SIDE_LIQUIDITY: i128 = MIN_BET;
+
 // Fee constants — multiply before divide to avoid precision loss
 const TOTAL_FEE_BPS: i128 = 200;
 const PLATFORM_FEE_BPS: i128 = 150;
@@ -106,6 +115,10 @@ pub enum MarketError {
     OracleWindowClosed = 25,          // challenge window has already elapsed
     OracleInvalidState = 26,          // transition not legal from the current state
     OracleBondTooSmall = 27,          // bond below the minimum / not larger than submitter's
+    InvalidQuestion    = 28,          // question empty or longer than MAX_QUESTION_LEN
+    InvalidDuration    = 29,          // duration outside [MIN_MARKET_DURATION, MAX_MARKET_DURATION]
+    InsufficientLiquidity = 30,       // one side below MIN_SIDE_LIQUIDITY; resolution impossible
+    NoPendingAdmin     = 31,          // accept_admin called with no proposal
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -113,6 +126,7 @@ pub enum MarketError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,          // two-step admin transfer: proposed, not yet accepted
     // Config addresses — all in instance storage (shared, cheap)
     Cfg,                   // single packed Config struct — 1 read instead of 5
     MarketCount,
@@ -409,6 +423,25 @@ impl PredictionMarketContract {
 
     /// Update the packed Config (token / referral / leaderboard / xlm_sac). Admin only.
     /// Used to correct an address set at initialize time.
+    /// Step 1 of admin rotation: the current admin nominates `new_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2 of admin rotation: the nominee accepts, becoming admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), MarketError> {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&DataKey::PendingAdmin)
+            .ok_or(MarketError::NoPendingAdmin)?;
+        if pending != new_admin { return Err(MarketError::NotAdmin); }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
+    }
+
     pub fn set_config(
         env: Env,
         admin: Address,
@@ -612,6 +645,10 @@ impl PredictionMarketContract {
     ) -> Result<u64, MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
+        if question.len() == 0 || question.len() > MAX_QUESTION_LEN { return Err(MarketError::InvalidQuestion); }
+        if duration_secs < MIN_MARKET_DURATION || duration_secs > MAX_MARKET_DURATION {
+            return Err(MarketError::InvalidDuration);
+        }
         Self::check_rate(&env)?;
 
         // OPT: single instance read for count (was already one read)
@@ -761,7 +798,7 @@ impl PredictionMarketContract {
         if market.cancelled { return Err(MarketError::MarketCancelled); }
         if env.ledger().timestamp() < market.end_time { return Err(MarketError::MarketNotExpired); }
 
-        Self::apply_resolution(&env, &mut market, outcome);
+        Self::apply_resolution(&env, &mut market, outcome)?;
         Ok(())
     }
 
@@ -793,6 +830,8 @@ impl PredictionMarketContract {
         if env.ledger().timestamp() < market.end_time {
             return Err(MarketError::MarketNotExpired);
         }
+        // Fail fast: a one-sided market could never finalize, so don't escrow a bond for it
+        Self::ensure_liquidity(&market)?;
         if env.storage().persistent().has(&DataKey::Submission(market_id)) {
             return Err(MarketError::SubmissionExists);
         }
@@ -934,7 +973,7 @@ impl PredictionMarketContract {
         // A market cancelled or force-resolved out of band while the window was
         // open still releases the bond — it just does not resolve again.
         if !market.resolved && !market.cancelled {
-            Self::apply_resolution(&env, &mut market, submission.outcome);
+            Self::apply_resolution(&env, &mut market, submission.outcome)?;
         }
 
         submission.state = OracleState::Finalized;
@@ -1070,7 +1109,7 @@ impl PredictionMarketContract {
         }
 
         if !market.resolved && !market.cancelled {
-            Self::apply_resolution(&env, &mut market, outcome);
+            Self::apply_resolution(&env, &mut market, outcome)?;
         }
 
         submission.state = OracleState::Finalized;
@@ -1132,7 +1171,7 @@ impl PredictionMarketContract {
         xlm.transfer(&this, &challenger, &submission.challenger_bond);
 
         if !market.resolved && !market.cancelled {
-            Self::apply_resolution(&env, &mut market, submission.outcome);
+            Self::apply_resolution(&env, &mut market, submission.outcome)?;
         }
 
         submission.state = OracleState::Finalized;
@@ -1431,23 +1470,24 @@ impl PredictionMarketContract {
 
     /// Mark a market resolved and sweep the pool when the winning side is empty.
     /// Shared by `resolve_market` and the optimistic oracle finalizers.
-    fn apply_resolution(env: &Env, market: &mut Market, outcome: bool) {
-        let winning_side = if outcome { market.total_yes } else { market.total_no };
-        if winning_side == 0 {
-            let total_pool = market.total_yes + market.total_no;
-            if total_pool > 0 {
-                let mut acc: i128 = env.storage().instance()
-                    .get(&DataKey::AccumulatedFees).unwrap_or(0);
-                acc += total_pool;
-                env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
-            }
-        }
+    fn apply_resolution(env: &Env, market: &mut Market, outcome: bool) -> Result<(), MarketError> {
+        Self::ensure_liquidity(market)?;
 
         market.resolved = true;
         market.outcome = outcome;
         let mkt_key = DataKey::Market(market.id);
         env.storage().persistent().set(&mkt_key, &*market);
         env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Both sides must hold at least MIN_SIDE_LIQUIDITY net stake. A one-sided
+    /// market has no winners, so it can only be cancelled (refunds via cancel_refund).
+    fn ensure_liquidity(market: &Market) -> Result<(), MarketError> {
+        if market.total_yes < MIN_SIDE_LIQUIDITY || market.total_no < MIN_SIDE_LIQUIDITY {
+            return Err(MarketError::InsufficientLiquidity);
+        }
+        Ok(())
     }
 
     #[inline]

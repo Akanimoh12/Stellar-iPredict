@@ -16,6 +16,7 @@ pub enum LeaderboardError {
     UnauthorizedCaller = 3,
     InvalidPoints      = 4,
     NotAdmin           = 5,
+    NoPendingAdmin     = 6,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -27,6 +28,7 @@ pub enum LeaderboardError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     MarketContract,
     ReferralContract,
     // Lever G: token address so reward() can mint IPRED internally — one
@@ -445,6 +447,25 @@ impl LeaderboardContract {
         let ref_: Address = env.storage().instance().get(&DataKey::ReferralContract)
             .ok_or(LeaderboardError::NotInitialized)?;
         if *caller != ref_ { return Err(LeaderboardError::UnauthorizedCaller); }
+        Ok(())
+    }
+
+    /// Two-step admin transfer, step 1: current admin nominates `new_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Two-step admin transfer, step 2: the nominee accepts and becomes admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), LeaderboardError> {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&DataKey::PendingAdmin)
+            .ok_or(LeaderboardError::NoPendingAdmin)?;
+        if pending != new_admin { return Err(LeaderboardError::NotAdmin); }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
     }
 

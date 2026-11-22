@@ -61,15 +61,39 @@ fn setup() -> OracleTest {
     let client = PredictionMarketContractClient::new(&env, &market_id);
 
     client.initialize(&admin, &token_id, &referral_id, &leaderboard_id, &xlm_sac_id);
+    // Bets call into the referral and leaderboard contracts, so wire them up too.
+    ipredict_token::IPredictTokenContractClient::new(&env, &token_id).initialize(
+        &admin,
+        &String::from_str(&env, "IPREDICT"),
+        &String::from_str(&env, "IPRED"),
+        &7u32,
+    );
+    let leaderboard = leaderboard::LeaderboardContractClient::new(&env, &leaderboard_id);
+    leaderboard.initialize(&admin, &market_id, &referral_id);
+    leaderboard.set_token(&admin, &token_id);
+    ipredict_token::IPredictTokenContractClient::new(&env, &token_id).set_minter(&leaderboard_id);
+    referral_registry::ReferralRegistryContractClient::new(&env, &referral_id)
+        .initialize(&admin, &market_id, &token_id, &leaderboard_id, &xlm_sac_id);
 
     let market = create_market(&env, &client, &admin);
-    OracleTest {
+    let t = OracleTest {
         env,
         client,
         admin,
         market_id: market,
         xlm_admin,
         xlm,
+    };
+    seed_both_sides(&t, market);
+    t
+}
+
+/// Place one bet on each side so the market clears the resolution liquidity floor (#794).
+fn seed_both_sides(t: &OracleTest, market_id: u64) {
+    for is_yes in [true, false] {
+        let who = Address::generate(&t.env);
+        fund(t, &who, 100_0000000);
+        t.client.place_bet(&who, &market_id, &is_yes, &10_0000000_i128);
     }
 }
 
@@ -371,8 +395,9 @@ fn unchallenged_finalize_does_not_accumulate_fees() {
     let t = setup();
     submit(&t, t.market_id, true);
     advance(&t.env, CHALLENGE_WINDOW);
+    let fees_before = t.client.get_accumulated_fees();
     t.client.finalize_outcome(&t.market_id);
-    assert_eq!(t.client.get_accumulated_fees(), 0);
+    assert_eq!(t.client.get_accumulated_fees(), fees_before);
 }
 
 // Settlement fixtures must satisfy the current council vote and deadline requirements.

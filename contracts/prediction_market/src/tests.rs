@@ -106,7 +106,9 @@ pub fn check_invariant(t: &TestSetup) {
     
     let mut outstanding_stakes: i128 = 0;
     let mut escrowed_bonds: i128 = 0;
-    
+    // Floor division in payouts leaves < 1 stroop per unclaimed winner in the contract
+    let mut rounding_slack: i128 = 0;
+
     let market_count = t.client.get_market_count();
     for id in 1..=market_count {
         let market = t.client.get_market(&id);
@@ -138,6 +140,7 @@ pub fn check_invariant(t: &TestSetup) {
                         if let Ok(Ok(bet)) = t.client.try_get_bet(&id, &bettor) {
                             if bet.is_yes == market.outcome && !bet.claimed {
                                 outstanding_stakes += (bet.amount * total_pool) / winning_side;
+                                rounding_slack += 1;
                             }
                         }
                     }
@@ -149,9 +152,9 @@ pub fn check_invariant(t: &TestSetup) {
     }
     
     let accounted = outstanding_stakes + escrowed_bonds + acc_fees;
-    assert_eq!(
-        contract_balance,
-        accounted,
+    let surplus = contract_balance - accounted;
+    assert!(
+        surplus >= 0 && surplus <= rounding_slack,
         "Invariant violation! Balance: {}, Accounted: {} (Stakes: {}, Bonds: {}, Fees: {})",
         contract_balance, accounted, outstanding_stakes, escrowed_bonds, acc_fees
     );
@@ -177,6 +180,16 @@ pub(crate) fn create_test_market(t: &TestSetup) -> u64 {
         &Category::Crypto,
         &3600_u64,
     )
+}
+
+/// Place one bet on each side so the market clears the resolution liquidity floor (#794).
+pub(crate) fn seed_both_sides(t: &TestSetup, market_id: u64) {
+    for is_yes in [true, false] {
+        let who = Address::generate(&t.env);
+        fund_user(t, &who, 200_0000000);
+        // Equal to the common 50 XLM test stake, so pool payouts divide exactly for check_invariant
+        t.client.place_bet(&who, &market_id, &is_yes, &50_0000000_i128);
+    }
 }
 
 pub(crate) fn advance_time(env: &Env, secs: u64) {
@@ -316,6 +329,7 @@ fn test_reject_bet_expired_market() {
 fn test_reject_bet_resolved_market() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -394,6 +408,7 @@ fn test_reject_opposite_side_bet() {
 fn test_resolve_market() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -410,6 +425,7 @@ fn test_resolve_market() {
 fn test_resolver_can_resolve() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -446,6 +462,7 @@ fn test_resolver_registry_removes_addresses() {
 fn test_reject_resolve_market_non_resolver() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -461,6 +478,7 @@ fn test_reject_resolve_market_non_resolver() {
 fn test_reject_double_resolution() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -541,6 +559,7 @@ fn test_cancel_refund_non_cancelled_rejected() {
 fn test_reject_cancel_resolved_market() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -608,6 +627,7 @@ fn test_claim_loser() {
 fn test_reject_double_claim() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
@@ -847,6 +867,7 @@ fn test_double_init_rejected() {
 fn test_reject_resolve_before_deadline() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -869,6 +890,7 @@ fn test_withdraw_fees_zero() {
 fn test_claim_no_bet_found() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
@@ -942,41 +964,17 @@ fn test_create_multiple_markets() {
 // ── 41. Empty-side resolution: pool goes to AccumulatedFees, admin can withdraw ─
 
 #[test]
-fn test_empty_side_resolution_pool_to_fees() {
+#[should_panic(expected = "Error(Contract, #30)")] // InsufficientLiquidity
+fn test_reject_resolve_one_sided_market() {
     let t = setup();
     let id = create_test_market(&t);
     let alice = Address::generate(&t.env);
     fund_user(&t, &alice, 200_0000000);
 
-    // Only YES bets — no one bets NO
+    // Only YES bets — the NO side is empty, so the market cannot resolve
     t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
-    let fees_before = t.client.get_accumulated_fees();
-    assert_eq!(fees_before, 2_0000000); // 2% platform fee
-
-    // Advance past end_time and resolve NO (empty winning side)
     advance_time(&t.env, 3601);
-    t.client.resolve_market(&t.admin, &id, &false); // total_no == 0
-
-    // The entire pool (total_yes net = 98 XLM) must be swept into AccumulatedFees
-    let fees_after = t.client.get_accumulated_fees();
-    assert_eq!(fees_after, fees_before + 98_0000000,
-        "entire YES pool should sweep to fees when NO side is empty");
-
-    // Admin can withdraw the swept pool
-    let treasury = Address::generate(&t.env);
-    let before = t.xlm.balance(&treasury);
-    let withdrawn = t.client.withdraw_fees(&t.admin, &treasury);
-    assert_eq!(withdrawn, fees_after);
-    assert_eq!(t.xlm.balance(&treasury), before + fees_after);
-    assert_eq!(t.client.get_accumulated_fees(), 0);
-
-    // Alice (was YES, losing side) can still claim — gets IPRED tokens + points
-    t.client.claim(&alice, &id);
-    let bet = t.client.get_bet(&id, &alice);
-    assert!(bet.claimed);
-    // Gets lose-tier rewards because winning_side == 0
-    assert_eq!(t.token_client.balance(&alice), 2_0000000); // LOSE_TOKENS
-    assert_eq!(t.leaderboard_client.get_points(&alice), 10); // LOSE_POINTS
+    t.client.resolve_market(&t.admin, &id, &false);
 }
 
 // ── 42. Cancel accumulates fees on multiple bets correctly ────────────────────
@@ -2113,6 +2111,7 @@ fn test_cancel_unsubmitted_market_rejected_before_expiry() {
 fn test_cancel_unsubmitted_market_rejected_with_submission() {
     let t = setup();
     let id = create_test_market(&t);
+    seed_both_sides(&t, id);
     let submitter = Address::generate(&t.env);
     fund_user(&t, &submitter, 500_0000000);
 
@@ -2255,4 +2254,70 @@ fn test_migrate_is_admin_only_and_idempotent() {
     assert_eq!(t.client.migrate(&t.admin), 1);
     assert_eq!(t.client.migrate(&t.admin), 1);
     assert_eq!(t.client.schema_version(), 1);
+// ── Market bounds, admin rotation (#789, #792, #793) ─────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")] // InvalidQuestion
+fn test_reject_question_too_long() {
+    let t = setup();
+    let long = String::from_bytes(&t.env, &[b'q'; 201]);
+    t.client.create_market(&t.admin, &long, &String::from_str(&t.env, "https://x.png"), &Category::Other, &3600_u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")] // InvalidQuestion
+fn test_reject_empty_question() {
+    let t = setup();
+    t.client.create_market(&t.admin, &String::from_str(&t.env, ""), &String::from_str(&t.env, "https://x.png"), &Category::Other, &3600_u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")] // InvalidDuration
+fn test_reject_duration_below_minimum() {
+    let t = setup();
+    create_test_market_with_duration(&t, 3599);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")] // InvalidDuration
+fn test_reject_duration_beyond_horizon() {
+    let t = setup();
+    create_test_market_with_duration(&t, 31_536_001);
+}
+
+fn create_test_market_with_duration(t: &TestSetup, duration: u64) -> u64 {
+    t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Duration check?"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Other,
+        &duration,
+    )
+}
+
+#[test]
+fn test_two_step_admin_transfer() {
+    let t = setup();
+    let next = Address::generate(&t.env);
+    t.client.propose_admin(&t.admin, &next);
+    t.client.accept_admin(&next);
+    // The nominee is now admin and can create markets
+    t.client.create_market(&next, &String::from_str(&t.env, "Owned by new admin"), &String::from_str(&t.env, "https://x.png"), &Category::Other, &3600_u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")] // NoPendingAdmin
+fn test_accept_admin_without_proposal_rejected() {
+    let t = setup();
+    let rando = Address::generate(&t.env);
+    t.client.accept_admin(&rando);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // NotAdmin
+fn test_propose_admin_by_non_admin_rejected() {
+    let t = setup();
+    let rando = Address::generate(&t.env);
+    let next = Address::generate(&t.env);
+    t.client.propose_admin(&rando, &next);
 }

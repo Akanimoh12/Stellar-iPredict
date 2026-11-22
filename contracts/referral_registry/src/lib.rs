@@ -19,12 +19,14 @@ pub enum ReferralError {
     AlreadyRegistered  = 4,
     SelfReferral       = 5,
     NotAdmin           = 6,
+    NoPendingAdmin     = 7,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     MarketContract,
     // ── Legacy per-user keys (pre-Lever-A) — still READ for users who
     //    registered before the upgrade. New registrations no longer write these.
@@ -92,6 +94,25 @@ impl ReferralRegistryContract {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::XlmSacContract, &xlm_sac);
+        Ok(())
+    }
+
+    /// Two-step admin transfer, step 1: current admin nominates `new_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Two-step admin transfer, step 2: the nominee accepts and becomes admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ReferralError> {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&DataKey::PendingAdmin)
+            .ok_or(ReferralError::NoPendingAdmin)?;
+        if pending != new_admin { return Err(ReferralError::NotAdmin); }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
     }
 

@@ -50,15 +50,15 @@ fn test_invariant_bet_claim_and_fee_withdrawal_sequence() {
     verify_pool_accounting_invariants(&t);
 
     // Alice bets 50 XLM on YES
-    t.client.bet(&alice, &market_id, &true, &(50 * 10_000_000_i128));
+    t.client.place_bet(&alice, &market_id, &true, &(50 * 10_000_000_i128));
     verify_pool_accounting_invariants(&t);
 
     // Bob bets 30 XLM on YES
-    t.client.bet(&bob, &market_id, &true, &(30 * 10_000_000_i128));
+    t.client.place_bet(&bob, &market_id, &true, &(30 * 10_000_000_i128));
     verify_pool_accounting_invariants(&t);
 
     // Charlie bets 20 XLM on NO
-    t.client.bet(&charlie, &market_id, &false, &(20 * 10_000_000_i128));
+    t.client.place_bet(&charlie, &market_id, &false, &(20 * 10_000_000_i128));
     verify_pool_accounting_invariants(&t);
 
     // Advance past market end time
@@ -107,13 +107,13 @@ fn test_invariant_cancel_market_and_refund_sequence() {
     fund_user(&t, &charlie, charlie_bet);
 
     // Bettors place bets
-    t.client.bet(&alice, &market_id, &true, &alice_bet);
+    t.client.place_bet(&alice, &market_id, &true, &alice_bet);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&bob, &market_id, &false, &bob_bet);
+    t.client.place_bet(&bob, &market_id, &false, &bob_bet);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&charlie, &market_id, &true, &charlie_bet);
+    t.client.place_bet(&charlie, &market_id, &true, &charlie_bet);
     verify_pool_accounting_invariants(&t);
 
     let total_gross = alice_bet + bob_bet + charlie_bet;
@@ -160,7 +160,7 @@ fn test_invariant_cancel_unsubmitted_market_refund_sequence() {
     let bet_amount = 50 * 10_000_000_i128;
     fund_user(&t, &user, bet_amount);
 
-    t.client.bet(&user, &market_id, &true, &bet_amount);
+    t.client.place_bet(&user, &market_id, &true, &bet_amount);
     verify_pool_accounting_invariants(&t);
 
     // Advance past expiry + CANCELLATION_DEADLINE (7 days = 604,800s)
@@ -209,19 +209,19 @@ fn test_invariant_interleaved_multi_market_operations() {
     fund_user(&t, &user3, amount * 3);
 
     // Interleave bets across markets
-    t.client.bet(&user1, &m1, &true, &amount);
+    t.client.place_bet(&user1, &m1, &true, &amount);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&user2, &m2, &false, &amount);
+    t.client.place_bet(&user2, &m2, &false, &amount);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&user3, &m3, &true, &amount);
+    t.client.place_bet(&user3, &m3, &true, &amount);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&user2, &m1, &false, &amount);
+    t.client.place_bet(&user2, &m1, &false, &amount);
     verify_pool_accounting_invariants(&t);
 
-    t.client.bet(&user1, &m2, &true, &amount);
+    t.client.place_bet(&user1, &m2, &true, &amount);
     verify_pool_accounting_invariants(&t);
 
     // Cancel m2

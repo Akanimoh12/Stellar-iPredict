@@ -716,6 +716,9 @@ impl PredictionMarketContract {
         let platform_fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
         let referral_fee = total_fee - platform_fee;
         let net          = amount * NET_NUMERATOR / BPS_DENOM;
+        // #795: assert fee splits never lose stroops
+        debug_assert_eq!(platform_fee + referral_fee + net, amount,
+            "fee split rounding: {} + {} + {} != {}", platform_fee, referral_fee, net, amount);
 
         // OPT: one Config read instead of 4 separate instance reads
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
@@ -1313,6 +1316,7 @@ impl PredictionMarketContract {
         // time so the admin/fee-recipient can withdraw it via withdraw_fees().
         if is_winner && winning_side > 0 {
             let payout = (entry.net * total_pool) / winning_side;
+            // #796: dust policy — any remainder stays in AccumulatedFees for admin withdrawal
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
 

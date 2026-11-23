@@ -1400,11 +1400,12 @@ impl PredictionMarketContract {
         let fees: i128 = env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0);
         if fees == 0 { return Err(MarketError::NoFeesToWithdraw); }
 
+        env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
+
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&env.current_contract_address(), &recipient, &fees);
 
-        env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
         Ok(fees)
     }
 

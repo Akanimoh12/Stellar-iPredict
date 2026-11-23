@@ -1395,62 +1395,42 @@ impl PredictionMarketContract {
     // ── Claim ─────────────────────────────────────────────────────────────
     // OPT: one Config read replaces 3 separate reads (xlm_sac, leaderboard, token)
 
+    /// Standard self-service claim: the winning/participating user submits their
+    /// own transaction and pays the Stellar fee.
     pub fn claim(env: Env, user: Address, market_id: u64) -> Result<(), MarketError> {
         user.require_auth();
+        Self::execute_claim(&env, &user, market_id)
+    }
 
-        let market = Self::load_market(&env, market_id)?;
-        if market.cancelled  { return Err(MarketError::MarketCancelled); }
-        if !market.resolved  { return Err(MarketError::MarketNotResolved); }
+    // ── Claim For (#787) ──────────────────────────────────────────────────
+    //
+    // `claim_for` lets any `sponsor` trigger a claim on behalf of `user`.
+    // The sponsor pays the transaction fee (XLM stroop fee), but the XLM
+    // payout and all rewards are still routed to `user`.
+    //
+    // Authorization model:
+    //   * The sponsor signs and pays the Stellar fee — `sponsor.require_auth()`.
+    //   * No `user.require_auth()` is needed: the user benefits unconditionally
+    //     and cannot be harmed (funds go to their address, not the sponsor's).
+    //   * The re-entrancy guard (`entry.claimed = true` before any external call)
+    //     is identical to `claim`, making sponsorship safe.
+    //
+    // Design notes:
+    //   * Shares all claim logic with `claim` via `execute_claim` to avoid
+    //     duplication and keep future changes in one place.
+    //   * O(1) time and space: single persistent bet read + write, one Config
+    //     read, one XLM transfer, one cross-contract leaderboard call.
+    //   * The sponsor can pass any valid `user` address; the contract verifies
+    //     the user has an unclaimed bet, preventing wasted gas on bad calls.
 
-        let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env.storage().persistent().get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
-
-        if entry.claimed { return Err(MarketError::AlreadyClaimed); }
-
-        let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
-        let winning_side = if market.outcome { market.total_yes } else { market.total_no };
-
-        // SECURITY: mark claimed BEFORE any external calls.
-        entry.claimed = true;
-        env.storage().persistent().set(&bet_key, &entry);
-        env.storage().persistent().extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
-
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
-        let this = env.current_contract_address();
-
-        // XLM payout: only when the winning side had bettors.
-        // If winning_side == 0, the pool was swept to AccumulatedFees at resolve
-        // time so the admin/fee-recipient can withdraw it via withdraw_fees().
-        if is_winner && winning_side > 0 {
-            let payout = (entry.net * total_pool) / winning_side;
-            // #796: dust policy — any remainder stays in AccumulatedFees for admin withdrawal
-            token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
-        }
-
-        // All participants earn IPRED tokens + leaderboard points regardless.
-        // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
-        let real_win = is_winner && winning_side > 0;
-        let (points, tokens): (u64, i128) = if real_win {
-            (WIN_POINTS, WIN_TOKENS)
-        } else {
-            (LOSE_POINTS, LOSE_TOKENS)
-        };
-
-        let _: Val = env.invoke_contract(
-            &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
-            vec![&env,
-                this.clone().into_val(&env),
-                user.clone().into_val(&env),
-                points.into_val(&env),
-                tokens.into_val(&env),
-                real_win.into_val(&env),
-            ],
-        );
-
-        Ok(())
+    pub fn claim_for(
+        env: Env,
+        sponsor: Address,
+        user: Address,
+        market_id: u64,
+    ) -> Result<(), MarketError> {
+        sponsor.require_auth();
+        Self::execute_claim(&env, &user, market_id)
     }
 
     // ── Withdraw Fees ─────────────────────────────────────────────────────
@@ -1596,6 +1576,71 @@ impl PredictionMarketContract {
     }
 
     // ── Internal Helpers ──────────────────────────────────────────────────
+
+    /// Shared claim logic used by both `claim` (self-service) and `claim_for`
+    /// (sponsored).
+    ///
+    /// All XLM payouts and leaderboard/token rewards are routed to `user`
+    /// regardless of who triggered the transaction.
+    ///
+    /// Security: `entry.claimed` is set to `true` and persisted **before** any
+    /// external contract call, eliminating re-entrancy risk.
+    ///
+    /// Complexity: O(1) time, O(1) space.
+    fn execute_claim(env: &Env, user: &Address, market_id: u64) -> Result<(), MarketError> {
+        let market = Self::load_market(env, market_id)?;
+        if market.cancelled  { return Err(MarketError::MarketCancelled); }
+        if !market.resolved  { return Err(MarketError::MarketNotResolved); }
+
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        let mut entry: BetEntry = env.storage().persistent().get(&bet_key)
+            .ok_or(MarketError::NoBetFound)?;
+
+        if entry.claimed { return Err(MarketError::AlreadyClaimed); }
+
+        let is_winner = entry.is_yes == market.outcome;
+        let total_pool = market.total_yes + market.total_no;
+        let winning_side = if market.outcome { market.total_yes } else { market.total_no };
+
+        // SECURITY: mark claimed BEFORE any external calls (checks-effects-interactions).
+        entry.claimed = true;
+        env.storage().persistent().set(&bet_key, &entry);
+        env.storage().persistent().extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let this = env.current_contract_address();
+
+        // XLM payout: only when the winning side had bettors.
+        // If winning_side == 0, the pool was swept to AccumulatedFees at resolve
+        // time so the admin/fee-recipient can withdraw it via withdraw_fees().
+        if is_winner && winning_side > 0 {
+            let payout = (entry.net * total_pool) / winning_side;
+            token::Client::new(env, &cfg.xlm_sac).transfer(&this, user, &payout);
+        }
+
+        // All participants earn IPRED tokens + leaderboard points regardless of outcome.
+        // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
+        let real_win = is_winner && winning_side > 0;
+        let (points, tokens): (u64, i128) = if real_win {
+            (WIN_POINTS, WIN_TOKENS)
+        } else {
+            (LOSE_POINTS, LOSE_TOKENS)
+        };
+
+        let _: Val = env.invoke_contract(
+            &cfg.leaderboard,
+            &Symbol::new(env, "reward"),
+            vec![env,
+                this.clone().into_val(env),
+                user.clone().into_val(env),
+                points.into_val(env),
+                tokens.into_val(env),
+                real_win.into_val(env),
+            ],
+        );
+
+        Ok(())
+    }
 
     #[inline]
     fn load_market(env: &Env, market_id: u64) -> Result<Market, MarketError> {

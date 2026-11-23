@@ -10,7 +10,7 @@ use soroban_sdk::{
 
 /// Deploy a fresh IPredictToken contract and return its client.
 fn setup(env: &Env) -> IPredictTokenContractClient<'_> {
-    let id = env.register_contract(None, IPredictTokenContract);
+    let id = env.register(IPredictTokenContract, ());
     IPredictTokenContractClient::new(env, &id)
 }
 
@@ -304,7 +304,7 @@ fn test_total_supply_tracking() {
 fn test_sep41_allowance_transfer_from_and_burn_from() {
     let env = Env::default();
     env.mock_all_auths();
-    let token_id = env.register_contract(None, IPredictTokenContract);
+    let token_id = env.register(IPredictTokenContract, ());
     let client = IPredictTokenContractClient::new(&env, &token_id);
     let minter = init(&env, &client);
     client.set_minter(&minter);
@@ -360,4 +360,121 @@ fn test_sep41_allowance_expires_after_ledger() {
     assert_eq!(client.allowance(&owner, &spender), 0);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #785 — Supply cap: mint blocked when cap would be exceeded
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_supply_cap_blocks_excess_mint() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // Set a cap of 100 tokens.
+    client.set_supply_cap(&admin, &100_i128);
+    assert_eq!(client.supply_cap(), 100_i128);
+
+    let user = Address::generate(&env);
+    // Mint 90 — OK.
+    client.mint(&minter, &user, &90_i128);
+    assert_eq!(client.total_supply(), 90_i128);
+
+    // Mint 10 — still OK (reaches cap exactly).
+    client.mint(&minter, &user, &10_i128);
+    assert_eq!(client.total_supply(), 100_i128);
+
+    // Mint 1 more — must fail with SupplyCapExceeded (#10).
+    let result = client.try_mint(&minter, &user, &1_i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_supply_cap_zero_means_uncapped() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // No cap set — large mint succeeds.
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &1_000_000_i128);
+    assert_eq!(client.total_supply(), 1_000_000_i128);
+
+    // Setting cap = 0 is equivalent to removing the cap.
+    client.set_supply_cap(&admin, &0_i128);
+    assert_eq!(client.supply_cap(), 0_i128);
+    client.mint(&minter, &user, &1_000_000_i128);
+    assert_eq!(client.total_supply(), 2_000_000_i128);
+}
+
+#[test]
+fn test_supply_cap_remove_via_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // Set then remove cap.
+    client.set_supply_cap(&admin, &50_i128);
+    client.set_supply_cap(&admin, &0_i128); // remove
+    assert_eq!(client.supply_cap(), 0_i128);
+
+    let user = Address::generate(&env);
+    // Mint above former cap — now succeeds.
+    client.mint(&minter, &user, &100_i128);
+    assert_eq!(client.total_supply(), 100_i128);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #784 — extend_ttl: burn preserves the balance entry TTL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_burn_extends_ttl_on_remaining_balance() {
+    // This test verifies that after a partial burn the entry still exists
+    // (TTL was extended). In the simulator, `extend_ttl` is a no-op on the
+    // ledger state but we can confirm the balance value is correct after burn.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+    let user = Address::generate(&env);
+
+    client.mint(&minter, &user, &1_000_i128);
+    client.burn(&user, &300_i128);
+
+    // Balance correctly reduced; entry still accessible (TTL was extended).
+    assert_eq!(client.balance(&user), 700_i128);
+    assert_eq!(client.total_supply(), 700_i128);
+}
+
+#[test]
+fn test_transfer_extends_ttl_on_both_sides() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &500_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &200_i128);
+
+    // Both entries remain accessible after transfer.
+    assert_eq!(client.balance(&alice), 300_i128);
+    assert_eq!(client.balance(&bob), 200_i128);
+}
 

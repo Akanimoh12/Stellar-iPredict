@@ -478,3 +478,78 @@ fn test_transfer_extends_ttl_on_both_sides() {
     assert_eq!(client.balance(&bob), 200_i128);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #771, #773 — Checked arithmetic & TokenError on balance overflow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_mint_balance_overflow_returns_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &100_i128);
+
+    // Minting i128::MAX when user balance is already 100 causes balance overflow
+    let res = client.try_mint(&minter, &user, &i128::MAX);
+    assert_eq!(res, Err(Ok(crate::TokenError::BalanceOverflow)));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_transfer_balance_overflow_panics_with_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &100_i128);
+
+    // Directly set Bob's balance to i128::MAX in storage to test overflow branch in transfer
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&crate::DataKey::Balance(bob.clone()), &i128::MAX);
+    });
+
+    // Transferring from Alice to Bob whose balance is i128::MAX causes balance overflow -> Error(Contract, #11)
+    client.transfer(&alice, &MuxedAddress::from(bob), &1_i128);
+}
+
+#[test]
+fn test_try_transfer_balance_overflow_returns_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &100_i128);
+
+    // Directly set Bob's balance to i128::MAX in storage to test overflow branch in transfer
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&crate::DataKey::Balance(bob.clone()), &i128::MAX);
+    });
+
+    let res = client.try_transfer(&alice, &MuxedAddress::from(bob), &1_i128);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        soroban_sdk::Error::from_contract_error(11)
+    );
+}
+
+

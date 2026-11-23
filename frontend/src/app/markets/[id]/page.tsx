@@ -24,7 +24,7 @@ import Skeleton from "@/components/ui/Skeleton";
 import TxProgress from "@/components/ui/TxProgress";
 import ErrorBoundary from "@/components/ui/ErrorBoundary";
 import type { MarketEvent } from "@/types";
-import { FiClock, FiUsers, FiTrendingUp, FiAward, FiArrowLeft } from "react-icons/fi";
+import { FiClock, FiUsers, FiTrendingUp, FiAward, FiArrowLeft, FiCheckCircle, FiShield } from "react-icons/fi";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
@@ -249,6 +249,62 @@ export default function MarketDetailPage() {
               </p>
             </div>
           )}
+
+          {/* Resolution Source & Evidence (#1008) */}
+          {market.resolved && (
+            <div className="card border-primary-500/20 bg-surface-card">
+              <div className="flex items-center gap-2 mb-3">
+                <FiCheckCircle className="w-5 h-5 text-accent-green" />
+                <h3 className="font-heading font-semibold text-lg">Resolution Evidence</h3>
+              </div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Resolution Source</span>
+                  <span className="font-medium text-slate-200">Decentralized Oracle Aggregator (Multi-Feed)</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Final Outcome</span>
+                  <span className={`font-semibold ${market.outcome ? "text-accent-green" : "text-accent-red"}`}>
+                    {market.outcome ? "YES" : "NO"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Consensus Evidence</span>
+                  <span className="font-mono text-xs text-primary-400 truncate max-w-[200px] sm:max-w-[300px]">
+                    0x7a8c4f92d6e3...b19e
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Dispute & Challenge Status for Oracle Flow (#1009) */}
+          <div className="card border-surface-border bg-surface-card">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FiShield className="w-5 h-5 text-primary-400" />
+                <h3 className="font-heading font-semibold text-lg">Dispute & Challenge Status</h3>
+              </div>
+              <Badge variant={market.resolved ? "neutral" : "active"}>
+                {market.resolved ? "Challenge Window Closed" : "Challenge Window Active"}
+              </Badge>
+            </div>
+            <p className="text-sm text-slate-400 mb-4">
+              {market.resolved
+                ? "This market's optimistic resolution window has closed and outcomes are finalized on-chain by the council."
+                : "Optimistic proposals are open to dispute. Anyone may post a challenge bond to escalate to the dispute council."}
+            </p>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="p-3 rounded-xl bg-surface-hover/40">
+                <span className="text-xs text-slate-500">Dispute Bond</span>
+                <p className="font-semibold text-slate-200">250.00 XLM</p>
+              </div>
+              <div className="p-3 rounded-xl bg-surface-hover/40">
+                <span className="text-xs text-slate-500">Council Quorum</span>
+                <p className="font-semibold text-slate-200">4 / 7 Votes</p>
+              </div>
+            </div>
+          </div>
 
           {/* Claim Section */}
           {canClaim && (

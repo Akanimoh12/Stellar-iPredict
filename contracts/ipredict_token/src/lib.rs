@@ -1,6 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map,
+    MuxedAddress, String, Symbol, Val,
+};
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -9,10 +12,12 @@ pub enum TokenError {
     AlreadyInitialized  = 1,
     NotInitialized      = 2,
     UnauthorizedMinter  = 3,
-    InsufficientBalance = 4,
-    InvalidAmount       = 5,
-    NotAdmin            = 6,
-    NoPendingAdmin      = 7,
+    InsufficientBalance   = 4,
+    InvalidAmount         = 5,
+    NotAdmin              = 6,
+    NoPendingAdmin        = 7,
+    InsufficientAllowance = 8,
+    InvalidExpiration     = 9,
 }
 
 #[contracttype]
@@ -22,10 +27,18 @@ pub enum DataKey {
     PendingAdmin,
     AuthorizedMinter(Address),
     Balance(Address),
+    Allowance(Address, Address),
     TotalSupply,
     Name,
     Symbol,
     Decimals,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllowanceEntry {
+    pub amount: i128,
+    pub expiration_ledger: u32,
 }
 
 #[contract]
@@ -91,41 +104,86 @@ impl IPredictTokenContract {
         env.storage().persistent().set(&DataKey::Balance(to), &(balance + amount));
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        env.events().publish((symbol_short!("mint"), to), amount);
         Ok(())
     }
 
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
-        if amount <= 0 {
-            return Err(TokenError::InvalidAmount);
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let entry: Option<AllowanceEntry> = env.storage().persistent()
+            .get(&DataKey::Allowance(from, spender));
+        match entry {
+            Some(entry) if entry.expiration_ledger >= env.ledger().sequence() => entry.amount,
+            _ => 0,
         }
+    }
+
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
         from.require_auth();
-        let from_balance = Self::balance(env.clone(), from.clone());
-        if from_balance < amount {
-            return Err(TokenError::InsufficientBalance);
+        if amount < 0 {
+            env.panic_with_error(TokenError::InvalidAmount);
         }
-        env.storage().persistent().set(&DataKey::Balance(from), &(from_balance - amount));
-        let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage().persistent().set(&DataKey::Balance(to), &(to_balance + amount));
-        Ok(())
+        let current_ledger = env.ledger().sequence();
+        if amount > 0 && expiration_ledger < current_ledger {
+            env.panic_with_error(TokenError::InvalidExpiration);
+        }
+
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        if amount == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(
+                &key,
+                &AllowanceEntry { amount, expiration_ledger },
+            );
+            env.storage().persistent().extend_ttl(
+                &key,
+                1,
+                env.ledger().max_entry_ttl(),
+            );
+        }
+        env.events().publish(
+            (symbol_short!("approve"), from, spender),
+            soroban_sdk::vec![&env, amount, expiration_ledger],
+        );
     }
 
-    pub fn burn(env: Env, from: Address, amount: i128) -> Result<(), TokenError> {
-        if amount <= 0 {
-            return Err(TokenError::InvalidAmount);
-        }
+    pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
         from.require_auth();
-        let from_balance = Self::balance(env.clone(), from.clone());
-        if from_balance < amount {
-            return Err(TokenError::InsufficientBalance);
-        }
-        env.storage().persistent().set(&DataKey::Balance(from), &(from_balance - amount));
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
-        Ok(())
+        Self::transfer_balance(&env, &from, &to, amount);
     }
 
-    pub fn balance(env: Env, account: Address) -> i128 {
-        env.storage().persistent().get(&DataKey::Balance(account)).unwrap_or(0)
+    pub fn transfer_from(
+        env: Env,
+        spender: Address,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) {
+        spender.require_auth();
+        Self::spend_allowance(&env, &from, &spender, amount);
+        let to = MuxedAddress::from(to);
+        Self::transfer_balance(&env, &from, &to, amount);
+    }
+
+    pub fn burn(env: Env, from: Address, amount: i128) {
+        from.require_auth();
+        Self::burn_balance(&env, &from, amount);
+    }
+
+    pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        spender.require_auth();
+        Self::spend_allowance(&env, &from, &spender, amount);
+        Self::burn_balance(&env, &from, amount);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().persistent().get(&DataKey::Balance(id)).unwrap_or(0)
     }
 
     pub fn total_supply(env: Env) -> i128 {
@@ -168,6 +226,75 @@ impl IPredictTokenContract {
 
     fn require_admin(env: &Env) -> Result<Address, TokenError> {
         env.storage().instance().get(&DataKey::Admin).ok_or(TokenError::NotInitialized)
+    }
+}
+
+impl IPredictTokenContract {
+    fn transfer_balance(env: &Env, from: &Address, to: &MuxedAddress, amount: i128) {
+        if amount < 0 {
+            env.panic_with_error(TokenError::InvalidAmount);
+        }
+        let to_address = to.address();
+        let from_balance = Self::balance(env.clone(), from.clone());
+        if from_balance < amount {
+            env.panic_with_error(TokenError::InsufficientBalance);
+        }
+        let to_balance = Self::balance(env.clone(), to_address.clone());
+        if from != &to_address {
+            env.storage().persistent().set(
+                &DataKey::Balance(from.clone()),
+                &(from_balance - amount),
+            );
+            env.storage().persistent().set(
+                &DataKey::Balance(to_address.clone()),
+                &(to_balance + amount),
+            );
+        }
+
+        let mut event_data = Map::<Symbol, Val>::new(env);
+        event_data.set(symbol_short!("amount"), amount);
+        event_data.set(Symbol::new(env, "to_muxed_id"), to.id());
+        env.events().publish(
+            (symbol_short!("transfer"), from.clone(), to_address),
+            event_data,
+        );
+    }
+
+    fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
+        if amount < 0 {
+            env.panic_with_error(TokenError::InvalidAmount);
+        }
+        if amount == 0 {
+            return;
+        }
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        let entry: AllowanceEntry = env.storage().persistent()
+            .get(&key)
+            .unwrap_or(AllowanceEntry { amount: 0, expiration_ledger: 0 });
+        if entry.expiration_ledger < env.ledger().sequence() || entry.amount < amount {
+            env.panic_with_error(TokenError::InsufficientAllowance);
+        }
+        env.storage().persistent().set(
+            &key,
+            &AllowanceEntry {
+                amount: entry.amount - amount,
+                expiration_ledger: entry.expiration_ledger,
+            },
+        );
+    }
+
+    fn burn_balance(env: &Env, from: &Address, amount: i128) {
+        if amount < 0 {
+            env.panic_with_error(TokenError::InvalidAmount);
+        }
+        let from_balance = Self::balance(env.clone(), from.clone());
+        if from_balance < amount {
+            env.panic_with_error(TokenError::InsufficientBalance);
+        }
+        env.storage().persistent().set(&DataKey::Balance(from.clone()), &(from_balance - amount));
+        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        env.events().publish((symbol_short!("burn"), from.clone()), amount);
     }
 }
 

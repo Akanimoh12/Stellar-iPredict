@@ -93,21 +93,31 @@ export function useMarkets(
   const [loading, setLoading] = useState(!cachedMarkets.current);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const hasMarketsRef = useRef(cachedMarkets.current !== null);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const filterReadyRef = useRef(false);
 
   const fetchMarkets = useCallback(async (silent = false) => {
-    if (!silent && allMarkets.length === 0) setLoading(true);
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+
+    if (!silent && !hasMarketsRef.current) setLoading(true);
     setError(null);
     try {
-      const markets = await getMarkets();
+      const markets = await getMarkets(controller.signal);
+      if (controller.signal.aborted) return;
       if (!mountedRef.current) return;
       setAllMarkets(markets);
+      hasMarketsRef.current = markets.length > 0;
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (!mountedRef.current) return;
       setError(
         err instanceof Error ? err.message : "Failed to load markets"
       );
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && !controller.signal.aborted) {
         setLoading(false);
       }
     }
@@ -120,8 +130,27 @@ export function useMarkets(
     fetchMarkets(cachedMarkets.current !== null && cachedMarkets.current.length > 0);
     return () => {
       mountedRef.current = false;
+      requestControllerRef.current?.abort();
     };
   }, [fetchMarkets]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Filter and sort changes are local operations, but refreshing through the
+  // RPC-backed market service is debounced and the previous refresh is aborted.
+  useEffect(() => {
+    if (!filterReadyRef.current) {
+      filterReadyRef.current = true;
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      fetchMarkets(true);
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeout);
+      requestControllerRef.current?.abort();
+    };
+  }, [filter, sort, fetchMarkets]);
 
   // Auto-poll while visible (silent refresh — no skeleton flash). Pauses
   // entirely when the tab is hidden, so a forgotten open tab costs nothing.

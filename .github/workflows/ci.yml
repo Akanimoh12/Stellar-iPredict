@@ -74,6 +74,11 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Check frontend bundle budgets
+        if: matrix.node-version == 22
+        working-directory: frontend
+        run: npm run bundle:budget
+
       - name: Upload build artifact
         if: matrix.node-version == 22
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

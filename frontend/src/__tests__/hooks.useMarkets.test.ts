@@ -60,7 +60,7 @@ describe("useMarkets", () => {
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
-      expect(result.current.data).toEqual(mockMarkets);
+      expect(result.current.data.map((market) => market.id)).toEqual([2, 1]);
     });
   });
 

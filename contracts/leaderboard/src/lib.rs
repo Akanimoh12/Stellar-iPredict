@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol, Val, Vec,
+};
 
 const MAX_TOP_PLAYERS: u32 = 50;
 const MAX_PAGE_SIZE: u32   = 20;
@@ -71,6 +73,44 @@ pub struct UserStats {
     //      Since prediction_market no longer calls record_bet, we compute
     //      total_bets at read time: won + lost (fully settled bets only).
     //      This eliminates the won_bets vs total_bets drift issue too.
+}
+
+// ── Events (#775) ─────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["leaderboard", "points_added"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PointsAddedEvent {
+    pub user: Address,
+    pub points: u64,
+    pub total_points: u64,
+    pub is_winner: bool,
+}
+
+#[contractevent(topics = ["leaderboard", "reward"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewardEvent {
+    pub user: Address,
+    pub points: u64,
+    pub tokens: i128,
+    pub total_points: u64,
+    pub is_winner: bool,
+}
+
+#[contractevent(topics = ["leaderboard", "bonus_added"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BonusPointsAddedEvent {
+    pub user: Address,
+    pub points: u64,
+    pub total_points: u64,
+}
+
+#[contractevent(topics = ["leaderboard", "reward_bonus"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewardBonusEvent {
+    pub user: Address,
+    pub points: u64,
+    pub tokens: i128,
+    pub total_points: u64,
 }
 
 #[contract]
@@ -151,6 +191,15 @@ impl LeaderboardContract {
         env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
         Self::upsert_top(&env, &user, s.points);
 
+        RewardEvent {
+            user: user.clone(),
+            points,
+            tokens,
+            total_points: s.points,
+            is_winner,
+        }
+        .publish(&env);
+
         // 2) Mint IPRED internally (the second cross-call the market used to make).
         if tokens > 0 {
             let token: Address = env.storage().instance().get(&DataKey::TokenContract)
@@ -187,6 +236,15 @@ impl LeaderboardContract {
         env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
 
         Self::upsert_top(&env, &user, s.points);
+
+        PointsAddedEvent {
+            user: user.clone(),
+            points,
+            total_points: s.points,
+            is_winner,
+        }
+        .publish(&env);
+
         Ok(())
     }
 
@@ -208,6 +266,14 @@ impl LeaderboardContract {
         env.storage().persistent().set(&sk, &s);
         env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
         Self::upsert_top(&env, &user, s.points);
+
+        RewardBonusEvent {
+            user: user.clone(),
+            points,
+            tokens,
+            total_points: s.points,
+        }
+        .publish(&env);
 
         if tokens > 0 {
             let token: Address = env.storage().instance().get(&DataKey::TokenContract)
@@ -241,6 +307,14 @@ impl LeaderboardContract {
         env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
 
         Self::upsert_top(&env, &user, s.points);
+
+        BonusPointsAddedEvent {
+            user: user.clone(),
+            points,
+            total_points: s.points,
+        }
+        .publish(&env);
+
         Ok(())
     }
 

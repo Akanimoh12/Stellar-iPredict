@@ -279,57 +279,39 @@ impl LeaderboardContract {
         }
     }
 
-    // OPT: sort is now done with an in-place swap instead of full Vec rebuild.
-    //      Previous: O(n²) Vec rebuilds in Soroban linear memory — extremely
-    //      expensive. New: track max so far, do one pass, insertion sort with
-    //      index swap. Still O(n²) worst case but ~10x fewer allocations.
+    // FIX (#778): Keep the list sorted on write instead of sorting on every read.
+    //      
+    //      BEFORE: The old implementation loaded all 50 entries, ran O(n²) selection  
+    //      sort with full Vec rebuilds on EVERY get_top_players call, even when the
+    //      list was already sorted. This was extremely expensive.
+    //      
+    //      AFTER: The TopPlayerAt(slot) entries are now maintained in descending
+    //      order by points during upsert_top. Reads simply slice the pre-sorted list.
+    //      No sorting happens in get_top_players.
+    //      
+    //      Trade-off: Writes now do O(n) work to maintain sort order (find insertion  
+    //      point + shift entries), but this is WAY cheaper than O(n²) sorts on every
+    //      read, since reads happen far more frequently than writes.
+    //      
+    //      Result: Reads are now O(page_size) with just storage lookups, no sorting.
     pub fn get_top_players(env: Env, offset: u32, limit: u32) -> Vec<PlayerEntry> {
         let count: u32 = env.storage().instance().get(&DataKey::TopPlayerCount).unwrap_or(0);
         if count == 0 || offset >= count { return Vec::new(&env); }
 
         let page_size = if limit == 0 || limit > MAX_PAGE_SIZE { MAX_PAGE_SIZE } else { limit };
 
-        // Collect all entries into a flat vec
-        let mut all: Vec<PlayerEntry> = Vec::new(&env);
-        for i in 0..count {
-            if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
-                all.push_back(e);
-            }
-        }
-
-        let n = all.len();
-        // OPT: selection sort (O(n²) swaps) — fewer Vec rebuilds than insertion sort
-        // Each "swap" here is still a full Vec rebuild due to Soroban Vec constraints,
-        // but we only rebuild when order is wrong (best case: already sorted = 0 rebuilds)
-        for i in 0..n {
-            let mut max_idx = i;
-            for j in (i + 1)..n {
-                if all.get(j).unwrap().points > all.get(max_idx).unwrap().points {
-                    max_idx = j;
-                }
-            }
-            if max_idx != i {
-                // Swap i and max_idx
-                let a = all.get(i).unwrap();
-                let b = all.get(max_idx).unwrap();
-                let mut rebuilt: Vec<PlayerEntry> = Vec::new(&env);
-                for k in 0..n {
-                    if k == i           { rebuilt.push_back(b.clone()); }
-                    else if k == max_idx { rebuilt.push_back(a.clone()); }
-                    else                 { rebuilt.push_back(all.get(k).unwrap()); }
-                }
-                all = rebuilt;
-            }
-        }
-
-        // Slice [offset .. offset+page_size]
+        // The list is already sorted in descending order by points in storage.
+        // Simply read the requested slice directly without any sorting.
         let end = {
             let e = offset + page_size;
-            if e < all.len() { e } else { all.len() }
+            if e < count { e } else { count }
         };
+        
         let mut result: Vec<PlayerEntry> = Vec::new(&env);
         for i in offset..end {
-            result.push_back(all.get(i).unwrap());
+            if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                result.push_back(e);
+            }
         }
         result
     }
@@ -362,60 +344,173 @@ impl LeaderboardContract {
         let count: u32 = env.storage().instance().get(&DataKey::TopPlayerCount).unwrap_or(0);
         let slot: Option<u32> = env.storage().persistent().get(&DataKey::TopPlayerSlot(user.clone()));
 
-        if let Some(s) = slot {
-            // Already in the list — in-place update, O(1).
-            let e = PlayerEntry { address: user.clone(), points: new_points };
-            env.storage().persistent().set(&DataKey::TopPlayerAt(s), &e);
-            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(s), TTL_BUMP, TTL_HIGH);
-            let cached_min_slot: u32 = env.storage().instance().get(&DataKey::MinSlot).unwrap_or(0);
-            if count >= MAX_TOP_PLAYERS && s == cached_min_slot {
+        if let Some(old_slot) = slot {
+            // User already in list — update their points and restore sort order.
+            // Strategy: Remove from old position, find new sorted position, insert there.
+            
+            // Create updated entry
+            let new_entry = PlayerEntry { address: user.clone(), points: new_points };
+            
+            // Find the correct position for new_points in sorted order (descending)
+            let mut new_slot = 0;
+            for i in 0..count {
+                if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                    // Skip the current user's old entry in the comparison
+                    if e.address == *user {
+                        continue;
+                    }
+                    // Found first entry with points <= new_points, insert before it
+                    if e.points <= new_points {
+                        new_slot = i;
+                        break;
+                    }
+                    new_slot = i + 1; // Insert after all higher entries
+                }
+            }
+            
+            // If the slot would be the same, just update in place
+            if new_slot == old_slot {
+                env.storage().persistent().set(&DataKey::TopPlayerAt(old_slot), &new_entry);
+                env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(old_slot), TTL_BUMP, TTL_HIGH);
+            } else {
+                // Remove from old position and shift entries
+                // Then insert at new position
+                if new_slot < old_slot {
+                    // Moving up: shift [new_slot..old_slot) down by 1
+                    for i in (new_slot..old_slot).rev() {
+                        if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                            env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &e);
+                            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
+                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address), &(i + 1));
+                            env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(e.address), TTL_BUMP, TTL_HIGH);
+                        }
+                    }
+                } else {
+                    // Moving down: shift (old_slot..new_slot] up by 1
+                    for i in (old_slot + 1)..=new_slot {
+                        if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                            env.storage().persistent().set(&DataKey::TopPlayerAt(i - 1), &e);
+                            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i - 1), TTL_BUMP, TTL_HIGH);
+                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address), &(i - 1));
+                            env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(e.address), TTL_BUMP, TTL_HIGH);
+                        }
+                    }
+                }
+                
+                // Insert at new position
+                env.storage().persistent().set(&DataKey::TopPlayerAt(new_slot), &new_entry);
+                env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(new_slot), TTL_BUMP, TTL_HIGH);
+                env.storage().persistent().set(&DataKey::TopPlayerSlot(user.clone()), &new_slot);
+                env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(user.clone()), TTL_BUMP, TTL_HIGH);
+            }
+            
+            // Recompute min if at capacity
+            if count >= MAX_TOP_PLAYERS {
                 Self::recompute_min(env, count);
             }
             return;
         }
 
+        // User not in list — try to add them
         if count < MAX_TOP_PLAYERS {
-            // Room available — append. O(1).
-            let s = count;
-            let e = PlayerEntry { address: user.clone(), points: new_points };
-            env.storage().persistent().set(&DataKey::TopPlayerAt(s), &e);
-            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(s), TTL_BUMP, TTL_HIGH);
-            let sk = DataKey::TopPlayerSlot(user.clone());
-            env.storage().persistent().set(&sk, &s);
-            env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
+            // Room available — find correct sorted position and insert
+            let mut insert_pos = count; // Default: append at end
+            for i in 0..count {
+                if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                    if new_points > entry.points {
+                        insert_pos = i;
+                        break;
+                    }
+                }
+            }
+            
+            let new_entry = PlayerEntry { address: user.clone(), points: new_points };
+            
+            // Shift existing entries down from insert_pos to make room
+            for i in (insert_pos..count).rev() {
+                if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                    env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &entry);
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &(i + 1));
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
+                }
+            }
+            
+            // Insert new entry
+            env.storage().persistent().set(&DataKey::TopPlayerAt(insert_pos), &new_entry);
+            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(insert_pos), TTL_BUMP, TTL_HIGH);
+            env.storage().persistent().set(&DataKey::TopPlayerSlot(user.clone()), &insert_pos);
+            env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(user.clone()), TTL_BUMP, TTL_HIGH);
+            
             let new_count = count + 1;
             env.storage().instance().set(&DataKey::TopPlayerCount, &new_count);
-            // Lever E: maintain the cached min. When the list becomes full, the
-            // min is authoritative; while filling, track the lowest seen so far.
-            let cur_min: u64 = env.storage().instance().get(&DataKey::MinPoints).unwrap_or(u64::MAX);
-            if new_count == 1 || new_points < cur_min {
-                env.storage().instance().set(&DataKey::MinPoints, &new_points);
-                env.storage().instance().set(&DataKey::MinSlot, &s);
+            
+            // Update cached min
+            if new_count >= MAX_TOP_PLAYERS {
+                Self::recompute_min(env, new_count);
             }
             return;
         }
 
-        
+        // List is full — check if new entry beats the minimum
         let mut min_pts: u64 = env.storage().instance().get(&DataKey::MinPoints).unwrap_or(u64::MAX);
         if min_pts == u64::MAX {
             Self::recompute_min(env, count);
             min_pts = env.storage().instance().get(&DataKey::MinPoints).unwrap_or(u64::MAX);
         }
-        let min_slot: u32 = env.storage().instance().get(&DataKey::MinSlot).unwrap_or(0);
+        
         if new_points <= min_pts {
-            return;
+            return; // Not good enough to make the list
         }
 
+        // Remove the weakest entry and insert the new one in sorted position
+        let min_slot: u32 = env.storage().instance().get(&DataKey::MinSlot).unwrap_or(count - 1);
         if let Some(old) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(min_slot)) {
             env.storage().persistent().remove(&DataKey::TopPlayerSlot(old.address));
         }
-        let e = PlayerEntry { address: user.clone(), points: new_points };
-        env.storage().persistent().set(&DataKey::TopPlayerAt(min_slot), &e);
-        env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(min_slot), TTL_BUMP, TTL_HIGH);
-        let sk = DataKey::TopPlayerSlot(user.clone());
-        env.storage().persistent().set(&sk, &min_slot);
-        env.storage().persistent().extend_ttl(&sk, TTL_BUMP, TTL_HIGH);
-        // The slot we just overwrote held the old min; recompute the new min.
+        
+        // Find correct position for new entry
+        let mut insert_pos = min_slot; // Default: insert where min was
+        for i in 0..count {
+            if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                if new_points > entry.points {
+                    insert_pos = i;
+                    break;
+                }
+            }
+        }
+        
+        let new_entry = PlayerEntry { address: user.clone(), points: new_points };
+        
+        // Shift entries to make room (only if not inserting at min_slot)
+        if insert_pos < min_slot {
+            for i in (insert_pos..min_slot).rev() {
+                if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
+                    env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &entry);
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &(i + 1));
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
+                }
+            }
+        } else if insert_pos > min_slot {
+            // Shift up from min_slot to insert_pos-1
+            for i in min_slot..insert_pos {
+                if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i + 1)) {
+                    env.storage().persistent().set(&DataKey::TopPlayerAt(i), &entry);
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i), TTL_BUMP, TTL_HIGH);
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &i);
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
+                }
+            }
+        }
+        
+        // Insert new entry
+        env.storage().persistent().set(&DataKey::TopPlayerAt(insert_pos), &new_entry);
+        env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(insert_pos), TTL_BUMP, TTL_HIGH);
+        env.storage().persistent().set(&DataKey::TopPlayerSlot(user.clone()), &insert_pos);
+        env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(user.clone()), TTL_BUMP, TTL_HIGH);
+        
+        // Recompute min
         Self::recompute_min(env, count);
     }
 

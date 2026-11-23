@@ -175,39 +175,56 @@ export async function getMarket(marketId: number): Promise<Market | null> {
   }
 }
 
-export async function getMarkets(): Promise<Market[]> {
+export async function getMarkets(signal?: AbortSignal): Promise<Market[]> {
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DOMException("The market request was aborted", "AbortError");
+    }
+  };
+
+  throwIfAborted();
   const cached = cache.get<Market[]>(CACHE_MARKETS);
-  if (cached) return cached;
+  if (cached) {
+    throwIfAborted();
+    return cached;
+  }
 
   // Wrap count fetch in its own try/catch so a bad RPC doesn't kill everything
   let total = 0;
   try {
+    throwIfAborted();
     const count = await simulateTransaction<number | bigint>(
       getSimulationSource(),
       MARKET_CONTRACT_ID,
       "get_market_count",
       []
     );
+    throwIfAborted();
     total = Number(count);
   } catch {
+    throwIfAborted();
     // RPC unavailable or contract not deployed — return empty gracefully
     return [];
   }
 
+  throwIfAborted();
   if (total === 0) return [];
 
   const tasks = Array.from({ length: total }, (_, i) => {
     const id = i + 1;
     return async () => {
       try {
+        throwIfAborted();
         const raw = await simulateTransaction<RawMarket>(
           getSimulationSource(),
           MARKET_CONTRACT_ID,
           "get_market",
           [u64Val(id)]
         );
+        throwIfAborted();
         return parseMarket(raw);
       } catch {
+        throwIfAborted();
         return null;
       }
     };
@@ -215,6 +232,7 @@ export async function getMarkets(): Promise<Market[]> {
 
   // Concurrency 15 so a typical board (≤15 markets) loads in one parallel wave.
   const results = await batchAll(tasks, 15);
+  throwIfAborted();
   const markets = results.filter((m): m is Market => m !== null);
 
   for (const m of markets) {

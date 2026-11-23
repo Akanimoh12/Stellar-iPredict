@@ -2,7 +2,12 @@
 
 import React, { useState } from "react";
 import { FiShare2 } from "react-icons/fi";
-import SocialShareModal from "./SocialShareModal";
+import dynamic from "next/dynamic";
+
+const SocialShareModal = dynamic(
+  () => import("./SocialShareModal"),
+  { ssr: false }
+);
 
 interface ShareBetButtonProps {
   question: string;

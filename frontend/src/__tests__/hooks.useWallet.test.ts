@@ -6,11 +6,14 @@ import { useWallet } from "@/hooks/useWallet";
 const mockWalletKit = {
   selectWallet: vi.fn(),
   connectKit: vi.fn(),
-  signTransaction: vi.fn(),
+  signWithKit: vi.fn(),
 };
 
 vi.mock("@/wallet/kit", async () => ({
   default: mockWalletKit,
+  selectWallet: mockWalletKit.selectWallet,
+  connectKit: mockWalletKit.connectKit,
+  signWithKit: mockWalletKit.signWithKit,
 }));
 
 vi.mock("@/services/soroban", () => ({
@@ -120,7 +123,7 @@ describe("useWallet", () => {
     mockWalletKit.connectKit.mockResolvedValue({
       publicKey: "GTEST123...",
     });
-    mockWalletKit.signTransaction.mockResolvedValue("signed_xdr_123");
+    mockWalletKit.signWithKit.mockResolvedValue("signed_xdr_123");
 
     const { result } = renderHook(() => useWallet());
 

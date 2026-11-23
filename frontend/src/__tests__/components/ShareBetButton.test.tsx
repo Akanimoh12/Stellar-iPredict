@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 vi.mock("@/components/social/SocialShareModal", () => ({
   default: ({
@@ -32,7 +32,7 @@ vi.mock("@/components/social/SocialShareModal", () => ({
 import ShareBetButton from "@/components/social/ShareBetButton";
 
 describe("ShareBetButton", () => {
-  it("opens and closes the share modal with bet details", () => {
+  it("opens and closes the share modal with bet details", async () => {
     render(
       <ShareBetButton
         question="Will XLM reach $1?"
@@ -47,7 +47,9 @@ describe("ShareBetButton", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Share your prediction/i }));
 
-    expect(screen.getByTestId("social-share-modal")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("social-share-modal")).toBeInTheDocument();
+    });
     expect(screen.getByText("Will XLM reach $1?")).toBeInTheDocument();
     expect(screen.getByText("25000000")).toBeInTheDocument();
     expect(screen.getByText("YES")).toBeInTheDocument();

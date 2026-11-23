@@ -13,6 +13,8 @@ import {
   WIN_TOKENS,
   LOSE_TOKENS,
   TOTAL_FEE_BPS,
+  MIN_BET_XLM,
+  MAX_BETS_PER_USER,
 } from "@/config/network";
 import TxProgress from "@/components/ui/TxProgress";
 import ShareBetButton from "@/components/social/ShareBetButton";
@@ -31,6 +33,13 @@ interface BettingPanelProps {
   market: Market;
   userBet: Bet | null;
   balance: number;
+  /**
+   * True while the wallet balance is being fetched or refreshed. Betting is held
+   * until it clears so a bet is never validated against a zero or stale balance.
+   */
+  balanceLoading?: boolean;
+  /** Bets the user has already placed on this market (capped on-chain). */
+  userBetCount?: number;
   onSuccess?: () => void;
 }
 
@@ -43,6 +52,8 @@ export default function BettingPanel({
   market,
   userBet,
   balance,
+  balanceLoading = false,
+  userBetCount = 0,
   onSuccess,
 }: BettingPanelProps) {
   const { publicKey, connected } = useWallet();
@@ -80,11 +91,24 @@ export default function BettingPanel({
   // Never let it go negative.
   const spendable = Math.max(0, balance - RESERVE_BUFFER_XLM);
 
+  // The contract has no maximum bet amount. Its per-user limits are a minimum bet
+  // and a cap on the number of bets per market, so the largest bet MAX may offer
+  // is the whole-XLM spendable balance, and only while the user can still bet.
+  const maxBetAmount = Math.max(0, Math.floor(spendable));
+  const canAffordMinBet = maxBetAmount >= MIN_BET_XLM;
+  const betLimitReached = userBetCount >= MAX_BETS_PER_USER;
+
   const isBusy = loading || isSubmitting;
-  const isMinValid = amount >= 1;
+  const isMinValid = amount >= MIN_BET_XLM;
   const isBalanceValid = amount <= spendable;
   const canSubmit =
-    connected && isActive && isMinValid && isBalanceValid && !isBusy;
+    connected &&
+    isActive &&
+    !balanceLoading &&
+    !betLimitReached &&
+    isMinValid &&
+    isBalanceValid &&
+    !isBusy;
 
   // Calculate potential payout and live projected odds
   const { yesPercent, noPercent } = calculateOdds(
@@ -154,12 +178,17 @@ export default function BettingPanel({
 
   const handleSetMax = () => {
     // Max = spendable balance (keeps the locked reserve + fee headroom intact),
-    // floored to whole XLM. Never negative.
-    setAmountStr(Math.max(0, Math.floor(spendable)).toString());
+    // floored to whole XLM. Offer nothing the contract would reject: not while the
+    // balance is loading, not once the per-market bet limit is hit, and not when
+    // the spendable balance cannot cover the minimum bet.
+    if (balanceLoading || betLimitReached || !canAffordMinBet) return;
+    setAmountStr(maxBetAmount.toString());
   };
 
   const hasExistingBet = userBet !== null;
   const oppositeDisabled = hasExistingBet;
+  const heldSide = userBet?.isYes ? "YES" : "NO";
+  const lockedSide = userBet?.isYes ? "NO" : "YES";
 
   return (
     <div className="card space-y-5">
@@ -190,6 +219,7 @@ export default function BettingPanel({
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-green/50 hover:text-accent-green"
           }`}
           title={oppositeDisabled && !side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
+          aria-describedby={oppositeDisabled && !side ? "opposite-side-note" : undefined}
         >
           YES ({side === true && netAmount > 0 ? projectedOdds.yesPercent : yesPercent}%)
         </button>
@@ -204,10 +234,23 @@ export default function BettingPanel({
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-red/50 hover:text-accent-red"
           }`}
           title={oppositeDisabled && side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
+          aria-describedby={oppositeDisabled && side ? "opposite-side-note" : undefined}
         >
           NO ({side === false && netAmount > 0 ? projectedOdds.noPercent : noPercent}%)
         </button>
       </div>
+
+      {/* Why the other side is unavailable: the contract allows one side per market */}
+      {hasExistingBet && (
+        <p
+          id="opposite-side-note"
+          role="note"
+          className="text-xs leading-snug text-amber-400"
+        >
+          A market only accepts one side per wallet. You hold {heldSide} here, so{" "}
+          {lockedSide} is locked and you can only add to {heldSide}.
+        </p>
+      )}
 
       {/* Amount input */}
       <div className="space-y-2">
@@ -239,7 +282,13 @@ export default function BettingPanel({
           ))}
           <button
             onClick={handleSetMax}
-            disabled={!isActive || isBusy || spendable <= 0}
+            disabled={
+              !isActive ||
+              isBusy ||
+              balanceLoading ||
+              betLimitReached ||
+              !canAffordMinBet
+            }
             className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-primary-600/15 border border-primary-600/30 text-primary-400 hover:bg-primary-600/25 transition-colors disabled:opacity-50"
           >
             MAX
@@ -247,12 +296,29 @@ export default function BettingPanel({
         </div>
 
         {/* Wallet balance */}
-        <p className="text-xs text-slate-600">
-          Balance: {balance.toFixed(2)} XLM
-          <span className="text-slate-700">
-            {" "}· {spendable.toFixed(2)} bettable
-          </span>
-        </p>
+        {balanceLoading ? (
+          <p className="text-xs text-slate-600" role="status">
+            Balance: loading…
+          </p>
+        ) : (
+          <p className="text-xs text-slate-600">
+            Balance: {balance.toFixed(2)} XLM
+            <span className="text-slate-700">
+              {" "}· {spendable.toFixed(2)} bettable
+            </span>
+          </p>
+        )}
+        {connected && isActive && !balanceLoading && !canAffordMinBet && (
+          <p className="text-xs text-slate-500">
+            Not enough bettable XLM to cover the {MIN_BET_XLM} XLM minimum bet once
+            the account reserve is kept back.
+          </p>
+        )}
+        {userBetCount > 0 && !betLimitReached && (
+          <p className="text-xs text-slate-600">
+            {userBetCount} of {MAX_BETS_PER_USER} bets placed on this market
+          </p>
+        )}
       </div>
 
       {/* Payout calculator */}
@@ -331,6 +397,14 @@ export default function BettingPanel({
       )}
 
       {/* Validation messages */}
+      {betLimitReached && (
+        <div role="alert" className="flex items-start gap-2 text-xs text-accent-red">
+          <FiAlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>
+            You have reached the limit of {MAX_BETS_PER_USER} bets on this market.
+          </span>
+        </div>
+      )}
       {amountStr && !isMinValid && (
         <div className="flex items-center gap-2 text-xs text-accent-red">
           <FiAlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -396,6 +470,13 @@ export default function BettingPanel({
               <dd className="text-accent-green font-medium">{payout.toFixed(2)} XLM</dd>
             </div>
           </dl>
+          {!hasExistingBet && (
+            <p className="text-[11px] leading-snug text-amber-400">
+              One side per market: after this bet you can add more to{" "}
+              {side ? "YES" : "NO"}, but you cannot bet {side ? "NO" : "YES"} on
+              this market.
+            </p>
+          )}
           <p className="text-[11px] leading-snug text-slate-600">
             Your wallet will ask you to sign next. The network fee is about{" "}
             {hasExistingBet ? "0.003 XLM" : "0.14 XLM on your first bet on this market"}.
@@ -431,11 +512,15 @@ export default function BettingPanel({
             ? "Connect Wallet"
             : !isActive
               ? "Market Closed"
-              : isBusy
-                ? "Processing..."
-                : hasExistingBet
-                  ? "Increase Position"
-                  : "Place Bet"}
+              : balanceLoading
+                ? "Loading balance…"
+                : betLimitReached
+                  ? "Bet limit reached"
+                  : isBusy
+                    ? "Processing..."
+                    : hasExistingBet
+                      ? "Increase Position"
+                      : "Place Bet"}
         </button>
       ) : showShare ? (
         <div className="space-y-3">

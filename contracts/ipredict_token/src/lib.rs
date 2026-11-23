@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     MuxedAddress, String,
 };
 
@@ -61,6 +61,36 @@ pub enum DataKey {
 pub struct AllowanceEntry {
     pub amount: i128,
     pub expiration_ledger: u32,
+}
+
+// ── Events (#774) ─────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["transfer"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferEvent {
+    #[topic]
+    pub from: Address,
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["mint"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MintEvent {
+    #[topic]
+    pub minter: Address,
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["burn"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BurnEvent {
+    #[topic]
+    pub from: Address,
+    pub amount: i128,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -195,10 +225,12 @@ impl IPredictTokenContract {
 
         env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
 
-        env.events().publish(
-            (symbol_short!("mint"), minter, to),
+        MintEvent {
+            minter,
+            to,
             amount,
-        );
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -389,10 +421,12 @@ impl IPredictTokenContract {
             env.storage().persistent().extend_ttl(&to_key, TTL_BALANCE_BUMP, TTL_BALANCE_HIGH);
         }
 
-        env.events().publish(
-            (symbol_short!("transfer"), from.clone(), to_address),
+        TransferEvent {
+            from: from.clone(),
+            to: to_address,
             amount,
-        );
+        }
+        .publish(env);
     }
 
     /// Debit `amount` from `from`'s allowance to `spender`.
@@ -456,7 +490,11 @@ impl IPredictTokenContract {
             .unwrap_or_else(|| env.panic_with_error(TokenError::InvalidAmount));
         env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
 
-        env.events().publish((symbol_short!("burn"), from.clone()), amount);
+        BurnEvent {
+            from: from.clone(),
+            amount,
+        }
+        .publish(env);
     }
 }
 

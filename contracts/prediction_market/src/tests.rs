@@ -1,3 +1,6 @@
+// #797: This file is the canonical test module for prediction_market.
+// The duplicate mod test (src/test.rs) has been consolidated here.
+// All new tests should be added to this file only.
 #![cfg(test)]
 
 use super::*;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import React from "react";
 import type { Market, Bet } from "@/types";
 
@@ -236,12 +236,75 @@ describe("BettingPanel", () => {
     render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
     fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
 
-    const submitBtn = screen.getByRole("button", { name: "Place Bet" });
-    fireEvent.click(submitBtn);
-    fireEvent.click(submitBtn);
-    fireEvent.click(submitBtn);
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+    const confirmBtn = screen.getByRole("button", { name: "Confirm & sign" });
+    fireEvent.click(confirmBtn);
+    fireEvent.click(confirmBtn);
+    fireEvent.click(confirmBtn);
 
     expect(mockSubmit).toHaveBeenCalledTimes(1);
     resolveSubmit!();
+  });
+});
+
+// ── Confirmation step before signing (#852) ─────────────────────────────────
+
+describe("BettingPanel confirmation step (#852)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSubmit.mockResolvedValue(undefined);
+    betState = {
+      submit: mockSubmit,
+      result: null,
+      loading: false,
+      stage: "idle",
+      error: null,
+      reset: mockReset,
+    };
+  });
+
+  it("does not open the wallet until the bet is confirmed", () => {
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it("summarises side, amount, fee and expected payout before signing", () => {
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Confirm your bet" });
+    expect(within(dialog).getByText("YES")).toBeInTheDocument();
+    expect(within(dialog).getByText("10.00 XLM")).toBeInTheDocument();
+    expect(within(dialog).getByText("0.20 XLM")).toBeInTheDocument();
+    expect(within(dialog).getByText(/Expected payout if you win/)).toBeInTheDocument();
+  });
+
+  it("confirming submits the reviewed bet with the same side and amount", () => {
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm & sign" }));
+    expect(mockSubmit).toHaveBeenCalledWith(mockMarket.id, true, 10);
+  });
+
+  it("cancel returns to the form without submitting", () => {
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Confirm your bet" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Place Bet" })).toBeInTheDocument();
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+
+  it("changing the amount after reviewing clears the confirmation", () => {
+    render(<BettingPanel market={mockMarket} userBet={null} balance={100} />);
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Place Bet" }));
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "20" } });
+    expect(screen.queryByRole("dialog", { name: "Confirm your bet" })).toBeNull();
   });
 });

@@ -9,6 +9,28 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MIGRATIONS_DIR = path.resolve(__dirname, 'migrations');
 
+/**
+ * Lints migration SQL to prevent unreviewed destructive statements.
+ * DROP TABLE and TRUNCATE in up migrations require an explicit review marker:
+ * `-- ack:destructive` (#1021).
+ */
+export function lintMigrationSql(filename: string, sql: string): void {
+  // Only up migrations require the marker; down migrations are by definition reverting schema.
+  if (filename.endsWith('.down.sql')) {
+    return;
+  }
+
+  const destructivePattern = /\b(DROP\s+TABLE|TRUNCATE)\b/i;
+  if (destructivePattern.test(sql)) {
+    const hasMarker = /--\s*ack:destructive/i.test(sql);
+    if (!hasMarker) {
+      throw new Error(
+        `Destructive statement found in up migration "${filename}" without explicit review marker "-- ack:destructive"`
+      );
+    }
+  }
+}
+
 function listMigrationFiles(): string[] {
   const files = fs.readdirSync(MIGRATIONS_DIR)
     .filter(f => f.endsWith('.sql') && !f.endsWith('.down.sql'))
@@ -22,6 +44,12 @@ function listMigrationFiles(): string[] {
     }
     const prefix = match[1];
     byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), file]);
+
+    const fullPath = path.join(MIGRATIONS_DIR, file);
+    if (fs.existsSync(fullPath)) {
+      const sql = fs.readFileSync(fullPath, 'utf8');
+      lintMigrationSql(file, sql);
+    }
   }
 
   for (const [prefix, names] of byPrefix) {

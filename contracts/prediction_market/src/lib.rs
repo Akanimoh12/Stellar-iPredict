@@ -125,6 +125,7 @@ pub enum MarketError {
     InvalidDuration    = 29,          // duration outside [MIN_MARKET_DURATION, MAX_MARKET_DURATION]
     InsufficientLiquidity = 30,       // one side below MIN_SIDE_LIQUIDITY; resolution impossible
     NoPendingAdmin     = 31,          // accept_admin called with no proposal
+    InvalidCategory    = 32,          // category not allowed by admin registry (#1016)
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -155,6 +156,7 @@ pub enum DataKey {
     // Multisig voting (Issue #527)
     CouncilVote(u64, Address),  // market_id, member → CouncilVoteRecord
     CouncilVoteCount(u64),      // market_id → vote count
+    Categories,                 // allowed market categories registry (Issue #1016)
     Paused,                     // bool: global pause for place_bet / create_market (#788)
     SchemaVersion,              // u32: storage layout version (#790, #791)
 }
@@ -678,6 +680,63 @@ impl PredictionMarketContract {
         Ok(())
     }
 
+    // ── Category Registry Management (admin only, Issue #1016) ─────────────
+
+    pub fn add_category(env: Env, admin: Address, category: Category) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let mut categories = Self::get_categories(env.clone());
+        for c in categories.iter() {
+            if c == category {
+                return Ok(());
+            }
+        }
+        categories.push_back(category);
+        env.storage().instance().set(&DataKey::Categories, &categories);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn remove_category(env: Env, admin: Address, category: Category) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let categories = Self::get_categories(env.clone());
+        let mut remaining = Vec::new(&env);
+        for c in categories.iter() {
+            if c != category {
+                remaining.push_back(c);
+            }
+        }
+        env.storage().instance().set(&DataKey::Categories, &remaining);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn get_categories(env: Env) -> Vec<Category> {
+        if let Some(cats) = env.storage().instance().get(&DataKey::Categories) {
+            cats
+        } else {
+            let mut default_cats = Vec::new(&env);
+            default_cats.push_back(Category::Crypto);
+            default_cats.push_back(Category::Sports);
+            default_cats.push_back(Category::Politics);
+            default_cats.push_back(Category::Entertainment);
+            default_cats.push_back(Category::Science);
+            default_cats.push_back(Category::Other);
+            default_cats
+        }
+    }
+
+    pub fn is_category_allowed(env: Env, category: Category) -> bool {
+        let categories = Self::get_categories(env);
+        for c in categories.iter() {
+            if c == category {
+                return true;
+            }
+        }
+        false
+    }
+
     // ── Market Management ─────────────────────────────────────────────────
 
     pub fn create_market(
@@ -694,6 +753,9 @@ impl PredictionMarketContract {
         if question.len() == 0 || question.len() > MAX_QUESTION_LEN { return Err(MarketError::InvalidQuestion); }
         if duration_secs < MIN_MARKET_DURATION || duration_secs > MAX_MARKET_DURATION {
             return Err(MarketError::InvalidDuration);
+        }
+        if !Self::is_category_allowed(env.clone(), category.clone()) {
+            return Err(MarketError::InvalidCategory);
         }
         Self::check_rate(&env)?;
 

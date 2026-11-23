@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     MuxedAddress, String,
 };
 
@@ -33,6 +33,8 @@ pub enum TokenError {
     InsufficientAllowance = 8,
     InvalidExpiration     = 9,
     SupplyCapExceeded     = 10, // #785: mint would breach the configured cap
+    BalanceOverflow       = 11, // #771, #773: balance overflow on mint/transfer
+    Overflow              = 12, // #771, #773: arithmetic overflow on total supply
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -59,6 +61,36 @@ pub enum DataKey {
 pub struct AllowanceEntry {
     pub amount: i128,
     pub expiration_ledger: u32,
+}
+
+// ── Events (#774) ─────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["transfer"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferEvent {
+    #[topic]
+    pub from: Address,
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["mint"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MintEvent {
+    #[topic]
+    pub minter: Address,
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["burn"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BurnEvent {
+    #[topic]
+    pub from: Address,
+    pub amount: i128,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -171,20 +203,20 @@ impl IPredictTokenContract {
             return Err(TokenError::UnauthorizedMinter);
         }
 
+        let balance_key = DataKey::Balance(to.clone());
+        let balance: i128 = env.storage().persistent()
+            .get(&balance_key)
+            .unwrap_or(0);
+        let new_balance = balance.checked_add(amount).ok_or(TokenError::BalanceOverflow)?;
+
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        let new_supply = supply.checked_add(amount).ok_or(TokenError::InvalidAmount)?;
+        let new_supply = supply.checked_add(amount).ok_or(TokenError::BalanceOverflow)?;
 
         // #785: enforce supply cap when configured.
         let cap: i128 = env.storage().instance().get(&DataKey::SupplyCap).unwrap_or(0);
         if cap > 0 && new_supply > cap {
             return Err(TokenError::SupplyCapExceeded);
         }
-
-        let balance_key = DataKey::Balance(to.clone());
-        let balance: i128 = env.storage().persistent()
-            .get(&balance_key)
-            .unwrap_or(0);
-        let new_balance = balance.checked_add(amount).ok_or(TokenError::InvalidAmount)?;
 
         // Write balance first, then supply. Order matches SEP-41 convention.
         env.storage().persistent().set(&balance_key, &new_balance);
@@ -193,10 +225,12 @@ impl IPredictTokenContract {
 
         env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
 
-        env.events().publish(
-            (symbol_short!("mint"), minter, to),
+        MintEvent {
+            minter,
+            to,
             amount,
-        );
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -372,18 +406,27 @@ impl IPredictTokenContract {
 
         if from != &to_address {
             let to_balance: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
-            env.storage().persistent().set(&from_key, &(from_balance - amount));
+            let new_to_balance = to_balance
+                .checked_add(amount)
+                .unwrap_or_else(|| env.panic_with_error(TokenError::BalanceOverflow));
+            let new_from_balance = from_balance
+                .checked_sub(amount)
+                .unwrap_or_else(|| env.panic_with_error(TokenError::InsufficientBalance));
+
+            env.storage().persistent().set(&from_key, &new_from_balance);
             // #784: keep sender entry alive.
             env.storage().persistent().extend_ttl(&from_key, TTL_BALANCE_BUMP, TTL_BALANCE_HIGH);
-            env.storage().persistent().set(&to_key, &(to_balance + amount));
+            env.storage().persistent().set(&to_key, &new_to_balance);
             // #784: keep recipient entry alive.
             env.storage().persistent().extend_ttl(&to_key, TTL_BALANCE_BUMP, TTL_BALANCE_HIGH);
         }
 
-        env.events().publish(
-            (symbol_short!("transfer"), from.clone(), to_address),
+        TransferEvent {
+            from: from.clone(),
+            to: to_address,
             amount,
-        );
+        }
+        .publish(env);
     }
 
     /// Debit `amount` from `from`'s allowance to `spender`.
@@ -403,7 +446,10 @@ impl IPredictTokenContract {
             env.panic_with_error(TokenError::InsufficientAllowance);
         }
 
-        let new_amount = entry.amount - amount;
+        let new_amount = entry
+            .amount
+            .checked_sub(amount)
+            .unwrap_or_else(|| env.panic_with_error(TokenError::InsufficientAllowance));
         if new_amount == 0 {
             // Reclaim rent when allowance is fully consumed.
             env.storage().persistent().remove(&key);
@@ -431,14 +477,24 @@ impl IPredictTokenContract {
         if from_balance < amount {
             env.panic_with_error(TokenError::InsufficientBalance);
         }
-        env.storage().persistent().set(&key, &(from_balance - amount));
+        let new_balance = from_balance
+            .checked_sub(amount)
+            .unwrap_or_else(|| env.panic_with_error(TokenError::InsufficientBalance));
+        env.storage().persistent().set(&key, &new_balance);
         // #784: extend even after partial burn so the entry doesn't expire.
         env.storage().persistent().extend_ttl(&key, TTL_BALANCE_BUMP, TTL_BALANCE_HIGH);
 
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        let new_supply = supply
+            .checked_sub(amount)
+            .unwrap_or_else(|| env.panic_with_error(TokenError::InvalidAmount));
+        env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
 
-        env.events().publish((symbol_short!("burn"), from.clone()), amount);
+        BurnEvent {
+            from: from.clone(),
+            amount,
+        }
+        .publish(env);
     }
 }
 

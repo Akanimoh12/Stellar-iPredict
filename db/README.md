@@ -613,3 +613,7 @@ PostgreSQL provides a native extension, `pg_stat_statements`, that tracks query 
 
 Pick an open issue labelled `area:db`, branch off `implementation-drips`,
 PR back to `implementation-drips`.
+
+## See also
+
+- [Troubleshooting](../docs/TROUBLESHOOTING.md): migration and connection failures organised by error message.

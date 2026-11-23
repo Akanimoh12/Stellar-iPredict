@@ -83,6 +83,8 @@ This runs `npm run typecheck` and `npm test` for **all three Node services** —
 
 For the current host-based local workflow across infra, backend, indexer, frontend, and oracle, use [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
 
+New to the repo? Follow the step-by-step [Quickstart](docs/QUICKSTART.md), which ends with a running system and a check at each stage. If a step fails, see [Troubleshooting](docs/TROUBLESHOOTING.md), organised by the error message you see.
+
 ## Repo layout
 
 ```
@@ -122,6 +124,8 @@ npm run dev
 ```
 
 From the repository root, `npm run typecheck` and `npm test` run checks across all Node workspaces. Service scripts can still be run from their own directories.
+
+Clone to a running system in one pass: [docs/QUICKSTART.md](docs/QUICKSTART.md). Failing locally? [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) lists common errors and their fixes.
 
 The design reference for everything is
 [`docs/ORACLE_AND_BACKEND.md`](docs/ORACLE_AND_BACKEND.md).

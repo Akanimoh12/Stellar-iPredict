@@ -54,6 +54,13 @@ export default function BettingPanel({
   const [showShare, setShowShare] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = React.useRef(false);
+  // Set when the user has reviewed the bet summary and is deciding whether to sign.
+  const [confirming, setConfirming] = useState(false);
+
+  // Any change to the bet invalidates the summary the user reviewed.
+  useEffect(() => {
+    setConfirming(false);
+  }, [side, amountStr]);
 
   // Lock side if user already has a bet
   useEffect(() => {
@@ -111,6 +118,13 @@ export default function BettingPanel({
   const profitPercent =
     netAmount > 0 ? ((profit / netAmount) * 100).toFixed(0) : "0";
 
+  // Step 1: show the summary. Nothing is sent to the wallet yet.
+  const requestConfirm = () => {
+    if (!canSubmit || isBusy) return;
+    setConfirming(true);
+  };
+
+  // Step 2: the user confirmed the summary; this is the call that opens the wallet.
   const handleSubmit = async () => {
     if (!canSubmit || isSubmittingRef.current || loading) return;
     isSubmittingRef.current = true;
@@ -121,6 +135,7 @@ export default function BettingPanel({
     } finally {
       isSubmittingRef.current = false;
       setIsSubmitting(false);
+      setConfirming(false);
     }
   };
 
@@ -347,9 +362,68 @@ export default function BettingPanel({
       )}
 
       {/* Submit button */}
-      {!showShare ? (
+      {confirming && !showShare && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="bet-confirm-title"
+          className="space-y-3 px-4 py-4 rounded-xl bg-surface/80 border border-primary-600/40"
+        >
+          <p id="bet-confirm-title" className="text-sm font-semibold text-slate-100">
+            Confirm your bet
+          </p>
+          <dl className="space-y-1.5 text-sm">
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Side</dt>
+              <dd className={`font-medium ${side ? "text-accent-green" : "text-accent-red"}`}>
+                {side ? "YES" : "NO"}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Amount</dt>
+              <dd className="text-slate-200 font-medium">{amount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Platform fee ({TOTAL_FEE_BPS / 100}%)</dt>
+              <dd className="text-slate-400">{feeAmount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Staked after fee</dt>
+              <dd className="text-slate-300">{netAmount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Expected payout if you win</dt>
+              <dd className="text-accent-green font-medium">{payout.toFixed(2)} XLM</dd>
+            </div>
+          </dl>
+          <p className="text-[11px] leading-snug text-slate-600">
+            Your wallet will ask you to sign next. The network fee is about{" "}
+            {hasExistingBet ? "0.003 XLM" : "0.14 XLM on your first bet on this market"}.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={isBusy}
+              className="w-full btn-secondary py-2.5 text-sm disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!canSubmit}
+              className="w-full btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Confirm &amp; sign
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!showShare && !confirming ? (
         <button
-          onClick={handleSubmit}
+          onClick={requestConfirm}
           disabled={!canSubmit}
           className="w-full btn-primary py-3 text-base disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -363,7 +437,7 @@ export default function BettingPanel({
                   ? "Increase Position"
                   : "Place Bet"}
         </button>
-      ) : (
+      ) : showShare ? (
         <div className="space-y-3">
           <div className="text-center text-sm text-accent-green font-medium">
             Bet placed successfully!
@@ -386,7 +460,7 @@ export default function BettingPanel({
             Place Another Bet
           </button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

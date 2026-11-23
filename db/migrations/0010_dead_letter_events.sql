@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS dead_letter_events (id bigserial PRIMARY KEY, ledger_seq BIGINT NOT NULL, tx_hash CHAR(64) NOT NULL, raw_event JSONB NOT NULL, error_message TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW());

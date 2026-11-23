@@ -1,0 +1,41 @@
+{
+  "_comment": "Edit this file to post incident notices and manual overrides.",
+
+  "override": {
+    "_comment": "Set 'message' to show an operator notice at the top of the status page.",
+    "_comment2": "Set 'endsAt' (ISO 8601) to make the notice disappear automatically.",
+    "_comment3": "Delete 'message' or leave it empty to hide the override banner.",
+    "message": "",
+    "endsAt": ""
+  },
+
+  "incidents": [
+    {
+      "_comment": "Example incident — remove or replace this entry.",
+      "id": "2026-09-01-api-degradation",
+      "title": "API elevated error rates",
+      "severity": "partial",
+      "startedAt": "2026-09-01T14:00:00Z",
+      "resolvedAt": "2026-09-01T15:30:00Z",
+      "body": "The API returned elevated 5xx rates for approximately 90 minutes due to a database connection pool exhaustion. All requests are now completing successfully.",
+      "updates": [
+        {
+          "at": "2026-09-01T15:30:00Z",
+          "text": "Resolved. Root cause was connection pool size misconfiguration. Pool limit increased; monitoring in place."
+        },
+        {
+          "at": "2026-09-01T14:45:00Z",
+          "text": "Investigating. Error rate decreasing after config change deployed."
+        },
+        {
+          "at": "2026-09-01T14:10:00Z",
+          "text": "Identified root cause: database connection pool exhausted under load spike. Fix being deployed."
+        },
+        {
+          "at": "2026-09-01T14:00:00Z",
+          "text": "Monitoring alerts fired. Investigating elevated error rates on POST /api/markets and GET /api/markets."
+        }
+      ]
+    }
+  ]
+}

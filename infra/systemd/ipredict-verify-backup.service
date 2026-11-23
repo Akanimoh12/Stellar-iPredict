@@ -1,0 +1,27 @@
+[Unit]
+Description=iPredict automated backup restore verification
+Documentation=file:///opt/ipredict/infra/README.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Path to repository checkout on the host
+ExecStart=/bin/bash /opt/ipredict/infra/scripts/verify-backup.sh
+# Optional host environment configuration (webhook, backup directory, encryption key):
+#   /etc/ipredict/verify-backup.env
+EnvironmentFile=-/etc/ipredict/verify-backup.env
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ipredict/infra/backups /tmp
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

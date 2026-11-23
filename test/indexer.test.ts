@@ -1,0 +1,138 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { nativeToScVal } from "@stellar/stellar-sdk";
+import { describe, expect, it, vi } from "vitest";
+import { Indexer } from "../indexer/src/index.js";
+import { decodeEvent } from "../indexer/src/decode.js";
+import { recomputeMarketTotalsFromBets } from "../indexer/src/recomputeTotals.js";
+import { EVENT_TOPICS } from "../shared/src/index.js";
+import type { Queryable } from "../indexer/src/db.js";
+
+/**
+ * `indexer/src/index.ts` validates its environment and calls `process.exit(1)`
+ * at module load, so the variables have to be in place *before* the import is
+ * evaluated. `vi.hoisted` runs before hoisted imports, which plain statements
+ * at the top of the file do not.
+ */
+vi.hoisted(() => {
+  Object.assign(process.env, {
+    DATABASE_URL: "postgres://ipredict:ipredict@localhost:5432/ipredict_test",
+    REDIS_URL: "redis://localhost:6379",
+    SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+    NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
+    MARKET_CONTRACT_ID: "C".repeat(56),
+    TOKEN_CONTRACT_ID: "C".repeat(56),
+    REFERRAL_CONTRACT_ID: "C".repeat(56),
+    LEADERBOARD_CONTRACT_ID: "C".repeat(56),
+    START_LEDGER: "1",
+  });
+});
+
+function dbMock(rowsBySql: Record<string, unknown[]> = {}) {
+  const queries: Array<{ sql: string; params?: readonly unknown[] }> = [];
+  return {
+    queries,
+    async query<T = unknown>(sql: string, params?: readonly unknown[]) {
+      queries.push({ sql, params });
+      const key = Object.keys(rowsBySql).find(k => sql.includes(k));
+      return { rows: (key ? rowsBySql[key] : []) as T[], rowCount: 0 };
+    },
+    async end() {},
+  };
+}
+
+describe("indexer hardening", () => {
+  it("recomputes market totals from persisted bets", async () => {
+    const db = dbMock({ "SELECT COUNT": [{ count: "2" }], "SELECT id FROM updated": [{ id: "1" }] });
+    const result = await recomputeMarketTotalsFromBets(db as Queryable);
+    expect(result).toEqual({ checked: 2, corrected: 1 });
+    expect(db.queries[0].sql).toContain("SUM(CASE WHEN is_yes THEN net_amount");
+    expect(db.queries[0].sql).toContain("UPDATE markets");
+  });
+
+  it("dead-letters undecodable events and still checkpoints", async () => {
+    const db = dbMock();
+    const runtime = {
+      db,
+      getCheckpoint: vi.fn(async () => 10),
+      saveCheckpoint: vi.fn(async () => undefined),
+      fetchEvents: vi.fn(async () => ({ latestLedger: 11, events: [{ ledger: 11, txHash: "a".repeat(64) }] })),
+      decodeEvent: vi.fn(() => { throw new Error("bad xdr"); }),
+      writeEventToDb: vi.fn(async () => undefined),
+      sleep: vi.fn(async () => undefined),
+    };
+    const indexer = new Indexer(runtime as never);
+    await indexer.indexOnce();
+
+    expect(db.queries[0].sql).toContain("dead_letter_events");
+    expect(db.queries[0].params?.[3]).toBe("bad xdr");
+    expect(runtime.saveCheckpoint).toHaveBeenCalledWith(11);
+  });
+
+  it("flushes checkpoint and closes db/redis on shutdown", async () => {
+    const db = dbMock();
+    const redis = { del: vi.fn(), end: vi.fn(async () => undefined) };
+    const runtime = {
+      db: { ...db, end: vi.fn(async () => undefined) },
+      redis,
+      getCheckpoint: vi.fn(async () => 7),
+      saveCheckpoint: vi.fn(async () => undefined),
+      fetchEvents: vi.fn(async () => ({ latestLedger: 7, events: [] })),
+      decodeEvent: vi.fn(),
+      writeEventToDb: vi.fn(),
+      sleep: vi.fn(async () => undefined),
+    };
+    const indexer = new Indexer(runtime as never);
+    await indexer.flushAndClose();
+    expect(runtime.saveCheckpoint).toHaveBeenCalledWith(0);
+    expect(redis.end).toHaveBeenCalled();
+    expect(runtime.db.end).toHaveBeenCalled();
+  });
+});
+
+function rustFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return rustFiles(path);
+    return entry.name.endsWith(".rs") ? [path] : [];
+  });
+}
+
+function contractEventTopics(): string[][] {
+  return rustFiles(join(process.cwd(), "contracts")).flatMap((path) => {
+    const source = readFileSync(path, "utf8");
+    const declarations = source.matchAll(/#\[contractevent\(topics\s*=\s*\[([^\]]+)\]\)\]/g);
+    return Array.from(declarations, (declaration) =>
+      Array.from(declaration[1].matchAll(/"([^"]+)"/g), (topic) => topic[1])
+    );
+  });
+}
+
+describe("contract-to-indexer event compatibility", () => {
+  const declaredTopics = contractEventTopics();
+
+  it("finds topics declared by contract events", () => {
+    expect(declaredTopics.length).toBeGreaterThan(0);
+    expect(declaredTopics.every((topics) => topics.length > 0)).toBe(true);
+  });
+
+  it("decodes every topic declared by contract events", () => {
+    expect(declaredTopics.length).toBeGreaterThan(0);
+
+    for (const declaration of declaredTopics) {
+      const topics = declaration.map((topic) => nativeToScVal(topic, { type: "symbol" }));
+      const decoded = decodeEvent(topics, nativeToScVal({ marker: "compatible" }));
+
+      expect(decoded.type).toBe(declaration[0]);
+      expect(decoded.subtype).toBe(declaration.at(-1));
+    }
+  });
+
+  it("keeps shared oracle topics aligned with contract event declarations", () => {
+    const declared = new Set(declaredTopics.map((topics) => topics.join(".")));
+
+    for (const topic of Object.values(EVENT_TOPICS.oracle)) {
+      expect(declared.has(topic.join("."))).toBe(true);
+    }
+  });
+});

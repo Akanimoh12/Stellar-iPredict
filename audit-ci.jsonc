@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/IBM/audit-ci/main/schema.json",
+  "high": true,
+  "package-managers": ["npm"],
+  "allowlist": [
+    // Documented suppressions path for accepted risks:
+    // Suppressions require explicit documented justification, GHSA ID, and an expiry date.
+  ]
+}

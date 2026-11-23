@@ -111,6 +111,40 @@ describe("RPC proxy — read caching / collapsing", () => {
   });
 });
 
+describe("RPC proxy — rate limiting", () => {
+  /** Same-IP requests, so they all land in one rate-limit window. */
+  function makeReqFromIp(ip: string): NextRequest {
+    return new NextRequest("https://ipredict-stellar.vercel.app/api/rpc", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: ALLOWED,
+        "x-forwarded-for": ip,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestLedger" }),
+    });
+  }
+
+  it("blocks a single IP past the per-window budget and tells it when to retry", async () => {
+    mockUpstream({ sequence: 1 });
+    const ip = "203.0.113.77"; // unique to this case — limiter state is module-level
+
+    // 60 requests / 10s is the configured budget.
+    for (let i = 0; i < 60; i++) {
+      expect((await POST(makeReqFromIp(ip))).status).toBe(200);
+    }
+
+    const blocked = await POST(makeReqFromIp(ip));
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("x-ratelimit-limit")).toBe("60");
+    expect(blocked.headers.get("x-ratelimit-remaining")).toBe("0");
+    expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    // Budgets are per-IP: another client is unaffected.
+    expect((await POST(makeReqFromIp("203.0.113.78"))).status).toBe(200);
+  });
+});
+
 describe("RPC proxy — read/write routing", () => {
   it("routes reads to the PUBLIC rpc", async () => {
     const fetchMock = mockUpstream({ ok: true });

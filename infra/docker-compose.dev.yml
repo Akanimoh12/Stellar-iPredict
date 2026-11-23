@@ -1,0 +1,43 @@
+# Local development infrastructure: Postgres + Redis, plus an optional
+# end-to-end profile that runs the app services in containers.
+# During normal development the app services (api, indexer, oracle) run on the
+# host via `npm run dev`. See docker-compose.production.yml for the full stack.
+#
+# End-to-end test: `docker compose -f docker-compose.dev.yml up -d --wait`
+# brings up Postgres and Redis and waits until both report healthy. The e2e
+# harness then runs migrations and the scripted market lifecycle against them.
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: ipredict
+      POSTGRES_PASSWORD: ipredict
+      POSTGRES_DB: ipredict
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ipredict -d ipredict"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pgdata:
+  redisdata:

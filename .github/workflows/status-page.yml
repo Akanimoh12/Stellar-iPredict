@@ -1,0 +1,203 @@
+name: Status Page
+
+# ── Why this workflow exists ──────────────────────────────────────────────────
+#
+# The requirement from issue #584 is that the status page "remains available
+# during an outage of the main platform."  A page served by the infrastructure
+# it monitors goes down exactly when it is needed.
+#
+# This workflow solves that by separating *hosting* from *data*:
+#
+#   1. The status page (status-page/index.html + incidents.json) is deployed
+#      as a static site to Cloudflare Pages, GitHub Pages, or any CDN — hosted
+#      entirely outside the iPredict backend stack.
+#
+#   2. Every 5 minutes (and after every push to status-page/) this workflow
+#      polls GET /status on the live API and writes the result to
+#      status-page/snapshot.json, then deploys the updated site.
+#
+#   3. The page's JavaScript first tries the live endpoint directly from the
+#      browser.  If that fails (because the backend is down), it falls back to
+#      snapshot.json served from the CDN — the last known good state, with a
+#      visual "snapshot" warning.
+#
+# This means: even during a total API outage, a visitor sees a current-ish
+# status snapshot (<= 5 minutes stale) served from an independent host.
+#
+# ── Manual override ───────────────────────────────────────────────────────────
+#
+# Edit status-page/incidents.json and set override.message to post a banner
+# notice for incidents that automated checks cannot detect (e.g. "Scheduled
+# maintenance 02:00-04:00 UTC tonight").  Push the change and this workflow
+# deploys it immediately.
+#
+# ── Secrets required ─────────────────────────────────────────────────────────
+#
+#   STATUS_API_URL          Full URL of the live /status endpoint, e.g.
+#                           https://api.ipredict.app/status
+#                           Set as a repository secret (not an Actions variable)
+#                           so the URL is not printed in workflow logs.
+#
+#   CLOUDFLARE_API_TOKEN    CF API token with Pages:Edit permission.
+#   CLOUDFLARE_ACCOUNT_ID   CF account ID.
+#
+# Repository variable (Actions > Variables, not Secrets):
+#   CF_PAGES_PROJECT_NAME   Cloudflare Pages project name, e.g. ipredict-status.
+#                           Defaults to 'ipredict-status' if unset.
+#
+# For GitHub Pages instead of Cloudflare Pages, remove the deploy-cloudflare
+# job and uncomment the deploy-github-pages job at the bottom.
+#
+# ── Local smoke test ──────────────────────────────────────────────────────────
+#
+#   cd status-page
+#   curl -s "$STATUS_API_URL" -o snapshot.json   # write a real snapshot
+#   python3 -m http.server 8080                  # serve the directory
+#   open http://localhost:8080
+#
+on:
+  push:
+    branches: [main, implementation-drips]
+    paths:
+      - "status-page/**"
+      - ".github/workflows/status-page.yml"
+
+  # Poll every 5 minutes so snapshot.json is never more than 5 minutes stale.
+  # Even during a full backend outage the CDN keeps serving the last snapshot.
+  schedule:
+    - cron: "*/5 * * * *"
+
+  # Allow manually triggering a deploy (e.g. right after resolving an incident).
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to commit snapshot.json back to the branch
+  pages: write      # needed for the optional GitHub Pages deployment
+  id-token: write   # needed for OIDC-based GitHub Pages deployment
+
+concurrency:
+  # Only one deploy at a time; the newest run cancels any in-progress one so
+  # snapshot.json never falls more than one cycle behind.
+  group: status-page-deploy
+  cancel-in-progress: true
+
+jobs:
+  # ── 1. Fetch live status and write snapshot.json ────────────────────────────
+  update-snapshot:
+    name: Fetch /status and update snapshot
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        with:
+          fetch-depth: 1
+
+      - name: Fetch live /status endpoint
+        id: fetch
+        env:
+          STATUS_API_URL: ${{ secrets.STATUS_API_URL }}
+        run: |
+          set -eo pipefail
+
+          if [ -z "$STATUS_API_URL" ]; then
+            echo "::warning::STATUS_API_URL secret is not set; snapshot.json will reflect the placeholder."
+            exit 0
+          fi
+
+          # Attempt the live fetch with a 10s timeout and 2 retries.
+          # On success: write the merged payload to snapshot.json.
+          # On failure: leave the existing snapshot.json in place (stale is
+          #             better than blank during an outage).
+          HTTP_CODE=$(
+            curl -fsS \
+                 --max-time 10 \
+                 --retry 2 \
+                 --retry-delay 3 \
+                 -o /tmp/status_raw.json \
+                 -w "%{http_code}" \
+                 "$STATUS_API_URL"
+          ) || {
+            echo "::warning::Live /status fetch failed. Keeping existing snapshot."
+            exit 0
+          }
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::Live /status returned HTTP $HTTP_CODE. Keeping existing snapshot."
+            exit 0
+          fi
+
+          # Optionally fetch oracle resolution status and merge it into the
+          # snapshot so the page can show oracle health independently.
+          # Derive the URL by replacing /status with /api/markets/resolution-status.
+          ORACLE_URL="${STATUS_API_URL/\/status/\/api\/markets\/resolution-status}"
+          if curl -fsS --max-time 10 -o /tmp/oracle_raw.json "$ORACLE_URL" 2>/dev/null; then
+            jq --slurpfile oracle /tmp/oracle_raw.json \
+              '. + {oracleStatus: $oracle[0]}' \
+              /tmp/status_raw.json > status-page/snapshot.json
+          else
+            cp /tmp/status_raw.json status-page/snapshot.json
+          fi
+
+          echo "snapshot_updated=true" >> "$GITHUB_OUTPUT"
+          echo "Snapshot: $(jq -r .status status-page/snapshot.json) at $(jq -r .generatedAt status-page/snapshot.json)"
+
+      - name: Commit updated snapshot.json
+        if: steps.fetch.outputs.snapshot_updated == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add status-page/snapshot.json
+          # Only commit when the snapshot actually changed.
+          git diff --cached --quiet || \
+            git commit -m "chore(status): update snapshot [skip ci]"
+          git push
+
+  # ── 2. Deploy to Cloudflare Pages ──────────────────────────────────────────
+  #
+  # The status-page/ directory is deployed as a static site to Cloudflare Pages
+  # which is entirely independent of the iPredict backend infrastructure.
+  # Cloudflare's global CDN ensures the page stays up even during a complete
+  # backend outage.
+  deploy-cloudflare:
+    name: Deploy to Cloudflare Pages
+    needs: update-snapshot
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with updated snapshot)
+        uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72 # v4.1.7
+        with:
+          # Pull the commit written by update-snapshot so the new snapshot is
+          # included in this deploy.
+          ref: ${{ github.ref }}
+
+      - name: Deploy status-page/ to Cloudflare Pages
+        uses: cloudflare/pages-action@f0a1cd58cd66095dee69bfa18fa5efd1dde93bca # v1.5.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: ${{ vars.CF_PAGES_PROJECT_NAME || 'ipredict-status' }}
+          directory: status-page
+          # Enables Cloudflare to post a preview URL comment on PRs.
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2-alt. Deploy to GitHub Pages ──────────────────────────────────────────
+  # Uncomment this job and remove deploy-cloudflare if you prefer GitHub Pages.
+  # Also set permissions above: pages: write, id-token: write.
+  #
+  # deploy-github-pages:
+  #   name: Deploy to GitHub Pages
+  #   needs: update-snapshot
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: github-pages
+  #     url: ${{ steps.deployment.outputs.page_url }}
+  #   steps:
+  #     - uses: actions/checkout@3a9c3cf7b3723bb0b3fadc9ab5e21a1fb78f5b72
+  #       with: { ref: "${{ github.ref }}" }
+  #     - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+  #     - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+  #       with: { path: status-page }
+  #     - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+  #       id: deployment

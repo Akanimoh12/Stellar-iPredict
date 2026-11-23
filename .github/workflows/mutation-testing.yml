@@ -1,0 +1,86 @@
+name: Mutation testing (scheduled)
+
+# Nightly mutation run for the oracle's critical consensus and settlement
+# modules (threshold.ts, bond-reconciliation.ts). Deliberately not triggered on
+# pull requests: a full run takes several minutes and only measures test quality.
+
+on:
+  schedule:
+    - cron: '30 3 * * *'  # 03:30 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-testing
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    name: Oracle mutation score (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ipredict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build @ipredict/shared
+        run: npm run build --workspace=@ipredict/shared
+
+      - name: Remove committed mutation report
+        # The runner writes oracle/reports/ from scratch. Deleting the committed
+        # copy first means a crashed run cannot publish a stale score.
+        working-directory: oracle
+        run: rm -f reports/mutation-report.json reports/mutation-report.md
+
+      - name: Run mutation testing
+        # --bail exits non-zero when the score is below the 90% target, so a
+        # regression turns the nightly run red. The report is uploaded either way.
+        working-directory: oracle
+        env:
+          DATABASE_URL: postgres://postgres:postgrespassword@localhost:5432/ipredict_test
+        run: npm run test:mutation -- --bail
+
+      - name: Publish score to job summary
+        if: always()
+        working-directory: oracle
+        run: |
+          if [ -f reports/mutation-report.json ]; then
+            node -e 'const r = require("./reports/mutation-report.json"); console.log("### Oracle mutation score\n\n| Score | Killed | Survived | Total | Generated |\n|---|---|---|---|---|\n| " + r.score + "% | " + r.killed + " | " + r.survived + " | " + r.total + " | " + r.generatedAt + " |")' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Oracle mutation score: no report produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: oracle-mutation-report
+          path: oracle/reports/
+          retention-days: 30

@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": [
+      "node"
+    ],
+    "typeRoots": [
+      "./frontend/node_modules/@types"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "vitest": [
+        "frontend/node_modules/vitest/dist/index.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "backend/src/**/*.ts",
+    "indexer/src/**/*.ts",
+    "test/**/*.ts"
+  ]
+}

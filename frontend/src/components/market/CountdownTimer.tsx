@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { FiClock } from "react-icons/fi";
 
 interface CountdownTimerProps {
@@ -21,48 +21,41 @@ function formatRemaining(seconds: number): string {
   return `${s}s`;
 }
 
+/** Seconds left until `endTime` (unix seconds), measured against the wall clock. */
+function secondsUntil(endTime: number, nowMs: number): number {
+  return Math.max(0, endTime - Math.floor(nowMs / 1000));
+}
+
+/**
+ * Countdown that is derived from `endTime` on every tick, never from a count of
+ * ticks. Browsers throttle timers in background tabs (often to once a minute),
+ * so an accumulated countdown would drift or freeze. Each tick re-reads the wall
+ * clock, and the tick also fires immediately when the tab becomes visible again.
+ */
 export default function CountdownTimer({ endTime }: CountdownTimerProps) {
-  const [remaining, setRemaining] = useState(() => {
-    return Math.max(0, endTime - Math.floor(Date.now() / 1000));
-  });
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const remaining = secondsUntil(endTime, nowMs);
 
-  useEffect(() => {
-    const tick = () => {
-      const diff = endTime - Math.floor(Date.now() / 1000);
-      setRemaining(Math.max(0, diff));
-    };
-
-    tick();
-
-    // Determine interval: 1s when < 1 hour, 60s otherwise
-    const diff = endTime - Math.floor(Date.now() / 1000);
-    const interval = diff <= 3600 ? 1000 : 60000;
-
-    intervalRef.current = setInterval(tick, interval);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [endTime]);
-
-  // Switch to 1s interval when crossing the 1-hour threshold
-  useEffect(() => {
-    if (remaining <= 3600 && remaining > 0) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = setInterval(() => {
-        const diff = endTime - Math.floor(Date.now() / 1000);
-        setRemaining(Math.max(0, diff));
-      }, 1000);
-
-      return () => {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-      };
-    }
-  }, [remaining <= 3600, endTime]); // eslint-disable-line react-hooks/exhaustive-deps
-
+  // Tick every second in the final hour, every minute otherwise. The effect
+  // depends on the two derived flags, so the timer is re-created only when the
+  // countdown crosses the one-hour threshold or ends.
   const isUrgent = remaining > 0 && remaining <= 3600;
   const isEnded = remaining <= 0;
+
+  useEffect(() => {
+    if (isEnded) return;
+
+    const sync = () => setNowMs(Date.now());
+    sync();
+
+    const id = setInterval(sync, isUrgent ? 1000 : 60_000);
+    document.addEventListener("visibilitychange", sync);
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [endTime, isUrgent, isEnded]);
 
   return (
     <span

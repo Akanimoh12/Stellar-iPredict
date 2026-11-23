@@ -1,0 +1,9 @@
+{
+  "_note": "This file is written by the GitHub Actions status-page workflow every 5 minutes.",
+  "_note2": "It is the fallback snapshot shown when the live /status endpoint is unreachable.",
+  "status": "unknown",
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "api": { "ok": false, "db": { "ok": false }, "redis": { "ok": false } },
+  "indexer": { "ok": false, "lastIndexedLedger": null, "lastEventAt": null, "lagSeconds": null },
+  "lastResolvedMarket": null
+}

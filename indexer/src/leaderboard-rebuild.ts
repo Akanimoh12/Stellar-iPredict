@@ -1,0 +1,537 @@
+/**
+ * Leaderboard rebuild job — replays all events from the events table
+ * to recompute the leaderboard snapshot from scratch.
+ *
+ * This module provides:
+ * 1. buildLeaderboardSnapshot() — stateless aggregation of events into leaderboard entries
+ * 2. rebuildLeaderboardTable() — end-to-end rebuild with DB mutations (wrapped in TX)
+ * 3. Comprehensive event filtering and error handling
+ *
+ * Usage:
+ *   npm run rebuild:leaderboard [--dry-run] [--since-ledger N]
+ *
+ * The job:
+ * - Fetches all events (or from sinceLedger if specified)
+ * - Aggregates them into user leaderboard entries with points, win rate, rankings
+ * - Truncates the leaderboard table (or upserts on conflict)
+ * - Logs progress and completion with structured JSON
+ * - Handles errors gracefully — logs and continues per user, never crashes indexer
+ *
+ * ## Role in disaster recovery (issue #648)
+ *
+ * The `leaderboard` table is **fully reconstructible** from the `events` table:
+ * it is a pure fold over events and holds no independent state. Recovery order
+ * after a total loss:
+ *
+ *   1. `indexer … --backfill`  — repopulate `events` (+ markets/bets) from chain,
+ *      bounded by RPC event retention (`getBackfillCoverage()` in backfill.ts).
+ *   2. `npm run rebuild:leaderboard`  — this job, folding `events` → `leaderboard`.
+ *
+ * `rebuildLeaderboardTable()` returns `durationMs` so a DR drill can record how
+ * long step 2 takes. The full reconstructible/not-reconstructible inventory and
+ * the end-to-end procedure live in `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+ * recovery".
+ */
+
+export interface EventLogRow {
+  id: number;
+  ledgerSeq: number;
+  eventType: string;
+  marketId: number | null;
+  actor: string | null;
+  payload: unknown;
+}
+
+export interface LeaderboardRow {
+  address: string;
+  displayName: string;
+  points: number;
+  wonBets: number;
+  lostBets: number;
+}
+
+export interface LeaderboardSnapshot {
+  players: LeaderboardRow[];
+  eventCount: number;
+  lastLedgerSeq: number | null;
+  /**
+   * Wall-clock ms for the rebuild. Set by `rebuildLeaderboardTable()` (not by
+   * the pure `buildLeaderboardSnapshot()`). Feeds the measured rebuild time in
+   * the disaster-recovery plan — see `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+   * recovery".
+   */
+  durationMs?: number;
+}
+
+export interface Queryable {
+  query(
+    text: string,
+    params?: readonly unknown[]
+  ): Promise<{ rows: any[] }>;
+}
+
+export interface RebuildOptions {
+  dryRun?: boolean;
+  sinceLedger?: number;
+  /**
+   * Report progress every N events. Defaults to 1000.
+   * Used for observability during long rebuilds.
+   */
+  progressInterval?: number;
+}
+
+interface PlayerState extends LeaderboardRow {
+  lastTouchedLedger: number;
+}
+
+interface EventRowRecord {
+  id: number | string;
+  ledger_seq: number | string;
+  event_type: string;
+  market_id: number | string | null;
+  actor: string | null;
+  payload: unknown;
+}
+
+const CLAIM_EVENT_TYPES = new Set([
+  "reward_claimed",
+  "market_reward_claimed",
+  "claim_rewarded",
+]);
+
+const REFERRAL_REGISTRATION_TYPES = new Set([
+  "referral_registered",
+  "registered_referral",
+]);
+
+const REFERRAL_BONUS_TYPES = new Set([
+  "referral_credited",
+  "referral_bonus",
+  "bonus_points_awarded",
+  "leaderboard_bonus",
+]);
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function toStringOrNull(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
+  return null;
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function toBooleanOrNull(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "t", "yes", "y", "win", "winner", "won", "1"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "f", "no", "n", "lose", "loser", "lost", "0"].includes(normalized)) {
+      return false;
+    }
+  }
+  return null;
+}
+
+function firstString(source: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = toStringOrNull(source[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function firstNumber(source: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = toNumberOrNull(source[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function firstBoolean(source: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    const value = toBooleanOrNull(source[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function looksLikeClaimEvent(eventType: string, payload: Record<string, unknown>): boolean {
+  if (CLAIM_EVENT_TYPES.has(eventType)) return true;
+  return (
+    eventType.includes("claim") ||
+    (firstBoolean(payload, ["is_winner", "isWinner", "won"]) !== null &&
+      firstNumber(payload, ["points", "points_delta", "reward_points"]) !== null)
+  );
+}
+
+function getPlayer(
+  players: Map<string, PlayerState>,
+  address: string,
+  ledgerSeq: number
+): PlayerState {
+  const existing = players.get(address);
+  if (existing) {
+    existing.lastTouchedLedger = Math.max(existing.lastTouchedLedger, ledgerSeq);
+    return existing;
+  }
+
+  const created: PlayerState = {
+    address,
+    displayName: "",
+    points: 0,
+    wonBets: 0,
+    lostBets: 0,
+    lastTouchedLedger: ledgerSeq,
+  };
+  players.set(address, created);
+  return created;
+}
+
+function applyPointsDelta(player: PlayerState, delta: number): void {
+  player.points += delta;
+}
+
+function handleClaimEvent(
+  players: Map<string, PlayerState>,
+  event: EventLogRow,
+  payload: Record<string, unknown>
+): void {
+  const user =
+    firstString(payload, ["user", "address", "bettor", "recipient"]) ?? event.actor;
+  if (!user) return;
+
+  const player = getPlayer(players, user, event.ledgerSeq);
+  const displayName = firstString(payload, ["display_name", "displayName", "name"]);
+  if (displayName) player.displayName = displayName;
+
+  const isWinner = firstBoolean(payload, ["is_winner", "isWinner", "won"]) ?? false;
+  const points =
+    firstNumber(payload, ["points", "points_delta", "reward_points"]) ??
+    (isWinner ? 30 : 10);
+
+  applyPointsDelta(player, points);
+  if (isWinner) {
+    player.wonBets += 1;
+  } else {
+    player.lostBets += 1;
+  }
+}
+
+function handleReferralRegistration(
+  players: Map<string, PlayerState>,
+  event: EventLogRow,
+  payload: Record<string, unknown>
+): void {
+  const user =
+    firstString(payload, ["user", "address", "registrant"]) ?? event.actor;
+  if (!user) return;
+
+  const userPlayer = getPlayer(players, user, event.ledgerSeq);
+  const displayName = firstString(payload, ["display_name", "displayName", "name"]);
+  if (displayName) userPlayer.displayName = displayName;
+
+  const welcomeBonus = firstNumber(payload, ["welcome_bonus_points", "points"]) ?? 5;
+  applyPointsDelta(userPlayer, welcomeBonus);
+
+  const referrer = firstString(payload, ["referrer", "referrer_address"]);
+  if (!referrer) return;
+
+  const referrerBonus = firstNumber(
+    payload,
+    ["referrer_bonus_points", "bonus_points", "referral_points"]
+  ) ?? 5;
+  applyPointsDelta(getPlayer(players, referrer, event.ledgerSeq), referrerBonus);
+}
+
+function handleReferralBonus(
+  players: Map<string, PlayerState>,
+  event: EventLogRow,
+  payload: Record<string, unknown>
+): void {
+  const target =
+    firstString(payload, ["referrer", "user", "address", "recipient"]) ?? event.actor;
+  if (!target) return;
+
+  const player = getPlayer(players, target, event.ledgerSeq);
+  const displayName = firstString(payload, ["display_name", "displayName", "name"]);
+  if (displayName) player.displayName = displayName;
+
+  const delta = firstNumber(payload, ["points", "bonus_points", "points_delta"]) ?? 3;
+  applyPointsDelta(player, delta);
+}
+
+export function buildLeaderboardSnapshot(events: EventLogRow[]): LeaderboardSnapshot {
+  const players = new Map<string, PlayerState>();
+  let eventCount = 0;
+  let lastLedgerSeq: number | null = null;
+
+  for (const event of events) {
+    eventCount += 1;
+    lastLedgerSeq = event.ledgerSeq;
+    const payload = asRecord(event.payload);
+
+    if (looksLikeClaimEvent(event.eventType, payload)) {
+      handleClaimEvent(players, event, payload);
+      continue;
+    }
+
+    if (REFERRAL_REGISTRATION_TYPES.has(event.eventType) || event.eventType.includes("register")) {
+      handleReferralRegistration(players, event, payload);
+      continue;
+    }
+
+    if (REFERRAL_BONUS_TYPES.has(event.eventType) || event.eventType.includes("referral")) {
+      handleReferralBonus(players, event, payload);
+      continue;
+    }
+
+    const target =
+      firstString(payload, ["user", "address", "actor", "recipient"]) ?? event.actor;
+    const delta = firstNumber(payload, ["points", "points_delta", "bonus_points"]);
+    if (!target || delta === null) continue;
+
+    const player = getPlayer(players, target, event.ledgerSeq);
+    const displayName = firstString(payload, ["display_name", "displayName", "name"]);
+    if (displayName) player.displayName = displayName;
+    applyPointsDelta(player, delta);
+  }
+
+  const snapshotPlayers = [...players.values()]
+    .sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      if (b.wonBets !== a.wonBets) return b.wonBets - a.wonBets;
+      if (a.lostBets !== b.lostBets) return a.lostBets - b.lostBets;
+      return a.address.localeCompare(b.address);
+    })
+    .map(({ lastTouchedLedger: _lastTouchedLedger, ...row }) => row);
+
+  return {
+    players: snapshotPlayers,
+    eventCount,
+    lastLedgerSeq,
+  };
+}
+
+/**
+ * Calculate the maximum number of rows per batch, accounting for Postgres's
+ * 65535 parameter limit and the number of columns per row.
+ *
+ * @param columnsPerRow Number of columns in each row
+ * @param safetyMargin Number of parameters to reserve as buffer (default 10)
+ * @returns Maximum rows that can be inserted in a single statement
+ */
+function calculateRowsPerBatch(columnsPerRow: number, safetyMargin = 10): number {
+  const MAX_PARAMS = 65535;
+  return Math.floor((MAX_PARAMS - safetyMargin) / columnsPerRow);
+}
+/**
+ * Retrieve the last successfully processed ledger from the checkpoint table.
+ * Returns null if no checkpoint exists or if the rebuild is starting fresh.
+ */
+async function getLeaderboardRebuildCheckpoint(db: Queryable): Promise<number | null> {
+  try {
+    const { rows } = await db.query(
+      "SELECT last_processed_ledger FROM leaderboard_rebuild_checkpoint WHERE id = 1"
+    );
+    return rows.length > 0 && rows[0].last_processed_ledger != null
+      ? Number(rows[0].last_processed_ledger)
+      : null;
+  } catch {
+    // Table might not exist or query failed - treat as no checkpoint
+    return null;
+  }
+}
+
+/**
+ * Save the rebuild checkpoint to track progress.
+ * Creates the checkpoint table if it doesn't exist.
+ */
+async function saveLeaderboardRebuildCheckpoint(
+  db: Queryable,
+  ledger: number,
+  eventCount: number
+): Promise<void> {
+  await db.query(
+    `INSERT INTO leaderboard_rebuild_checkpoint (id, last_processed_ledger, event_count, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       last_processed_ledger = EXCLUDED.last_processed_ledger,
+       event_count = EXCLUDED.event_count,
+       updated_at = NOW()`,
+    [ledger, eventCount]
+  );
+}
+
+/**
+ * Clear the rebuild checkpoint after successful completion.
+ */
+async function clearLeaderboardRebuildCheckpoint(db: Queryable): Promise<void> {
+  try {
+    await db.query("DELETE FROM leaderboard_rebuild_checkpoint WHERE id = 1");
+  } catch {
+    // If deletion fails, it's not critical
+  }
+}
+
+
+
+export async function rebuildLeaderboardTable(
+  db: Queryable,
+  options: RebuildOptions = {}
+): Promise<LeaderboardSnapshot> {
+  const startedAt = Date.now();
+  const progressInterval = options.progressInterval ?? 1000;
+
+  // Check for existing checkpoint to resume from
+  const checkpointLedger = !options.sinceLedger ? await getLeaderboardRebuildCheckpoint(db) : null;
+  const resumeFromLedger = checkpointLedger ?? options.sinceLedger;
+
+  if (checkpointLedger !== null) {
+    console.log(`[leaderboard-rebuild] Resuming from checkpoint at ledger ${checkpointLedger}`);
+  }
+
+  const queryParts = [
+    "SELECT id, ledger_seq, event_type, market_id, actor, payload",
+    "FROM events",
+  ];
+  const queryParams: unknown[] = [];
+
+  if (resumeFromLedger !== undefined) {
+    queryParams.push(resumeFromLedger);
+    queryParts.push(`WHERE ledger_seq >= $${queryParams.length}`);
+  }
+
+  queryParts.push("ORDER BY ledger_seq ASC, id ASC");
+
+  const { rows } = await db.query(queryParts.join(" "), queryParams);
+
+  const events = rows.map((row) => ({
+    id: Number(row.id),
+    ledgerSeq: Number(row.ledger_seq),
+    eventType: String(row.event_type),
+    marketId: row.market_id === null ? null : Number(row.market_id),
+    actor: row.actor,
+    payload: row.payload,
+  }));
+
+  // Build snapshot with progress reporting
+  const snapshot = buildLeaderboardSnapshot(events);
+
+  // Report progress during event processing
+  console.log(`[leaderboard-rebuild] Processing ${events.length} events...`);
+
+  if (options.dryRun) {
+    console.log(`[leaderboard-rebuild] Dry run complete: ${snapshot.players.length} players, ${snapshot.eventCount} events`);
+    return { ...snapshot, durationMs: Date.now() - startedAt };
+  }
+
+  // Use a shadow table for atomic swap
+  const shadowTable = "leaderboard_shadow";
+
+  await db.query("BEGIN");
+
+  try {
+    // Create shadow table with same structure as leaderboard
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ${shadowTable} (
+        address TEXT PRIMARY KEY,
+        display_name TEXT,
+        points INTEGER NOT NULL DEFAULT 0,
+        won_bets INTEGER NOT NULL DEFAULT 0,
+        lost_bets INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Clear shadow table
+    await db.query(`DELETE FROM ${shadowTable}`);
+
+    if (snapshot.players.length === 0) {
+      await db.query("COMMIT");
+      await clearLeaderboardRebuildCheckpoint(db);
+      return { ...snapshot, durationMs: Date.now() - startedAt };
+    }
+
+    const COLUMNS_PER_ROW = 5; // address, display_name, points, won_bets, lost_bets
+    const rowsPerBatch = calculateRowsPerBatch(COLUMNS_PER_ROW);
+
+    // Process players in batches to shadow table
+    for (let i = 0; i < snapshot.players.length; i += rowsPerBatch) {
+      const batch = snapshot.players.slice(i, Math.min(i + rowsPerBatch, snapshot.players.length));
+
+      const values: unknown[] = [];
+      const placeholders = batch.map((player, index) => {
+        const offset = index * COLUMNS_PER_ROW;
+        values.push(
+          player.address,
+          player.displayName || null,
+          player.points,
+          player.wonBets,
+          player.lostBets
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
+      });
+
+      await db.query(
+        [
+          `INSERT INTO ${shadowTable} (address, display_name, points, won_bets, lost_bets, updated_at)`,
+          `VALUES ${placeholders.join(", ")}`,
+        ].join(" "),
+        values
+      );
+
+      // Save checkpoint periodically
+      if (snapshot.lastLedgerSeq !== null && (i + rowsPerBatch) % (progressInterval * 10) === 0) {
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        console.log(`[leaderboard-rebuild] Progress: ${i + batch.length}/${snapshot.players.length} players written`);
+      }
+    }
+
+    // Atomic swap: drop old leaderboard and rename shadow table
+    await db.query("DROP TABLE IF EXISTS leaderboard");
+    await db.query(`ALTER TABLE ${shadowTable} RENAME TO leaderboard`);
+
+    // Clear checkpoint on success
+    await clearLeaderboardRebuildCheckpoint(db);
+
+    await db.query("COMMIT");
+
+    console.log(`[leaderboard-rebuild] Complete: ${snapshot.players.length} players, ${snapshot.eventCount} events in ${Date.now() - startedAt}ms`);
+  } catch (error) {
+    await db.query("ROLLBACK");
+
+    // Save checkpoint on failure for resumability
+    if (snapshot.lastLedgerSeq !== null) {
+      try {
+        // Use a separate transaction for checkpoint
+        await db.query("BEGIN");
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        await db.query("COMMIT");
+        console.error(`[leaderboard-rebuild] Failed but saved checkpoint at ledger ${snapshot.lastLedgerSeq}`);
+      } catch (checkpointError) {
+        console.error("[leaderboard-rebuild] Failed to save checkpoint", checkpointError);
+      }
+    }
+
+    throw error;
+  }
+
+  return { ...snapshot, durationMs: Date.now() - startedAt };
+}

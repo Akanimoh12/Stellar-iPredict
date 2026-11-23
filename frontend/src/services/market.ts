@@ -50,7 +50,7 @@ function i128Val(n: bigint): xdr.ScVal {
 }
 
 function boolVal(b: boolean): xdr.ScVal {
-  return nativeToScVal(b, { type: "bool" });
+  return nativeToScVal(b);
 }
 
 function stringVal(s: string): xdr.ScVal {
@@ -156,57 +156,75 @@ async function batchAll<T>(
 // ── Read functions ────────────────────────────────────────────────────────────
 
 export async function getMarket(marketId: number): Promise<Market | null> {
-  const cached = cache.get<Market>(CACHE_MARKET(marketId));
-  if (cached) return cached;
-
   try {
-    const raw = await simulateTransaction<RawMarket>(
-      getSimulationSource(),
-      MARKET_CONTRACT_ID,
-      "get_market",
-      [u64Val(marketId)]
+    return await cache.getOrSet(
+      CACHE_MARKET(marketId),
+      async () => {
+        const raw = await simulateTransaction<RawMarket>(
+          getSimulationSource(),
+          MARKET_CONTRACT_ID,
+          "get_market",
+          [u64Val(marketId)]
+        );
+        return parseMarket(raw);
+      },
+      MARKET_TTL
     );
-    const market = parseMarket(raw);
-    cache.set(CACHE_MARKET(marketId), market, MARKET_TTL);
-    return market;
   } catch {
     return null;
   }
 }
 
-export async function getMarkets(): Promise<Market[]> {
+export async function getMarkets(signal?: AbortSignal): Promise<Market[]> {
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DOMException("The market request was aborted", "AbortError");
+    }
+  };
+
+  throwIfAborted();
   const cached = cache.get<Market[]>(CACHE_MARKETS);
-  if (cached) return cached;
+  if (cached) {
+    throwIfAborted();
+    return cached;
+  }
 
   // Wrap count fetch in its own try/catch so a bad RPC doesn't kill everything
   let total = 0;
   try {
+    throwIfAborted();
     const count = await simulateTransaction<number | bigint>(
       getSimulationSource(),
       MARKET_CONTRACT_ID,
       "get_market_count",
       []
     );
+    throwIfAborted();
     total = Number(count);
   } catch {
+    throwIfAborted();
     // RPC unavailable or contract not deployed — return empty gracefully
     return [];
   }
 
+  throwIfAborted();
   if (total === 0) return [];
 
   const tasks = Array.from({ length: total }, (_, i) => {
     const id = i + 1;
     return async () => {
       try {
+        throwIfAborted();
         const raw = await simulateTransaction<RawMarket>(
           getSimulationSource(),
           MARKET_CONTRACT_ID,
           "get_market",
           [u64Val(id)]
         );
+        throwIfAborted();
         return parseMarket(raw);
       } catch {
+        throwIfAborted();
         return null;
       }
     };
@@ -214,6 +232,7 @@ export async function getMarkets(): Promise<Market[]> {
 
   // Concurrency 15 so a typical board (≤15 markets) loads in one parallel wave.
   const results = await batchAll(tasks, 15);
+  throwIfAborted();
   const markets = results.filter((m): m is Market => m !== null);
 
   for (const m of markets) {
@@ -227,60 +246,60 @@ export async function getBet(
   marketId: number,
   userAddress: string
 ): Promise<Bet | null> {
-  const cacheKey = CACHE_BET(marketId, userAddress);
-  const cached = cache.get<Bet>(cacheKey);
-  if (cached) return cached;
-
   try {
-    const raw = await simulateTransaction<RawBet>(
-      getSimulationSource(),
-      MARKET_CONTRACT_ID,
-      "get_bet",
-      [u64Val(marketId), addressVal(userAddress)]
+    return await cache.getOrSet(
+      CACHE_BET(marketId, userAddress),
+      async () => {
+        const raw = await simulateTransaction<RawBet>(
+          getSimulationSource(),
+          MARKET_CONTRACT_ID,
+          "get_bet",
+          [u64Val(marketId), addressVal(userAddress)]
+        );
+        return parseBet(raw);
+      },
+      BET_TTL
     );
-    const bet = parseBet(raw);
-    cache.set(cacheKey, bet, BET_TTL);
-    return bet;
   } catch {
     return null;
   }
 }
 
 export async function getMarketBettors(marketId: number): Promise<string[]> {
-  const cacheKey = CACHE_BETTORS(marketId);
-  const cached = cache.get<string[]>(cacheKey);
-  if (cached) return cached;
-
   try {
-    const raw = await simulateTransaction<string[]>(
-      getSimulationSource(),
-      MARKET_CONTRACT_ID,
-      "get_market_bettors",
-      [u64Val(marketId)]
+    return await cache.getOrSet(
+      CACHE_BETTORS(marketId),
+      () =>
+        simulateTransaction<string[]>(
+          getSimulationSource(),
+          MARKET_CONTRACT_ID,
+          "get_market_bettors",
+          [u64Val(marketId)]
+        ),
+      MARKET_TTL
     );
-    cache.set(cacheKey, raw, MARKET_TTL);
-    return raw;
   } catch {
     return [];
   }
 }
 
 export async function getAccumulatedFees(): Promise<number> {
-  const cached = cache.get<number>(CACHE_FEES);
-  // Explicit null/undefined check — 0 is a valid cached value
-  if (cached !== null && cached !== undefined) return cached;
-
+  // getOrSet caches every result, including 0, so we don't re-fetch a legitimate
+  // zero on every call the way a truthiness check on `get()` would.
   try {
-    const raw = await simulateTransaction<number | bigint>(
-      getSimulationSource(),
-      MARKET_CONTRACT_ID,
-      "get_accumulated_fees",
-      []
+    return await cache.getOrSet(
+      CACHE_FEES,
+      async () => {
+        const raw = await simulateTransaction<number | bigint>(
+          getSimulationSource(),
+          MARKET_CONTRACT_ID,
+          "get_accumulated_fees",
+          []
+        );
+        return stroopsToXlm(BigInt(raw));
+      },
+      MARKET_TTL
     );
-    const fees = stroopsToXlm(BigInt(raw));
-    // Always set cache, including 0, so we don't re-fetch unnecessarily
-    cache.set(CACHE_FEES, fees, MARKET_TTL);
-    return fees;
   } catch {
     return 0;
   }

@@ -1,0 +1,23 @@
+{
+  "data": {
+    "articles": [
+      {
+        "id": "reuters-art-1",
+        "title": "Candidate A officially declared winner of presidential race",
+        "description": "Electoral commission confirms Candidate A victory in nationwide vote.",
+        "publishedAt": "2024-11-06T12:00:00Z",
+        "content": "Official certified results demonstrate Candidate A secures required electors."
+      },
+      {
+        "id": "reuters-art-2",
+        "title": "World leaders congratulate Candidate A on election triumph",
+        "description": "Diplomatic statements follow official results confirmation.",
+        "publishedAt": "2024-11-06T14:00:00Z",
+        "content": "International community acknowledges Candidate A winning the presidency."
+      }
+    ]
+  },
+  "meta": {
+    "total": 2
+  }
+}

@@ -1,0 +1,281 @@
+import { Pool, types } from "pg";
+import type { BetRow } from "./types.js";
+import type { Queryable } from "./markets.js";
+
+// Ensure the pg driver returns NUMERIC as a string rather than parsing it as a lossy JS number
+types.setTypeParser(types.builtins.NUMERIC, (val: string) => val);
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** A single bet placed by a user on a market (in-memory store shape). */
+export interface Bet {
+  address: string;
+  amount: number | string;
+  isYes: boolean;
+  claimed: boolean;
+}
+
+/** Paginated response from getBetsByMarket (in-memory) or getBetsByMarketFromDb. */
+export interface PaginatedBets {
+  bets: BetRow[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+export type BetAnomalyReviewOutcome = "confirmed" | "false_positive" | "inconclusive";
+
+export interface BetAnomalyAlert {
+  market_id: string;
+  window_start: Date;
+  bettor_count: number;
+  recent_net_amount: string;
+  same_side_share: string;
+  reviewed_at: Date | null;
+  review_outcome: BetAnomalyReviewOutcome | null;
+  review_note: string | null;
+}
+
+export interface BetAnomalyReviewMetrics {
+  flagged: number;
+  reviewed: number;
+  falsePositives: number;
+  falsePositiveRate: number | null;
+}
+
+// Re-export for backwards compatibility
+export type { BetRow };
+
+// ── Module-private in-memory store (used by tests) ────────────────────────────
+
+const store = new Map<number, Bet[]>();
+
+/** In-memory paginated bets — used by unit tests and the stats aggregator. */
+export interface InMemoryPaginatedBets {
+  bets: Bet[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+/**
+ * Retrieve a paginated list of bets for a given market from the in-memory store.
+ *
+ * @param marketId - The market to query (must be >= 0).
+ * @param page     - 0-based page index (must be >= 0).
+ * @param limit    - Number of bets per page (must be > 0).
+ */
+export function getBetsByMarket(
+  marketId: number,
+  page: number,
+  limit: number,
+): InMemoryPaginatedBets {
+  const empty: InMemoryPaginatedBets = {
+    bets: [],
+    total: 0,
+    page,
+    limit,
+    totalPages: 0,
+  };
+
+  if (typeof marketId !== "number" || marketId < 0) return empty;
+  if (typeof page !== "number" || page < 0) return empty;
+  if (typeof limit !== "number" || limit <= 0) return empty;
+
+  const bets = store.get(marketId) ?? [];
+  const total = bets.length;
+  const totalPages = Math.ceil(total / limit);
+  const offset = page * limit;
+  const sliced = bets.slice(offset, offset + limit);
+
+  return { bets: sliced, total, page, limit, totalPages };
+}
+
+// ── DB-backed public API ──────────────────────────────────────────────────────
+
+/**
+ * Retrieve a paginated list of bets for a given market from the database.
+ *
+ * This is the primary production function — used by the cached API route.
+ *
+ * @param marketId - The market to query (positive integer).
+ * @param page     - 1-based page index (must be >= 1).
+ * @param limit    - Number of bets per page (must be between 1 and 100).
+ * @param db       - A {@link Queryable} instance (defaults to the shared pool).
+ * @returns Paginated result with bets, total count, and page metadata.
+ */
+export async function getBetsByMarketFromDb(
+  marketId: number,
+  page: number,
+  limit: number,
+  db: Queryable,
+): Promise<PaginatedBets> {
+  const offset = (page - 1) * limit;
+
+  const [{ rows: bets }, { rows: countRows }] = await Promise.all([
+    db.query<BetRow>(
+      `SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
+         FROM bets
+        WHERE market_id = $1
+        ORDER BY created_at DESC, bettor DESC
+        LIMIT $2 OFFSET $3`,
+      [marketId, limit, offset],
+    ),
+    db.query<{ total: number }>(
+      `SELECT COUNT(*)::INT AS total FROM bets WHERE market_id = $1`,
+      [marketId],
+    ),
+  ]);
+
+  const total = countRows[0]?.total ?? 0;
+  const totalPages = Math.ceil(total / limit);
+
+  return { bets, total, page, limit, totalPages };
+}
+
+/** Returns unresolved anomaly flags for the human-review queue. */
+export async function getUnreviewedBetAnomalies(
+  db: Queryable,
+): Promise<BetAnomalyAlert[]> {
+  const { rows } = await db.query<BetAnomalyAlert>(
+    `SELECT market_id::TEXT AS market_id, window_start, bettor_count,
+            recent_net_amount::TEXT AS recent_net_amount,
+            same_side_share::TEXT AS same_side_share,
+            reviewed_at, review_outcome, review_note
+       FROM bet_anomaly_alerts
+      WHERE reviewed_at IS NULL
+      ORDER BY window_start DESC, market_id DESC`,
+  );
+  return rows;
+}
+
+/** Record a review disposition; alerts never affect market or bet state. */
+export async function reviewBetAnomaly(
+  db: Queryable,
+  marketId: string,
+  windowStart: Date,
+  outcome: BetAnomalyReviewOutcome,
+  note?: string,
+): Promise<void> {
+  const { rows } = await db.query<{ market_id: string }>(
+    `UPDATE bet_anomaly_alerts
+        SET reviewed_at = NOW(), review_outcome = $3, review_note = $4
+      WHERE market_id = $1 AND window_start = $2 AND reviewed_at IS NULL
+      RETURNING market_id::TEXT AS market_id`,
+    [marketId, windowStart, outcome, note ?? null],
+  );
+  if (rows.length === 0) {
+    throw new Error("Bet anomaly alert was not found or has already been reviewed");
+  }
+}
+
+/**
+ * Measures the false-positive rate among adjudicated alerts. Returns null
+ * until at least one alert has been reviewed.
+ */
+export async function getBetAnomalyReviewMetrics(
+  db: Queryable,
+): Promise<BetAnomalyReviewMetrics> {
+  const { rows } = await db.query<{
+    flagged: number;
+    reviewed: number;
+    false_positives: number;
+  }>(
+    `SELECT COUNT(*)::INT AS flagged,
+            COUNT(*) FILTER (
+              WHERE review_outcome IN ('confirmed', 'false_positive')
+            )::INT AS reviewed,
+            COUNT(*) FILTER (WHERE review_outcome = 'false_positive')::INT AS false_positives
+       FROM bet_anomaly_alerts`,
+  );
+  const metrics = rows[0];
+  if (!metrics) {
+    throw new Error("Failed to read bet anomaly review metrics");
+  }
+  return {
+    flagged: metrics.flagged,
+    reviewed: metrics.reviewed,
+    falsePositives: metrics.false_positives,
+    falsePositiveRate:
+      metrics.reviewed === 0 ? null : metrics.false_positives / metrics.reviewed,
+  };
+}
+
+/**
+ * Fetches all bets placed by a specific bettor.
+ *
+ * @param pool    Database pool connection
+ * @param address The Stellar public key (address) of the bettor
+ * @returns Array of bets made by the given bettor
+ */
+export async function getBetsByBettor(
+  pool: Pool,
+  address: string,
+): Promise<BetRow[]> {
+  const query = `
+    SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
+    FROM bets
+    WHERE bettor = $1
+    ORDER BY created_at DESC;
+  `;
+
+  const result = await pool.query<BetRow>(query, [address]);
+  return result.rows;
+}
+
+/**
+ * Fetch a page of bets placed by a specific bettor.
+ */
+export async function getBetsByBettorPaginated(
+  pool: Pool,
+  address: string,
+  page: number,
+  limit: number,
+): Promise<PaginatedBets> {
+  const offset = (page - 1) * limit;
+  const [{ rows: bets }, { rows: countRows }] = await Promise.all([
+    pool.query<BetRow>(
+      `SELECT market_id, bettor, net_amount, gross_amount, is_yes, claimed, created_at
+         FROM bets
+        WHERE bettor = $1
+        ORDER BY created_at DESC, market_id DESC
+        LIMIT $2 OFFSET $3`,
+      [address, limit, offset],
+    ),
+    pool.query<{ total: number }>(
+      "SELECT COUNT(*)::INT AS total FROM bets WHERE bettor = $1",
+      [address],
+    ),
+  ]);
+
+  const total = Number(countRows[0]?.total ?? 0);
+  return { bets, total, page, limit, totalPages: Math.ceil(total / limit) };
+}
+
+/**
+ * Return all bets across every market, each tagged with its market id.
+ * Useful for cross-cutting aggregations (stats, admin reports, etc.).
+ */
+export function getAllBets(): { marketId: number; bet: Bet }[] {
+  const result: { marketId: number; bet: Bet }[] = [];
+  for (const [marketId, bets] of store) {
+    for (const bet of bets) {
+      result.push({ marketId, bet });
+    }
+  }
+  return result;
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+/** Seed bets for a market — for test use only. */
+export function seedBets(marketId: number, bets: Bet[]): void {
+  store.set(marketId, bets);
+}
+
+/** Clear all stored bets — for test isolation only. */
+export function clearBets(): void {
+  store.clear();
+}

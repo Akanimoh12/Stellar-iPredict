@@ -345,6 +345,11 @@ else
   warn ".env.local not found — copy env-patch-testnet.txt values manually"
 fi
 
+# ── Post-deploy smoke gate (#1001) ─────────────────────────────────────────────
+# Fails the deploy when the API smoke suite fails. Set SMOKE_BASE_URL (or use
+# SKIP_SMOKE=1 for contract-only runs); see scripts/run-post-deploy-smoke.sh.
+bash "$ROOT/scripts/run-post-deploy-smoke.sh"
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"

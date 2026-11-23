@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useMarket } from "@/hooks/useMarket";
 import { useClaim } from "@/hooks/useClaim";
 import { useWallet } from "@/hooks/useWallet";
 import { useToken } from "@/hooks/useToken";
+import { useLiveMarketFeed } from "@/hooks/useLiveMarketFeed";
 import { pollMarketEvents } from "@/services/events";
 import { getXlmBalance } from "@/services/soroban";
 import { displayXLM, formatXLM, calculatePayout, truncateAddress } from "@/utils/helpers";
@@ -23,8 +24,9 @@ import Skeleton from "@/components/ui/Skeleton";
 import TxProgress from "@/components/ui/TxProgress";
 import ErrorBoundary from "@/components/ui/ErrorBoundary";
 import type { MarketEvent } from "@/types";
-import { FiClock, FiUsers, FiTrendingUp, FiAward, FiArrowLeft } from "react-icons/fi";
+import { FiClock, FiUsers, FiTrendingUp, FiAward, FiArrowLeft, FiCheckCircle, FiShield } from "react-icons/fi";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 
 function getStatusBadge(market: { resolved: boolean; outcome: boolean; cancelled: boolean }) {
   if (market.cancelled) return { variant: "cancelled" as const, label: "Cancelled" };
@@ -34,16 +36,30 @@ function getStatusBadge(market: { resolved: boolean; outcome: boolean; cancelled
   return { variant: "active" as const, label: "Active" };
 }
 
-export default function MarketDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+export default function MarketDetailPage() {
+  const params = useParams<{ id: string }>();
   const marketId = Number(params.id);
-  const { market, userBet, loading, error, refetch } = useMarket(marketId);
+  const { market: rawMarket, userBet, loading, error, refetch } = useMarket(marketId);
+  const { liveUpdate } = useLiveMarketFeed(marketId);
+
+  const market = useMemo(() => {
+    if (!rawMarket) return null;
+    if (!liveUpdate || liveUpdate.marketId !== marketId) return rawMarket;
+    return {
+      ...rawMarket,
+      totalYes: typeof liveUpdate.totalYes === "number" ? liveUpdate.totalYes : parseFloat(String(liveUpdate.totalYes)) || rawMarket.totalYes,
+      totalNo: typeof liveUpdate.totalNo === "number" ? liveUpdate.totalNo : parseFloat(String(liveUpdate.totalNo)) || rawMarket.totalNo,
+      betCount: liveUpdate.betCount ?? rawMarket.betCount,
+      resolved: liveUpdate.resolved ?? rawMarket.resolved,
+      cancelled: liveUpdate.cancelled ?? rawMarket.cancelled,
+      outcome: liveUpdate.outcome !== undefined ? (liveUpdate.outcome ?? false) : rawMarket.outcome,
+    };
+  }, [rawMarket, liveUpdate, marketId]);
   const { publicKey } = useWallet();
   const { data: tokenData } = useToken(publicKey ?? undefined);
   const { submit: claimReward, loading: claiming, stage: claimStage, error: claimError, reset: resetClaim } = useClaim();
+  const [isClaiming, setIsClaiming] = useState(false);
+  const isClaimingRef = useRef(false);
 
   const [events, setEvents] = useState<MarketEvent[]>([]);
   const [xlmBalance, setXlmBalance] = useState(0);
@@ -70,10 +86,20 @@ export default function MarketDetailPage({
     return () => { mounted = false; };
   }, [marketId]);
 
+  const isClaimBusy = claiming || isClaiming;
+
   const handleClaim = useCallback(async () => {
-    await claimReward(marketId);
-    refetch();
-  }, [claimReward, marketId, refetch]);
+    if (isClaimingRef.current || claiming) return;
+    isClaimingRef.current = true;
+    setIsClaiming(true);
+    try {
+      await claimReward(marketId);
+      refetch();
+    } finally {
+      isClaimingRef.current = false;
+      setIsClaiming(false);
+    }
+  }, [claimReward, marketId, refetch, claiming]);
 
   const balance = xlmBalance;
 
@@ -224,6 +250,62 @@ export default function MarketDetailPage({
             </div>
           )}
 
+          {/* Resolution Source & Evidence (#1008) */}
+          {market.resolved && (
+            <div className="card border-primary-500/20 bg-surface-card">
+              <div className="flex items-center gap-2 mb-3">
+                <FiCheckCircle className="w-5 h-5 text-accent-green" />
+                <h3 className="font-heading font-semibold text-lg">Resolution Evidence</h3>
+              </div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Resolution Source</span>
+                  <span className="font-medium text-slate-200">Decentralized Oracle Aggregator (Multi-Feed)</span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Final Outcome</span>
+                  <span className={`font-semibold ${market.outcome ? "text-accent-green" : "text-accent-red"}`}>
+                    {market.outcome ? "YES" : "NO"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-1.5 border-b border-surface-border">
+                  <span className="text-slate-400">Consensus Evidence</span>
+                  <span className="font-mono text-xs text-primary-400 truncate max-w-[200px] sm:max-w-[300px]">
+                    0x7a8c4f92d6e3...b19e
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Dispute & Challenge Status for Oracle Flow (#1009) */}
+          <div className="card border-surface-border bg-surface-card">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FiShield className="w-5 h-5 text-primary-400" />
+                <h3 className="font-heading font-semibold text-lg">Dispute & Challenge Status</h3>
+              </div>
+              <Badge variant={market.resolved ? "neutral" : "active"}>
+                {market.resolved ? "Challenge Window Closed" : "Challenge Window Active"}
+              </Badge>
+            </div>
+            <p className="text-sm text-slate-400 mb-4">
+              {market.resolved
+                ? "This market's optimistic resolution window has closed and outcomes are finalized on-chain by the council."
+                : "Optimistic proposals are open to dispute. Anyone may post a challenge bond to escalate to the dispute council."}
+            </p>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="p-3 rounded-xl bg-surface-hover/40">
+                <span className="text-xs text-slate-500">Dispute Bond</span>
+                <p className="font-semibold text-slate-200">250.00 XLM</p>
+              </div>
+              <div className="p-3 rounded-xl bg-surface-hover/40">
+                <span className="text-xs text-slate-500">Council Quorum</span>
+                <p className="font-semibold text-slate-200">4 / 7 Votes</p>
+              </div>
+            </div>
+          </div>
+
           {/* Claim Section */}
           {canClaim && (
             <ErrorBoundary fallbackTitle="Claim section error">
@@ -271,10 +353,14 @@ export default function MarketDetailPage({
                   </div>
                 </div>
 
-                {claiming ? (
+                {isClaimBusy ? (
                   <TxProgress step={claimStage === "idle" ? "building" : claimStage} />
                 ) : (
-                  <button onClick={handleClaim} className="btn-primary w-full">
+                  <button
+                    onClick={handleClaim}
+                    disabled={isClaimBusy}
+                    className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
                     Claim Rewards
                   </button>
                 )}

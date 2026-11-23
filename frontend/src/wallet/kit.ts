@@ -1,59 +1,58 @@
-import {
-  StellarWalletsKit,
-  WalletNetwork,
-  FreighterModule,
-  xBullModule,
-  AlbedoModule,
-  FREIGHTER_ID,
-  XBULL_ID,
-  ALBEDO_ID,
-} from "@creit.tech/stellar-wallets-kit";
+import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
 import { NETWORK } from "@/config/network";
 import { AppErrorType } from "@/types";
 import type { WalletType } from "./types";
 
 // ── Wallet ID mapping ─────────────────────────────────────────────────────────
 
-const WALLET_ID_MAP: Record<WalletType, string> = {
-  freighter: FREIGHTER_ID,
-  xbull: XBULL_ID,
-  albedo: ALBEDO_ID,
-};
-
 // ── Singleton instance ────────────────────────────────────────────────────────
 
 let _kit: StellarWalletsKit | null = null;
+let _kitPromise: Promise<StellarWalletsKit> | null = null;
 
 /**
  * Get or create the StellarWalletsKit singleton.
  * Lazy-initialized on first call with Freighter, xBull, and Albedo modules.
  */
-export function getWalletKit(): StellarWalletsKit {
-  if (!_kit) {
-    const networkPassphrase =
-      NETWORK.passphrase === "Test SDF Network ; September 2015"
-        ? WalletNetwork.TESTNET
-        : WalletNetwork.PUBLIC;
+export async function getWalletKit(): Promise<StellarWalletsKit> {
+  if (_kit) return _kit;
+  if (!_kitPromise) {
+    _kitPromise = import("@creit.tech/stellar-wallets-kit").then((walletKit) => {
+      const networkPassphrase =
+        NETWORK.passphrase === "Test SDF Network ; September 2015"
+          ? walletKit.WalletNetwork.TESTNET
+          : walletKit.WalletNetwork.PUBLIC;
 
-    _kit = new StellarWalletsKit({
-      network: networkPassphrase,
-      selectedWalletId: FREIGHTER_ID,
-      modules: [
-        new FreighterModule(),
-        new xBullModule(),
-        new AlbedoModule(),
-      ],
+      const kit = new walletKit.StellarWalletsKit({
+        network: networkPassphrase,
+        selectedWalletId: walletKit.FREIGHTER_ID,
+        modules: [
+          new walletKit.FreighterModule(),
+          new walletKit.xBullModule(),
+          new walletKit.AlbedoModule(),
+        ],
+      });
+      _kit = kit;
+      return kit;
     });
   }
-  return _kit;
+  return _kitPromise;
 }
 
 /**
  * Select a wallet type in the kit.
  */
-export function selectWallet(type: WalletType): void {
-  const kit = getWalletKit();
-  const walletId = WALLET_ID_MAP[type];
+export async function selectWallet(type: WalletType): Promise<void> {
+  const [kit, walletKit] = await Promise.all([
+    getWalletKit(),
+    import("@creit.tech/stellar-wallets-kit"),
+  ]);
+  const walletId =
+    type === "freighter"
+      ? walletKit.FREIGHTER_ID
+      : type === "xbull"
+        ? walletKit.XBULL_ID
+        : walletKit.ALBEDO_ID;
   kit.setWallet(walletId);
 }
 
@@ -62,7 +61,7 @@ export function selectWallet(type: WalletType): void {
  */
 export async function connectKit(): Promise<{ publicKey: string }> {
   try {
-    const kit = getWalletKit();
+    const kit = await getWalletKit();
     const { address } = await kit.getAddress();
     return { publicKey: address };
   } catch (err) {
@@ -109,7 +108,7 @@ export async function connectKit(): Promise<{ publicKey: string }> {
  */
 export async function signWithKit(xdr: string): Promise<string> {
   try {
-    const kit = getWalletKit();
+    const kit = await getWalletKit();
     const { signedTxXdr } = await kit.signTransaction(xdr, {
       networkPassphrase: NETWORK.passphrase,
     });

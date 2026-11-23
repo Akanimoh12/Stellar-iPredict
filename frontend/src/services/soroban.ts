@@ -186,7 +186,7 @@ export async function buildAndSendTx(
       const simMsg = simErr instanceof Error ? simErr.message : String(simErr);
       return {
         success: false,
-        error: `Simulation failed: ${simMsg}`,
+        error: friendlyContractError(simMsg) ?? `Simulation failed: ${simMsg}`,
       };
     }
 
@@ -275,7 +275,7 @@ export async function buildAndSendTx(
     return {
       success: false,
       hash: sendResponse.hash,
-      error: `Transaction failed: ${onChainError}`,
+      error: friendlyContractError(onChainError) ?? `Transaction failed: ${onChainError}`,
     };
   } catch (err) {
     console.error("[iPredict] buildAndSendTx unexpected error:", err);
@@ -339,9 +339,10 @@ export async function simulateTransaction<T = unknown>(
 
     // Check for simulation error
     if (rpc.Api.isSimulationError(simResponse)) {
+      const friendly = friendlyContractError(String(simResponse.error ?? ""));
       throw createAppError(
         AppErrorType.SIMULATION,
-        "Simulation failed",
+        friendly ?? "Simulation failed",
         simResponse.error
       );
     }
@@ -431,6 +432,59 @@ function extractOnChainError(response: rpc.Api.GetTransactionResponse): string {
   return "Unknown on-chain error — check Stellar explorer for details";
 }
 
+/**
+ * User-facing text for each MarketError code in contracts/prediction_market.
+ * Keep in step with the enum: a new code without an entry falls back to the raw text.
+ */
+export const MARKET_ERROR_MESSAGES: Readonly<Record<number, string>> = {
+  1: "The market contract is already set up.",
+  2: "The market contract hasn't been set up yet.",
+  3: "Only the market admin can do this.",
+  4: "This market no longer exists.",
+  5: "This market has closed for betting.",
+  6: "This market hasn't closed yet, so it can't be resolved.",
+  7: "This market has already been resolved.",
+  8: "This market was cancelled.",
+  9: "This market hasn't been resolved yet.",
+  10: "Your bet is below the minimum amount.",
+  11: "You already bet on the other side of this market.",
+  12: "You've already claimed winnings for this market.",
+  13: "You don't have a bet on this market.",
+  14: "Enter a valid amount.",
+  15: "There are no fees to withdraw.",
+  16: "Only the designated resolver can resolve this market.",
+  17: "This market has reached its bet limit.",
+  18: "You're not authorized to do this.",
+  19: "This market hasn't been cancelled.",
+  20: "Too many requests. Please wait a moment and try again.",
+  21: "A resolution has already been submitted for this market.",
+  22: "No resolution has been submitted for this market yet.",
+  23: "This resolution has already been challenged.",
+  24: "The challenge window hasn't closed yet.",
+  25: "The challenge window has closed.",
+  26: "This action isn't allowed in the market's current state.",
+  27: "The bond is below the required minimum.",
+  // Code 28 is assigned to two variants (ContractPaused and InvalidQuestion) in the
+  // contract, so the text must cover both until the contract numbering is fixed.
+  28: "This action is temporarily unavailable. Please try again later.",
+  29: "The market duration is outside the allowed range.",
+  30: "This market doesn't have enough liquidity on both sides yet.",
+  31: "There is no pending admin change to accept.",
+  32: "That category isn't allowed.",
+};
+
+/** Numeric contract error code from host error text such as `Error(Contract, #5)`, or null. */
+export function parseContractErrorCode(message: string): number | null {
+  const match = /Error\(Contract,\s*#(\d+)\)/.exec(message);
+  return match ? Number(match[1]) : null;
+}
+
+/** Friendly message for a raw error text that names a known market error code, or null. */
+export function friendlyContractError(message: string): string | null {
+  const code = parseContractErrorCode(message);
+  return code === null ? null : MARKET_ERROR_MESSAGES[code] ?? null;
+}
+
 function classifyError(err: unknown): AppError {
   const message = extractErrorMessage(err);
   const lower = message.toLowerCase();
@@ -452,6 +506,13 @@ function classifyError(err: unknown): AppError {
       "Insufficient XLM balance",
       "Your wallet doesn't have enough free XLM for this bet. Stellar keeps ~1 XLM locked as the account reserve, plus a small network fee. Try a smaller amount or top up your wallet."
     );
+  }
+
+  // Market contract errors: translate the code to a clear message. This runs after the
+  // XLM check above, which also uses the native token's #10 code.
+  const marketMessage = friendlyContractError(message);
+  if (marketMessage) {
+    return createAppError(AppErrorType.CONTRACT, marketMessage, message);
   }
 
   // Network errors

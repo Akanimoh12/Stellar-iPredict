@@ -353,6 +353,8 @@ jobs:
       - name: Run cross-package tests
         # Runs the i128 precision boundaries and the smoke suite's own tests.
         # No Postgres or Redis: every database is a fake, by design.
+        # vitest.config.ts retries failures once and reports tests that passed
+        # on retry (the flaky-test detector) in the log and job summary.
         run: npm run test:cross
 
       - name: Smoke suite lists cleanly

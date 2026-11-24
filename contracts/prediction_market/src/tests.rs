@@ -2369,3 +2369,105 @@ fn test_category_registry_non_admin_rejected() {
     let rando = Address::generate(&t.env);
     t.client.remove_category(&rando, &Category::Crypto);
 }
+
+// ── Referral cache refresh, uninitialized reads, rate window (#772, #779, #780) ──
+
+fn cached_has_referrer(t: &TestSetup, user: &Address) -> Option<bool> {
+    t.env.as_contract(&t.market_id, || {
+        t.env
+            .storage()
+            .persistent()
+            .get(&DataKey::HasReferrer(user.clone()))
+    })
+}
+
+#[test]
+fn test_referrer_registered_after_first_bet_earns_fees() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    // First bet before registering: full 2% goes to the platform, `false` is cached.
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
+    assert_eq!(cached_has_referrer(&t, &user), Some(false));
+
+    t.referral_client.register_referral(
+        &user,
+        &String::from_str(&t.env, "Late"),
+        &Some(referrer.clone()),
+    );
+
+    // The stale `false` is refreshed: the referrer now earns the 0.5% share.
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000 + 1_5000000);
+    assert_eq!(t.xlm.balance(&referrer), 5000000);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 3);
+    assert_eq!(cached_has_referrer(&t, &user), Some(true));
+}
+
+#[test]
+fn test_cached_no_referrer_still_routes_fee_to_platform() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    // Registering without a referrer keeps the cached `false` correct.
+    t.referral_client
+        .register_referral(&user, &String::from_str(&t.env, "Solo"), &None);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    assert_eq!(t.client.get_accumulated_fees(), 4_0000000);
+    assert_eq!(t.xlm.balance(&t.referral_id), 0);
+    assert_eq!(cached_has_referrer(&t, &user), Some(false));
+    check_invariant(&t);
+}
+
+#[test]
+fn test_get_config_before_initialize_returns_not_initialized() {
+    let env = Env::default();
+    let contract_id = env.register(PredictionMarketContract, ());
+    let client = PredictionMarketContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.try_get_config(),
+        Err(Ok(MarketError::NotInitialized))
+    );
+}
+
+#[test]
+fn test_get_config_after_initialize_returns_addresses() {
+    let t = setup();
+    let cfg = t.client.get_config();
+    assert_eq!(cfg.token, t.token_id);
+    assert_eq!(cfg.referral, t.referral_id);
+    assert_eq!(cfg.leaderboard, t.leaderboard_id);
+    assert_eq!(cfg.xlm_sac, t.xlm_sac_id);
+}
+
+#[test]
+fn test_rate_limiter_window_ahead_of_now_does_not_trap() {
+    let t = setup();
+    let future_ws = t.env.ledger().timestamp() + 10_000;
+    t.env.as_contract(&t.market_id, || {
+        t.env
+            .storage()
+            .instance()
+            .set(&DataKey::RateWindow, &(future_ws, 0_u32));
+    });
+
+    // Previously `now - ws` underflowed and trapped; now it counts against that window.
+    assert_eq!(create_test_market(&t), 1);
+    let window: (u64, u32) = t.env.as_contract(&t.market_id, || {
+        t.env
+            .storage()
+            .instance()
+            .get(&DataKey::RateWindow)
+            .unwrap()
+    });
+    assert_eq!(window, (future_ws, 1));
+}

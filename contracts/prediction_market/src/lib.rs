@@ -509,8 +509,9 @@ impl PredictionMarketContract {
     }
 
     /// Read the current Config (for verification/admin tooling).
-    pub fn get_config(env: Env) -> Config {
-        env.storage().instance().get(&DataKey::Cfg).unwrap()
+    /// Returns `NotInitialized` before `initialize` has run (#779).
+    pub fn get_config(env: Env) -> Result<Config, MarketError> {
+        Self::load_config(&env)
     }
 
     /// Set bond minimums for optimistic oracle submissions. Admin only. (Issue #525)
@@ -830,7 +831,7 @@ impl PredictionMarketContract {
             "fee split rounding: {} + {} + {} != {}", platform_fee, referral_fee, net, amount);
 
         // OPT: one Config read instead of 4 separate instance reads
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
 
         // ── XLM transfer user → this contract ────────────────────────────
         let xlm = token::Client::new(&env, &cfg.xlm_sac);
@@ -841,11 +842,23 @@ impl PredictionMarketContract {
         let mut acc_fees: i128 = env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0);
         acc_fees += platform_fee;
 
-        // ── Referral (skip if cached no-referrer) ─────────────────────────
+        // ── Referral ──────────────────────────────────────────────────────
+        // A cached `true` is final: the registry never lets a referrer change.
+        // A cached `false` goes stale if the user registers a referrer later, so
+        // re-check it with the registry's read-only `has_referrer` (#772).
         let hr_key = DataKey::HasReferrer(user.clone());
         let cached: Option<bool> = env.storage().persistent().get(&hr_key);
 
-        let paid_referrer = if cached == Some(false) {
+        let has_referrer = match cached {
+            Some(false) => env.invoke_contract::<bool>(
+                &cfg.referral,
+                &Symbol::new(&env, "has_referrer"),
+                vec![&env, user.clone().into_val(&env)],
+            ),
+            _ => true,
+        };
+
+        let paid_referrer = if !has_referrer {
             false
         } else {
             xlm.transfer(&this, &cfg.referral, &referral_fee);
@@ -854,7 +867,7 @@ impl PredictionMarketContract {
                 &Symbol::new(&env, "credit"),
                 vec![&env, this.clone().into_val(&env), user.clone().into_val(&env), referral_fee.into_val(&env)],
             );
-            if cached.is_none() {
+            if cached != Some(result) {
                 env.storage().persistent().set(&hr_key, &result);
                 env.storage().persistent().extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
             }
@@ -949,7 +962,7 @@ impl PredictionMarketContract {
         }
 
         // Escrow the bond before recording anything.
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&submitter, &env.current_contract_address(), &bond);
 
@@ -1021,7 +1034,7 @@ impl PredictionMarketContract {
         if market.resolved  { return Err(MarketError::MarketResolved); }
 
         // Escrow the disputer bond alongside the submitter's.
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&challenger, &env.current_contract_address(), &bond);
 
@@ -1078,7 +1091,7 @@ impl PredictionMarketContract {
         let mut market = Self::load_market(&env, market_id)?;
 
         // Unchallenged: the bond always comes back in full.
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&env.current_contract_address(), &submission.submitter, &submission.bond);
 
@@ -1207,7 +1220,7 @@ impl PredictionMarketContract {
             (0, submission.challenger_bond + winner_share)
         };
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         let xlm = token::Client::new(&env, &cfg.xlm_sac);
         let this = env.current_contract_address();
         if submitter_payout > 0 { xlm.transfer(&this, &submission.submitter, &submitter_payout); }
@@ -1275,7 +1288,7 @@ impl PredictionMarketContract {
 
         let mut market = Self::load_market(&env, market_id)?;
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         let xlm = token::Client::new(&env, &cfg.xlm_sac);
         let this = env.current_contract_address();
 
@@ -1345,7 +1358,7 @@ impl PredictionMarketContract {
         entry.gross = 0; // idempotency guard
         env.storage().persistent().set(&bet_key, &entry);
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&env.current_contract_address(), &user, &gross);
 
@@ -1444,7 +1457,7 @@ impl PredictionMarketContract {
 
         env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(&env)?;
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&env.current_contract_address(), &recipient, &fees);
 
@@ -1607,7 +1620,7 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&bet_key, &entry);
         env.storage().persistent().extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let cfg = Self::load_config(env)?;
         let this = env.current_contract_address();
 
         // XLM payout: only when the winning side had bettors.
@@ -1640,6 +1653,12 @@ impl PredictionMarketContract {
         );
 
         Ok(())
+    }
+
+    /// Packed Config, or `NotInitialized` if `initialize` has not run (#779).
+    #[inline]
+    fn load_config(env: &Env) -> Result<Config, MarketError> {
+        env.storage().instance().get(&DataKey::Cfg).ok_or(MarketError::NotInitialized)
     }
 
     #[inline]
@@ -1732,7 +1751,9 @@ impl PredictionMarketContract {
             .get(&DataKey::RateWindow)
             .unwrap_or((now, 0));
 
-        let (new_ws, new_cnt) = if now - ws < 3600 {
+        // #780: a window start ahead of `now` must not trap on u64 underflow;
+        // it saturates to 0 and counts against that window rather than resetting it.
+        let (new_ws, new_cnt) = if now.saturating_sub(ws) < 3600 {
             if cnt >= MAX_MARKETS_PER_HOUR { return Err(MarketError::RateLimitExceeded); }
             (ws, cnt + 1)
         } else {

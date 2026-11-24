@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { placeBet } from "@/services/market";
+import { invalidateAfterBet } from "@/services/cache";
 import { useWallet } from "@/hooks/useWallet";
 import type { TransactionResult, AppError } from "@/types";
 
@@ -61,6 +62,7 @@ export function useBet(): UseBetResult {
         if (txResult.success) {
           setStage("confirmed");
           setResult(txResult);
+          invalidateAfterBet(marketId, publicKey);
         } else {
           setStage("failed");
           setError(txResult.error || "Transaction failed");

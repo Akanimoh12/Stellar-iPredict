@@ -34,6 +34,9 @@ PostgreSQL copy of on-chain state (written by the
 
 #### Versioning and compatibility policy
 
+How a breaking change is shipped and announced, and how releases are versioned,
+is in [Releasing and Versioning](RELEASING.md#api-versioning-and-breaking-changes).
+
 - The version in the URL is the API's major version. New versioned feature
   routes use `/api/vN`; the OpenAPI `info.version` value describes the
   specification and is not a substitute for the URL version.

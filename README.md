@@ -348,6 +348,7 @@ See [docs/notes/USER-FEEDBACK.md](docs/notes/USER-FEEDBACK.md) for the full feed
 - [Runbook Index](docs/RUNBOOK_INDEX.md) — **on-call start here**: every alert mapped to its runbook procedure, with runbook links embedded in alert payloads.
 - [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
 - [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
+- [Releasing and Versioning](docs/RELEASING.md) — the versioning scheme, how a release is cut, hotfixes, and how API breaking changes are versioned and announced. Changes are recorded in the [Changelog](CHANGELOG.md).
 - [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
 - [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram, for the backend and indexer.
 - [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model covering key custody, bond mechanics, and RPC trust.

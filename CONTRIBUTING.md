@@ -39,6 +39,9 @@ All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md
 5. **Open a PR — base branch `implementation-drips`.**
    - Link the issue (`Closes #123`).
    - Make sure `npm run typecheck` and `npm test` pass in the package you touched.
+   - Add a line under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for any
+     change a user, operator or integrator would notice. Versioning and the
+     release process are in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 > **Automated CI Checks:** Every pull request targeting `implementation-drips` (or any feature branch) is automatically checked by GitHub Actions:
 > - **TypeScript Typecheck:** Dedicated CI job validates TypeScript compilation (`npm run typecheck`) across all packages (`@ipredict/shared`, `backend`, `db`, `indexer`, `oracle`).

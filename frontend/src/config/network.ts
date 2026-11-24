@@ -120,6 +120,16 @@ export const TOTAL_FEE_BPS = 200;
 export const PLATFORM_FEE_BPS = 150;
 export const REFERRAL_FEE_BPS = 50;
 
+// ── On-chain bet limits ───────────────────────────────────────────────────────
+// Mirrors contracts/prediction_market/src/lib.rs. The contract has no maximum
+// bet amount: it enforces a minimum bet and a cap on how many bets one user may
+// place on a single market. Keep these in step with the contract constants.
+
+/** `MIN_BET`: smallest accepted bet, 1 XLM (10_000_000 stroops). */
+export const MIN_BET_XLM = 1;
+/** `MAX_BETS_PER_USER`: bets one user may place on a single market. */
+export const MAX_BETS_PER_USER = 20;
+
 // ── Reward Constants ──────────────────────────────────────────────────────────
 
 export const REFERRAL_BET_POINTS = 3;

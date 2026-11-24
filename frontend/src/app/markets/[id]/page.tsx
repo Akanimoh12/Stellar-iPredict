@@ -8,6 +8,7 @@ import { useToken } from "@/hooks/useToken";
 import { useLiveMarketFeed } from "@/hooks/useLiveMarketFeed";
 import { pollMarketEvents } from "@/services/events";
 import { getXlmBalance } from "@/services/soroban";
+import { getUserBetCount } from "@/services/market";
 import { displayXLM, formatXLM, calculatePayout, truncateAddress } from "@/utils/helpers";
 import {
   WIN_POINTS,
@@ -63,19 +64,45 @@ export default function MarketDetailPage() {
 
   const [events, setEvents] = useState<MarketEvent[]>([]);
   const [xlmBalance, setXlmBalance] = useState(0);
+  // True from the moment a balance fetch starts until it settles, so the betting
+  // panel never validates a bet against a zero or stale balance.
+  // Starts true so there is no render where a connected wallet can bet before the
+  // first fetch begins; the effect below clears it when there is no wallet.
+  const [balanceLoading, setBalanceLoading] = useState(true);
+  const [userBetCount, setUserBetCount] = useState(0);
 
   // Fetch native XLM balance for betting
   useEffect(() => {
     if (!publicKey) {
       setXlmBalance(0);
+      setBalanceLoading(false);
       return;
     }
     let mounted = true;
-    getXlmBalance(publicKey).then((bal) => {
-      if (mounted) setXlmBalance(bal);
-    });
+    setBalanceLoading(true);
+    getXlmBalance(publicKey)
+      .then((bal) => {
+        if (mounted) setXlmBalance(bal);
+      })
+      .catch(() => { })
+      .finally(() => {
+        if (mounted) setBalanceLoading(false);
+      });
     return () => { mounted = false; };
   }, [publicKey]);
+
+  // Bets already placed here; the contract caps them per user per market
+  useEffect(() => {
+    if (!publicKey) {
+      setUserBetCount(0);
+      return;
+    }
+    let mounted = true;
+    getUserBetCount(marketId, publicKey).then((count) => {
+      if (mounted) setUserBetCount(count);
+    });
+    return () => { mounted = false; };
+  }, [publicKey, marketId]);
 
   // Fetch events
   useEffect(() => {
@@ -421,11 +448,19 @@ export default function MarketDetailPage() {
                 market={market}
                 userBet={userBet}
                 balance={balance}
+                balanceLoading={balanceLoading}
+                userBetCount={userBetCount}
                 onSuccess={() => {
                   refetch();
-                  // Refresh XLM balance after bet
+                  // Refresh XLM balance and bet count after bet; hold betting
+                  // until the new balance is in
                   if (publicKey) {
-                    getXlmBalance(publicKey).then(setXlmBalance);
+                    setBalanceLoading(true);
+                    getXlmBalance(publicKey)
+                      .then(setXlmBalance)
+                      .catch(() => { })
+                      .finally(() => setBalanceLoading(false));
+                    getUserBetCount(marketId, publicKey).then(setUserBetCount);
                   }
                 }}
               />

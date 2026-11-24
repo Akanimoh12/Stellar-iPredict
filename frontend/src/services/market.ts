@@ -305,6 +305,28 @@ export async function getAccumulatedFees(): Promise<number> {
   }
 }
 
+/**
+ * Number of bets a user has placed on a market. The contract rejects further
+ * bets once this reaches `MAX_BETS_PER_USER`. Returns 0 if it cannot be read, in
+ * which case the contract remains the authority.
+ */
+export async function getUserBetCount(
+  marketId: number,
+  userAddress: string
+): Promise<number> {
+  try {
+    const raw = await simulateTransaction<number | bigint>(
+      getSimulationSource(),
+      MARKET_CONTRACT_ID,
+      "get_user_bet_count",
+      [u64Val(marketId), addressVal(userAddress)]
+    );
+    return Number(raw);
+  } catch {
+    return 0;
+  }
+}
+
 /** Fetch the gross bet amount (pre-fee) for a user on a cancelled market. */
 export async function getBetGross(
   marketId: number,

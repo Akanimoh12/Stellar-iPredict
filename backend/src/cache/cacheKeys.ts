@@ -24,19 +24,23 @@ export type MarketId = number | string;
 
 let version = 1;
 
+/** Returns the version prefix used by every newly generated cache key. */
 export function getVersion(): string {
   return `v${version}`;
 }
 
+/** Advances the process-local key version, logically invalidating older keys. */
 export function bumpVersion(): string {
   version += 1;
   return getVersion();
 }
 
+/** Restores the initial key version; intended for deterministic tests only. */
 export function resetVersion(): void {
   version = 1;
 }
 
+/** Builds a namespaced, versioned key; callers must pass stable identifier parts. */
 export function cacheKey(entity: string, ...parts: CacheKeyPart[]): CacheKey {
   return [CACHE_NAMESPACE, getVersion(), entity, ...parts]
     .map(String)

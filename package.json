@@ -16,6 +16,8 @@
     "test": "npm run build --workspace=@ipredict/shared && npm run test --workspaces --if-present && npm run test:cross",
     "test:cross": "vitest run",
     "test:cross:watch": "vitest",
+    "test:e2e:local": "bash scripts/e2e-local-env.sh",
+    "test:e2e:local:db": "tsx test/e2e/local-environment.ts",
     "smoke": "tsx test/smoke/run.ts",
     "smoke:list": "tsx test/smoke/run.ts --list",
     "lint": "npm run lint --workspaces --if-present && npm --prefix db run lint",

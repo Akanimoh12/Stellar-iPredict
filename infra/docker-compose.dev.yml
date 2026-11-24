@@ -3,9 +3,15 @@
 # During normal development the app services (api, indexer, oracle) run on the
 # host via `npm run dev`. See docker-compose.production.yml for the full stack.
 #
-# End-to-end test: `docker compose -f docker-compose.dev.yml up -d --wait`
-# brings up Postgres and Redis and waits until both report healthy. The e2e
-# harness then runs migrations and the scripted market lifecycle against them.
+# End-to-end test: `npm run test:e2e:local` brings up Postgres and Redis with
+# `docker compose -f docker-compose.dev.yml up -d --wait`, applies migrations,
+# runs the scripted market lifecycle in `test/e2e/local-environment.ts`, and
+# asserts the resulting database state. The stack is torn down on exit.
+# Set KEEP_STACK=1 to keep the containers for debugging.
+#
+# To run the harness by hand against an already-running stack:
+#   docker compose -f infra/docker-compose.dev.yml up -d --wait
+#   DATABASE_URL=postgres://ipredict:ipredict@localhost:5432/ipredict npm run test:e2e:local:db
 
 services:
   postgres:

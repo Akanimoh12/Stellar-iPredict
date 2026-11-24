@@ -23,6 +23,10 @@ All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md
    - `area:testing` — tests
    - `area:docs` — documentation
    - Priority: `P0` (needed for launch), `P1`, `P2`.
+   - Difficulty: `difficulty:easy` (self-contained and well-defined),
+     `difficulty:medium` (crosses a package boundary), and
+     `difficulty:hard` (security, contract, or multi-service change).
+     Apply one `area:`, one priority, and one difficulty label to each issue.
 
 2. **Claim it.** Comment on the issue so others don't duplicate work.
 

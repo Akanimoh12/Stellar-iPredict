@@ -118,6 +118,19 @@ export async function signWithKit(xdr: string): Promise<string> {
       err instanceof Error ? err.message : "Failed to sign transaction";
 
     if (
+      message.toLowerCase().includes("network") &&
+      (message.toLowerCase().includes("mismatch") ||
+        message.toLowerCase().includes("passphrase") ||
+        message.toLowerCase().includes("wrong"))
+    ) {
+      throw {
+        type: AppErrorType.WALLET,
+        message: "Wallet network does not match the iPredict network",
+        details: message,
+      };
+    }
+
+    if (
       message.toLowerCase().includes("rejected") ||
       message.toLowerCase().includes("denied") ||
       message.toLowerCase().includes("cancelled")

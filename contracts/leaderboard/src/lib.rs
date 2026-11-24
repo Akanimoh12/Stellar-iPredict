@@ -455,7 +455,7 @@ impl LeaderboardContract {
                         if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
                             env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &e);
                             env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
-                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address), &(i + 1));
+                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address.clone()), &(i + 1));
                             env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(e.address), TTL_BUMP, TTL_HIGH);
                         }
                     }
@@ -465,7 +465,7 @@ impl LeaderboardContract {
                         if let Some(e) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
                             env.storage().persistent().set(&DataKey::TopPlayerAt(i - 1), &e);
                             env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i - 1), TTL_BUMP, TTL_HIGH);
-                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address), &(i - 1));
+                            env.storage().persistent().set(&DataKey::TopPlayerSlot(e.address.clone()), &(i - 1));
                             env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(e.address), TTL_BUMP, TTL_HIGH);
                         }
                     }
@@ -505,7 +505,7 @@ impl LeaderboardContract {
                 if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
                     env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &entry);
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
-                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &(i + 1));
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address.clone()), &(i + 1));
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
                 }
             }
@@ -562,7 +562,7 @@ impl LeaderboardContract {
                 if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i)) {
                     env.storage().persistent().set(&DataKey::TopPlayerAt(i + 1), &entry);
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i + 1), TTL_BUMP, TTL_HIGH);
-                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &(i + 1));
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address.clone()), &(i + 1));
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
                 }
             }
@@ -572,7 +572,7 @@ impl LeaderboardContract {
                 if let Some(entry) = env.storage().persistent().get::<DataKey, PlayerEntry>(&DataKey::TopPlayerAt(i + 1)) {
                     env.storage().persistent().set(&DataKey::TopPlayerAt(i), &entry);
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i), TTL_BUMP, TTL_HIGH);
-                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address), &i);
+                    env.storage().persistent().set(&DataKey::TopPlayerSlot(entry.address.clone()), &i);
                     env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address), TTL_BUMP, TTL_HIGH);
                 }
             }

@@ -2257,6 +2257,8 @@ fn test_migrate_is_admin_only_and_idempotent() {
     assert_eq!(t.client.migrate(&t.admin), 1);
     assert_eq!(t.client.migrate(&t.admin), 1);
     assert_eq!(t.client.schema_version(), 1);
+}
+
 // ── Market bounds, admin rotation (#789, #792, #793) ─────────────────────────
 
 #[test]

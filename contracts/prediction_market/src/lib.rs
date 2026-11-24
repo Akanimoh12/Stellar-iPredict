@@ -120,12 +120,12 @@ pub enum MarketError {
     OracleWindowClosed = 25,          // challenge window has already elapsed
     OracleInvalidState = 26,          // transition not legal from the current state
     OracleBondTooSmall = 27,          // bond below the minimum / not larger than submitter's
-    ContractPaused     = 28,          // global pause is on: new bets and markets are rejected (#788)
     InvalidQuestion    = 28,          // question empty or longer than MAX_QUESTION_LEN
     InvalidDuration    = 29,          // duration outside [MIN_MARKET_DURATION, MAX_MARKET_DURATION]
     InsufficientLiquidity = 30,       // one side below MIN_SIDE_LIQUIDITY; resolution impossible
     NoPendingAdmin     = 31,          // accept_admin called with no proposal
     InvalidCategory    = 32,          // category not allowed by admin registry (#1016)
+    ContractPaused     = 33,          // global pause is on: new bets and markets are rejected (#788)
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────

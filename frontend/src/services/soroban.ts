@@ -464,13 +464,12 @@ export const MARKET_ERROR_MESSAGES: Readonly<Record<number, string>> = {
   25: "The challenge window has closed.",
   26: "This action isn't allowed in the market's current state.",
   27: "The bond is below the required minimum.",
-  // Code 28 is assigned to two variants (ContractPaused and InvalidQuestion) in the
-  // contract, so the text must cover both until the contract numbering is fixed.
-  28: "This action is temporarily unavailable. Please try again later.",
+  28: "The market question is empty or too long.",
   29: "The market duration is outside the allowed range.",
   30: "This market doesn't have enough liquidity on both sides yet.",
   31: "There is no pending admin change to accept.",
   32: "That category isn't allowed.",
+  33: "Betting and market creation are temporarily paused. Please try again later.",
 };
 
 /** Numeric contract error code from host error text such as `Error(Contract, #5)`, or null. */

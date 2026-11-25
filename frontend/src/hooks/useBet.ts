@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { placeBet } from "@/services/market";
 import { useWallet } from "@/hooks/useWallet";
 import type { TransactionResult, AppError } from "@/types";
@@ -32,14 +32,19 @@ export function useBet(): UseBetResult {
   const [loading, setLoading] = useState(false);
   const [stage, setStage] = useState<TxStage>("idle");
   const [error, setError] = useState<string | null>(null);
+  // State updates are asynchronous: a second click before React re-renders
+  // would otherwise open a second wallet signing request for the same bet.
+  const inFlightRef = useRef(false);
 
   const submit = useCallback(
     async (marketId: number, isYes: boolean, amount: number) => {
+      if (inFlightRef.current) return;
       if (!publicKey) {
         setError("Wallet not connected");
         return;
       }
 
+      inFlightRef.current = true;
       setLoading(true);
       setError(null);
       setResult(null);
@@ -82,6 +87,7 @@ export function useBet(): UseBetResult {
         }
         setError(message);
       } finally {
+        inFlightRef.current = false;
         setLoading(false);
       }
     },

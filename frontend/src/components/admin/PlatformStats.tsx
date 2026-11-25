@@ -26,16 +26,20 @@ export default function PlatformStats() {
   const [withdrawStage, setWithdrawStage] = useState<TxStage>("idle");
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
   const [recipientAddress, setRecipientAddress] = useState("");
+  const withdrawingRef = React.useRef(false);
 
   // Resolver management
   const [resolverAddress, setResolverAddress] = useState("");
   const [resolverStage, setResolverStage] = useState<TxStage>("idle");
   const [resolverError, setResolverError] = useState<string | null>(null);
+  // Add and remove share one lock: only one resolver transaction may be in flight.
+  const resolverBusyRef = React.useRef(false);
 
   // Fee recipient management
   const [feeRecipientAddress, setFeeRecipientAddress] = useState("");
   const [feeRecipientStage, setFeeRecipientStage] = useState<TxStage>("idle");
   const [feeRecipientError, setFeeRecipientError] = useState<string | null>(null);
+  const feeRecipientBusyRef = React.useRef(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -68,7 +72,8 @@ export default function PlatformStats() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleWithdraw = useCallback(async () => {
-    if (!publicKey) return;
+    if (!publicKey || withdrawingRef.current) return;
+    withdrawingRef.current = true;
     const to = recipientAddress.trim() || publicKey;
     setWithdrawStage("signing");
     setWithdrawError(null);
@@ -86,11 +91,14 @@ export default function PlatformStats() {
     } catch (err) {
       setWithdrawStage("failed");
       setWithdrawError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      withdrawingRef.current = false;
     }
   }, [publicKey, recipientAddress, signTransaction, fetchData]);
 
   const handleAddResolver = useCallback(async () => {
-    if (!publicKey || !resolverAddress.trim()) return;
+    if (!publicKey || !resolverAddress.trim() || resolverBusyRef.current) return;
+    resolverBusyRef.current = true;
     setResolverStage("signing");
     setResolverError(null);
     try {
@@ -106,11 +114,14 @@ export default function PlatformStats() {
     } catch (err) {
       setResolverStage("failed");
       setResolverError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      resolverBusyRef.current = false;
     }
   }, [publicKey, resolverAddress, signTransaction]);
 
   const handleRemoveResolver = useCallback(async () => {
-    if (!publicKey || !resolverAddress.trim()) return;
+    if (!publicKey || !resolverAddress.trim() || resolverBusyRef.current) return;
+    resolverBusyRef.current = true;
     setResolverStage("signing");
     setResolverError(null);
     try {
@@ -126,11 +137,14 @@ export default function PlatformStats() {
     } catch (err) {
       setResolverStage("failed");
       setResolverError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      resolverBusyRef.current = false;
     }
   }, [publicKey, resolverAddress, signTransaction]);
 
   const handleAddFeeRecipient = useCallback(async () => {
-    if (!publicKey || !feeRecipientAddress.trim()) return;
+    if (!publicKey || !feeRecipientAddress.trim() || feeRecipientBusyRef.current) return;
+    feeRecipientBusyRef.current = true;
     setFeeRecipientStage("signing");
     setFeeRecipientError(null);
     try {
@@ -146,6 +160,8 @@ export default function PlatformStats() {
     } catch (err) {
       setFeeRecipientStage("failed");
       setFeeRecipientError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      feeRecipientBusyRef.current = false;
     }
   }, [publicKey, feeRecipientAddress, signTransaction]);
 

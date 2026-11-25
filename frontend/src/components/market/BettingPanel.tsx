@@ -67,9 +67,14 @@ export default function BettingPanel({
   const isSubmittingRef = React.useRef(false);
   // Set when the user has reviewed the bet summary and is deciding whether to sign.
   const [confirming, setConfirming] = useState(false);
+  // React state updates are not synchronous. These refs lock the flow on the
+  // first click so rapid double clicks cannot open two confirmations or send
+  // two signing requests before the component re-renders (#1005).
+  const confirmingRef = React.useRef(false);
 
   // Any change to the bet invalidates the summary the user reviewed.
   useEffect(() => {
+    confirmingRef.current = false;
     setConfirming(false);
   }, [side, amountStr]);
 
@@ -144,8 +149,14 @@ export default function BettingPanel({
 
   // Step 1: show the summary. Nothing is sent to the wallet yet.
   const requestConfirm = () => {
-    if (!canSubmit || isBusy) return;
+    if (!canSubmit || isBusy || confirmingRef.current || isSubmittingRef.current) return;
+    confirmingRef.current = true;
     setConfirming(true);
+  };
+
+  const cancelConfirm = () => {
+    confirmingRef.current = false;
+    setConfirming(false);
   };
 
   // Step 2: the user confirmed the summary; this is the call that opens the wallet.
@@ -158,6 +169,7 @@ export default function BettingPanel({
       await submit(market.id, side, amount);
     } finally {
       isSubmittingRef.current = false;
+      confirmingRef.current = false;
       setIsSubmitting(false);
       setConfirming(false);
     }
@@ -484,8 +496,9 @@ export default function BettingPanel({
           <div className="grid grid-cols-2 gap-3">
             <button
               type="button"
-              onClick={() => setConfirming(false)}
+              onClick={cancelConfirm}
               disabled={isBusy}
+              aria-busy={isBusy}
               className="w-full btn-secondary py-2.5 text-sm disabled:opacity-50"
             >
               Cancel
@@ -493,10 +506,11 @@ export default function BettingPanel({
             <button
               type="button"
               onClick={() => void handleSubmit()}
-              disabled={!canSubmit}
+              disabled={!canSubmit || isSubmitting}
+              aria-busy={isSubmitting}
               className="w-full btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Confirm &amp; sign
+              {isSubmitting ? "Signing..." : "Confirm & sign"}
             </button>
           </div>
         </div>
@@ -506,6 +520,7 @@ export default function BettingPanel({
         <button
           onClick={requestConfirm}
           disabled={!canSubmit}
+          aria-busy={isBusy}
           className="w-full btn-primary py-3 text-base disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {!connected
@@ -536,6 +551,7 @@ export default function BettingPanel({
           />
           <button
             onClick={() => {
+              confirmingRef.current = false;
               setShowShare(false);
               setAmountStr("");
               reset();

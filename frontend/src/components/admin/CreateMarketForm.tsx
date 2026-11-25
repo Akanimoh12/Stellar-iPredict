@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { useToast } from "@/hooks/useToast";
 import { createMarket } from "@/services/market";
@@ -32,18 +32,21 @@ export default function CreateMarketForm() {
   const [stage, setStage] = useState<TxStage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const submittingRef = useRef(false);
 
   const effectiveDuration = useCustom
     ? parseInt(customDuration, 10) * 3600
     : durationSecs;
 
   const handleSubmit = useCallback(async () => {
+    if (submittingRef.current) return;
     if (!publicKey || !question.trim()) return;
     if (!effectiveDuration || effectiveDuration <= 0) {
       setError("Duration must be positive");
       return;
     }
 
+    submittingRef.current = true;
     setError(null);
     setSuccess(false);
     setStage("building");
@@ -75,6 +78,8 @@ export default function CreateMarketForm() {
     } catch (err) {
       setStage("failed");
       setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      submittingRef.current = false;
     }
   }, [publicKey, question, imageUrl, category, effectiveDuration, signTransaction]);
 

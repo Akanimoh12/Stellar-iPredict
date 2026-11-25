@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { claim } from "@/services/market";
 import { useWallet } from "@/hooks/useWallet";
 import type { TransactionResult, AppError } from "@/types";
@@ -28,14 +28,19 @@ export function useClaim(): UseClaimResult {
   const [loading, setLoading] = useState(false);
   const [stage, setStage] = useState<TxStage>("idle");
   const [error, setError] = useState<string | null>(null);
+  // Claim buttons share this hook per component; the ref guard is synchronous
+  // so rapid clicks cannot submit the same claim twice before re-render.
+  const inFlightRef = useRef(false);
 
   const submit = useCallback(
     async (marketId: number) => {
+      if (inFlightRef.current) return;
       if (!publicKey) {
         setError("Wallet not connected");
         return;
       }
 
+      inFlightRef.current = true;
       setLoading(true);
       setError(null);
       setResult(null);
@@ -75,6 +80,7 @@ export function useClaim(): UseClaimResult {
         }
         setError(message);
       } finally {
+        inFlightRef.current = false;
         setLoading(false);
       }
     },

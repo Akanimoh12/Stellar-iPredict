@@ -335,3 +335,40 @@ export function purgeLegacyCache(): void {
     markDegraded("clear-failed", err);
   }
 }
+
+/**
+ * Invalidate cached odds, pools, and balances after a successful bet.
+ * Ensures users see updated market odds and spendable balances immediately
+ * without waiting for the 30-second cache TTL to expire.
+ */
+export function invalidateAfterBet(marketId: number, publicKey?: string): void {
+  invalidate("markets");
+  invalidate(`market_${marketId}`);
+  invalidate(`market_${marketId}_bettors`);
+  if (publicKey) {
+    invalidate(`market_${marketId}_bet_${publicKey}`);
+    invalidate(`xlm_balance_${publicKey}`);
+    invalidate(`token_bal_${publicKey}`);
+    invalidate(`lb_stats_${publicKey}`);
+    invalidate(`lb_pts_${publicKey}`);
+  }
+}
+
+/**
+ * Invalidate cached odds, positions, and balances after a successful claim.
+ * Ensures users see updated token/XLM balances and claimed position state
+ * immediately without waiting for the 30-second cache TTL to expire.
+ */
+export function invalidateAfterClaim(marketId: number, publicKey?: string): void {
+  invalidate("markets");
+  invalidate(`market_${marketId}`);
+  invalidate("market_fees");
+  if (publicKey) {
+    invalidate(`market_${marketId}_bet_${publicKey}`);
+    invalidate(`xlm_balance_${publicKey}`);
+    invalidate(`token_bal_${publicKey}`);
+    invalidate(`lb_stats_${publicKey}`);
+    invalidate(`lb_pts_${publicKey}`);
+    invalidate(`lb_rank_${publicKey}`);
+  }
+}

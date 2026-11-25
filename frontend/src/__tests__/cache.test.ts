@@ -6,6 +6,8 @@ import {
   set,
   invalidate,
   invalidateAll,
+  invalidateAfterBet,
+  invalidateAfterClaim,
   getCacheHealth,
   resetCacheHealth,
   CACHE_PREFIX,
@@ -543,5 +545,75 @@ describe("cache – versioning and legacy handling", () => {
     expect(store["ip_legacyB"]).toBeUndefined();
     expect(store["ip_wallet_type"]).toBe("xbull");
     expect(store["ip_wallet_pubkey"]).toBe("GXBULL123...");
+  });
+});
+
+// ── Bet and claim cache invalidation (#841) ───────────────────────────────────
+
+describe("cache – invalidateAfterBet and invalidateAfterClaim", () => {
+  const user = "GBETTOR123...";
+
+  it("invalidates market odds, pools, and user balances after successful bet", () => {
+    set("markets", [{ id: 1 }, { id: 2 }]);
+    set("market_1", { id: 1, totalYes: 100 });
+    set("market_1_bettors", ["addr1"]);
+    set(`market_1_bet_${user}`, { amount: 50 });
+    set(`xlm_balance_${user}`, 500);
+    set(`token_bal_${user}`, 100);
+    set(`lb_stats_${user}`, { wins: 5 });
+    set(`lb_pts_${user}`, 42);
+    set("unrelated_market_2", { id: 2 });
+
+    invalidateAfterBet(1, user);
+
+    expect(get("markets")).toBeNull();
+    expect(get("market_1")).toBeNull();
+    expect(get("market_1_bettors")).toBeNull();
+    expect(get(`market_1_bet_${user}`)).toBeNull();
+    expect(get(`xlm_balance_${user}`)).toBeNull();
+    expect(get(`token_bal_${user}`)).toBeNull();
+    expect(get(`lb_stats_${user}`)).toBeNull();
+    expect(get(`lb_pts_${user}`)).toBeNull();
+    expect(get("unrelated_market_2")).toEqual({ id: 2 });
+  });
+
+  it("invalidates positions, fees, and token/XLM balances after successful claim", () => {
+    set("markets", [{ id: 1 }]);
+    set("market_1", { id: 1, resolved: true });
+    set("market_fees", 15);
+    set(`market_1_bet_${user}`, { amount: 50, claimed: false });
+    set(`xlm_balance_${user}`, 200);
+    set(`token_bal_${user}`, 50);
+    set(`lb_stats_${user}`, { wins: 1 });
+    set(`lb_pts_${user}`, 10);
+    set(`lb_rank_${user}`, 3);
+    set("unrelated_cache", "keep");
+
+    invalidateAfterClaim(1, user);
+
+    expect(get("markets")).toBeNull();
+    expect(get("market_1")).toBeNull();
+    expect(get("market_fees")).toBeNull();
+    expect(get(`market_1_bet_${user}`)).toBeNull();
+    expect(get(`xlm_balance_${user}`)).toBeNull();
+    expect(get(`token_bal_${user}`)).toBeNull();
+    expect(get(`lb_stats_${user}`)).toBeNull();
+    expect(get(`lb_pts_${user}`)).toBeNull();
+    expect(get(`lb_rank_${user}`)).toBeNull();
+    expect(get("unrelated_cache")).toBe("keep");
+  });
+
+  it("invalidates market keys when no user publicKey is provided", () => {
+    set("markets", [{ id: 1 }]);
+    set("market_1", { id: 1 });
+    set("market_1_bettors", ["addr1"]);
+    set(`xlm_balance_${user}`, 200);
+
+    invalidateAfterBet(1);
+
+    expect(get("markets")).toBeNull();
+    expect(get("market_1")).toBeNull();
+    expect(get("market_1_bettors")).toBeNull();
+    expect(get(`xlm_balance_${user}`)).toBe(200);
   });
 });

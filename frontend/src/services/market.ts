@@ -412,12 +412,7 @@ export async function placeBet(
   );
 
   if (result.success) {
-    cache.invalidate(CACHE_MARKETS);
-    cache.invalidate(CACHE_MARKET(marketId));
-    cache.invalidate(CACHE_BET(marketId, publicKey));
-    cache.invalidate(CACHE_BETTORS(marketId));
-    // Invalidate any XLM balance cache so BettingPanel shows updated balance
-    cache.invalidate(`xlm_balance_${publicKey}`);
+    cache.invalidateAfterBet(marketId, publicKey);
   }
   return result;
 }
@@ -504,10 +499,7 @@ export async function claim(
   );
 
   if (result.success) {
-    cache.invalidate(CACHE_BET(marketId, publicKey));
-    cache.invalidate(CACHE_MARKET(marketId));
-    cache.invalidate(CACHE_FEES);
-    cache.invalidate(`xlm_balance_${publicKey}`);
+    cache.invalidateAfterClaim(marketId, publicKey);
   }
   return result;
 }

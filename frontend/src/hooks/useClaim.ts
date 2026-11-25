@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { claim } from "@/services/market";
+import { invalidateAfterClaim } from "@/services/cache";
 import { useWallet } from "@/hooks/useWallet";
 import type { TransactionResult, AppError } from "@/types";
 
@@ -55,6 +56,7 @@ export function useClaim(): UseClaimResult {
         if (txResult.success) {
           setStage("confirmed");
           setResult(txResult);
+          invalidateAfterClaim(marketId, publicKey);
         } else {
           setStage("failed");
           setError(txResult.error || "Claim failed");

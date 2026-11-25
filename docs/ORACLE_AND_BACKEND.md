@@ -1,8 +1,9 @@
 # iPredict — Oracle & Backend Architecture
 
-> **Status:** Design document only. Not implemented.
-> These systems are planned for Phase 2 after mainnet launch.
-> Current contract resolution is admin/resolver-controlled (documented in security audit).
+> **Status:** Mixed implementation and design document.
+> The optimistic-oracle contract, backend cache utilities, and oracle routes are implemented;
+> the decentralized provider network remains Phase 2 design work. Current contract
+> resolution remains admin/resolver-controlled where optimistic resolution is not used.
 
 ---
 
@@ -302,6 +303,25 @@ const ALERTS = {
 ---
 
 ## Part 2 — Backend Architecture
+
+### Caching Strategy
+
+**Status: Implemented.** The backend uses cache-aside reads through
+[`getOrSet`](../backend/src/cache/cacheAside.ts), with versioned keys from
+[`cacheKeys.ts`](../backend/src/cache/cacheKeys.ts). Cache misses fall back to
+the database; Redis failures degrade to the loader instead of failing requests.
+
+| Resource | TTL | Client staleness bound |
+| --- | ---: | ---: |
+| Active markets and status feed | 15 seconds | 15 seconds plus request time |
+| Market detail, market lists, bets, and odds | 30 seconds | 30 seconds plus request time |
+| Leaderboard and global stats | 60 seconds | 60 seconds plus request time |
+
+Market mutations clear the affected market, list, bet, and odds keys via
+[`invalidate.ts`](../backend/src/cache/invalidate.ts). Not-found results are
+negative-cached for 30 seconds to protect the database from repeated misses.
+During a Redis outage, an entry can remain stale only until its existing TTL
+expires; subsequent reads use the database directly.
 
 > **Not implemented.** The current frontend reads directly from Soroban RPC.
 > This is fine for <100 markets but will not scale beyond ~500 markets.

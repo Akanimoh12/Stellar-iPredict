@@ -39,11 +39,12 @@ function toPublicResult(result: CheckResult): PublicCheckResult {
 }
 
 interface ReadyzResponse {
-  status: "ready" | "not ready";
+  status: "ready" | "ready (maintenance)" | "not ready";
   checks: {
     db: PublicCheckResult;
     redis: PublicCheckResult;
   };
+  maintenance?: MaintenanceInfo;
 }
 
 export const healthRoutes: FastifyPluginAsync = async (server) => {
@@ -57,7 +58,7 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
           200: {
             type: "object",
             properties: {
-              status: { type: "string", enum: ["ready"] },
+              status: { type: "string", enum: ["ready", "ready (maintenance)"] },
               checks: {
                 type: "object",
                 properties: {
@@ -79,6 +80,12 @@ export const healthRoutes: FastifyPluginAsync = async (server) => {
                   },
                 },
                 required: ["db", "redis"],
+              },
+              maintenance: {
+                type: "object",
+                properties: {
+                  mode: { type: "string", enum: ["off", "read_only", "full"] },
+                },
               },
             },
             required: ["status", "checks"],

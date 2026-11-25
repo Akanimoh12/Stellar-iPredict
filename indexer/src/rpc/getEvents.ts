@@ -368,4 +368,13 @@ export class SorobanRpcClient implements RpcClient {
 
     throw lastError;
   }
+
+  /**
+   * Stops the background primary probe timer (if using endpoint pool).
+   */
+  stop(): void {
+    if (this.pool) {
+      this.pool.stop();
+    }
+  }
 }

@@ -34,6 +34,7 @@ export default function BetHistory({ bets, loading }: BetHistoryProps) {
   const { submit, loading: claiming, stage, error, reset } = useClaim();
   const { showToast } = useToast();
   const [claimingId, setClaimingId] = React.useState<number | null>(null);
+  const isClaimingRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     if (stage === "confirmed") {
@@ -44,8 +45,14 @@ export default function BetHistory({ bets, loading }: BetHistoryProps) {
   }, [stage, error, showToast]);
 
   const handleClaim = async (marketId: number) => {
+    if (claiming || isClaimingRef.current !== null) return;
+    isClaimingRef.current = marketId;
     setClaimingId(marketId);
-    await submit(marketId);
+    try {
+      await submit(marketId);
+    } finally {
+      isClaimingRef.current = null;
+    }
   };
 
   if (loading) {
@@ -137,7 +144,8 @@ export default function BetHistory({ bets, loading }: BetHistoryProps) {
                       ) : canClaim && !bet.claimed ? (
                         <button
                           onClick={() => handleClaim(market.id)}
-                          className="btn-primary text-xs px-3 py-1.5"
+                          disabled={claiming || claimingId !== null}
+                          className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Claim
                         </button>

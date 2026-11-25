@@ -1,4 +1,4 @@
-import { marketCreatedPayloadSchema, type MarketCreatedPayload } from "../schemas.js";
+import { parseEventPayload, type MarketCreatedPayload } from "../schemas.js";
 import { invalidateOnMarketCreated } from "../cache.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 import { insertProcessedEvent } from "./idempotency.js";
@@ -11,7 +11,7 @@ export function decodeMarketCreatedEvent(event: Pick<DecodedContractEvent, "topi
     throw new Error(`Unexpected event topic: ${String(domain)}:${String(action)}`);
   }
 
-  return marketCreatedPayloadSchema.parse(event.data);
+  return parseEventPayload("market_created", event.data);
 }
 
 export async function handleMarketCreatedEvent(

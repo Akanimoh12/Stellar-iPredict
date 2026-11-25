@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { ResolverKeyManager } from "../src/aggregator/key-rotation.js";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  EnvironmentResolverKeyProvider,
+  MountedSecretResolverKeyProvider,
+  ResolverKeyManager,
+  ResolverRotationScheduler,
+} from "../src/aggregator/key-rotation.js";
 
 describe("ResolverKeyManager", () => {
   it("starts with the initial key as active", () => {
@@ -78,5 +86,76 @@ describe("ResolverKeyManager", () => {
   it("returns false when revoking a key that is not pending", () => {
     const manager = new ResolverKeyManager("KEY_A");
     expect(manager.revokePendingKey("UNKNOWN")).toBe(false);
+  });
+});
+
+
+describe("resolver key providers", () => {
+  it("loads the local-development environment fallback", async () => {
+    const provider = new EnvironmentResolverKeyProvider({ RESOLVER_KEY: "  SLOCAL  " });
+    await expect(provider.getKey()).resolves.toBe("SLOCAL");
+  });
+
+  it("loads a mounted secret without exposing its contents on failure", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "resolver-key-"));
+    const path = join(dir, "resolver");
+    await writeFile(path, "  SMOUNTED\n", "utf8");
+    const provider = new MountedSecretResolverKeyProvider(path);
+    await expect(provider.getKey()).resolves.toBe("SMOUNTED");
+
+    const missing = new MountedSecretResolverKeyProvider(join(dir, "missing"));
+    await expect(missing.getKey()).rejects.toThrow("could not be loaded from mounted-secret");
+  });
+});
+
+describe("ResolverRotationScheduler", () => {
+  it("registers and verifies the incoming key before retiring the outgoing key", async () => {
+    const manager = new ResolverKeyManager("KEY_A");
+    const events: string[] = [];
+    const scheduler = new ResolverRotationScheduler(manager, {
+      provider: { source: "test", getKey: async () => "KEY_B" },
+      overlapMs: 25,
+      intervalMs: 60_000,
+      sleep: async (ms) => {
+        expect(ms).toBe(25);
+        events.push("overlap");
+      },
+      hooks: {
+        registerIncomingKey: async (key) => events.push(`register:${key}`),
+        verifyIncomingKey: async (key) => {
+          expect(manager.isAuthorized("KEY_A")).toBe(true);
+          expect(manager.isAuthorized("KEY_B")).toBe(true);
+          events.push(`verify:${key}`);
+        },
+        retireOutgoingKey: async (key) => events.push(`retire:${key}`),
+      },
+    });
+
+    await expect(scheduler.runOnce()).resolves.toBe(true);
+    expect(events).toEqual(["register:KEY_B", "verify:KEY_B", "overlap", "retire:KEY_A"]);
+    expect(manager.getActiveKey()).toBe("KEY_B");
+    expect(manager.isAuthorized("KEY_A")).toBe(false);
+  });
+
+  it("rolls back to the previous key when verification fails", async () => {
+    const manager = new ResolverKeyManager("KEY_A");
+    const retired: string[] = [];
+    const scheduler = new ResolverRotationScheduler(manager, {
+      provider: { source: "test", getKey: async () => "KEY_B" },
+      overlapMs: 0,
+      intervalMs: 60_000,
+      hooks: {
+        registerIncomingKey: async () => undefined,
+        verifyIncomingKey: async () => {
+          throw new Error("probe failed");
+        },
+        retireOutgoingKey: async (key) => retired.push(key),
+      },
+    });
+
+    await expect(scheduler.runOnce()).rejects.toThrow("previous key restored");
+    expect(manager.getActiveKey()).toBe("KEY_A");
+    expect(manager.isAuthorized("KEY_B")).toBe(false);
+    expect(retired).toEqual([]);
   });
 });

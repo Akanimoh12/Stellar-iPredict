@@ -64,8 +64,13 @@ describe("market_resolved handler", () => {
       expect.stringContaining("SET resolved = TRUE"),
       [42, true],
     );
-    expect(redis.del).toHaveBeenCalledWith("market:42", "markets:all", "markets:active");
-    expect(redis.del).toHaveBeenCalledWith("leaderboard:top20");
+    expect(redis.del).toHaveBeenCalledWith(
+      "ipredict:v1:market:42",
+      "ipredict:v1:markets:all",
+      "ipredict:v1:markets:active",
+      "ipredict:v1:bets:42",
+      "ipredict:v1:leaderboard:top20",
+    );
   });
 
 });

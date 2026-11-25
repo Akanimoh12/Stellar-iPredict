@@ -51,13 +51,16 @@ export function stroopsToXlm(stroops: AmountInput): string {
  * Converts an XLM amount to stroops exactly.
  *
  * XLM values must contain no more than seven decimal places. Rounding is not
- * performed because silently changing a payment amount is unsafe.
+ * performed because silently changing a payment amount is unsafe. Numeric
+ * inputs are accepted only when the resulting stroop amount is a safe integer;
+ * use a string or bigint for larger amounts.
  */
 export function xlmToStroops(xlm: AmountInput): bigint {
   let text: string;
+  const isNumberInput = typeof xlm === "number";
 
-  if (typeof xlm === "number") {
-    if (!Number.isFinite(xlm) || Math.abs(xlm) >= 1e21) {
+  if (isNumberInput) {
+    if (!Number.isFinite(xlm) || Math.abs(xlm) > Number.MAX_SAFE_INTEGER) {
       throw new TypeError(
         "xlm must be a non-negative decimal with at most 7 decimal places"
       );
@@ -81,13 +84,43 @@ export function xlmToStroops(xlm: AmountInput): bigint {
 
   const whole = BigInt(match[1]);
   const fraction = (match[2] ?? "").padEnd(DECIMAL_PLACES, "0");
+  const stroops = whole * STROOPS_PER_XLM_BIGINT + BigInt(fraction || "0");
 
-  return whole * STROOPS_PER_XLM_BIGINT + BigInt(fraction || "0");
+  if (isNumberInput && stroops > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new TypeError(
+      "xlm must be provided as a string or bigint when the stroop amount exceeds Number.MAX_SAFE_INTEGER"
+    );
+  }
+
+  return stroops;
+}
+
+/**
+ * Adds two XLM amount representations exactly without converting to floating-point numbers.
+ * The result is formatted as a fixed seven-decimal string.
+ */
+export function addXlmAmounts(a: AmountInput, b: AmountInput): string {
+  const stroopsA = xlmToStroops(a);
+  const stroopsB = xlmToStroops(b);
+  return stroopsToXlm(stroopsA + stroopsB);
+}
+
+/**
+ * Ensures the PostgreSQL client driver returns NUMERIC columns (OID 1700)
+ * as raw strings rather than parsing them into lossy JavaScript numbers.
+ */
+export function configurePgNumericParser(pgTypes: {
+  setTypeParser: (oid: number, fn: (val: string) => unknown) => void;
+  builtins?: { NUMERIC: number };
+}): void {
+  const numericOid = pgTypes.builtins?.NUMERIC ?? 1700;
+  pgTypes.setTypeParser(numericOid, (val: string) => val);
 }
 
 /**
  * Converts XLM to a JavaScript number of stroops when the result is safe.
- * Use xlmToStroops for amounts that may exceed Number.MAX_SAFE_INTEGER.
+ * @deprecated Use xlmToStroops for amounts that may exceed Number.MAX_SAFE_INTEGER.
+ * Any amount path that converts through a JS number can silently lose precision on large values.
  */
 export function xlmToStroopsNumber(xlm: AmountInput): number {
   const stroops = xlmToStroops(xlm);

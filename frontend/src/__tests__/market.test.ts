@@ -38,8 +38,8 @@ vi.mock("@stellar/stellar-sdk", () => ({
       return { type: "address", value: this._addr };
     }
   },
-  nativeToScVal: (val: unknown, opts: { type: string }) => ({
-    type: opts.type,
+  nativeToScVal: (val: unknown, opts?: { type: string }) => ({
+    type: opts?.type ?? (typeof val === "boolean" ? "bool" : typeof val),
     value: val,
   }),
   xdr: {

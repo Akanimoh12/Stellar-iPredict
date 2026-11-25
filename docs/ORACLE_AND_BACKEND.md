@@ -67,6 +67,10 @@ const DISPUTE_WINDOW: u64 = 172800;  // 48 hours to dispute
 
 ### Option B — Optimistic Oracle (For Binary Markets)
 
+> **Implemented** in `contracts/prediction_market/src/lib.rs`. The contract
+> entrypoints are `submit_outcome`, `challenge`, `finalize_outcome` and
+> `resolve_challenge`; see "Optimistic Oracle Contract API" below.
+
 **Model:** Anyone can submit an outcome. There is a challenge period. If unchallenged, it finalizes. If challenged, escalates to a dispute council.
 
 #### States
@@ -90,12 +94,152 @@ const DISPUTER_BOND:  i128 = 200_0000000;  // 200 XLM (must exceed submitter)
 // Council fee: 10% of loser's bond
 ```
 
+#### Front-running analysis (issue #604): accepted risk, no commit-reveal
+
+**The concern.** `submit_outcome` is permissionless and the contract accepts
+one submission per market (`SubmissionExists`). An observer who sees an
+honest submission forming, either in the transaction queue or through the
+off-chain intake, can send the same outcome first and become the submitter
+of record.
+
+**What the front-runner gains**, from the payout paths in
+`contracts/prediction_market/src/lib.rs`:
+
+| Path | Front-runner receives | Net gain |
+|---|---|---|
+| Unchallenged → `finalize_outcome` (the normal case) | own bond back, in full | **0**, minus tx fees and 24h of locked capital |
+| Challenged, council upholds the outcome → `resolve_dispute` | own bond + half the challenger's bond | **+½ × DISPUTER_BOND**, i.e. +100 XLM at the 200 XLM floor |
+| Challenged, council overturns | nothing | **−SUBMITTER_BOND**, i.e. −100 XLM |
+| Council misses its window → `finalize_challenge_timeout` | own bond back | **0** |
+
+The only case that pays requires (a) a third party to challenge a **correct**
+outcome and (b) the council to rule against that challenger. A challenger
+who knowingly disputes a correct outcome is giving away half their bond, so
+this case is rare by design. The front-runner's expected value is roughly
+`P(frivolous challenge) × 100 XLM − tx fees − cost of locking ≥100 XLM for 24h`.
+For an uncontroversial market that probability is close to zero.
+
+**What the honest submitter loses.** Almost nothing. The bond transfer runs
+after the `SubmissionExists` check and a failed Soroban transaction is atomic,
+so a front-run submission escrows nothing and costs only the transaction fee
+(the aggregator sets a 0.01 XLM max). `OffChainSubmitter` also simulates
+`get_oracle_submission` before sending, so in most races it never sends.
+
+**What the protocol loses.** Nothing. A front-runner copying the correct
+outcome resolves the market exactly as the honest submitter would have. The
+real threat is a **wrong** outcome landing first, and that is not front-running.
+It is a false submission, already handled by the 24h challenge window and the
+challenge bot (`oracle/src/aggregator/challenge-bot.ts`).
+
+**Why not commit-reveal.** Commit-reveal needs two transactions (commit a
+hash of `outcome‖salt‖submitter`, then reveal) and a reveal window long enough
+for honest submitters to land the reveal under congestion:
+
+- Minimum added latency: one ledger close (~5–6 s) between commit and reveal.
+  A safe reveal window of about 10 ledgers (~1 min) is still under 0.1% of the
+  24h challenge window that dominates time to finalization. So latency is
+  **not** the cost that matters.
+- The real costs are a second transaction fee per submission, new contract
+  state (pending commits plus a reveal deadline), and a new liveness failure:
+  a committer who never reveals blocks the market until a timeout clears the
+  commit. That needs new finalizer logic and more bond-stranding cases, which
+  is the class of bug the finalizers exist to prevent.
+
+Adding that complexity to protect a prize that is zero in the normal case is
+a poor trade.
+
+**Decision.** Accepted risk. No commit-reveal.
+
+**Residual risk.**
+
+- A front-runner can capture the bond-plus-half payout in the rare
+  frivolous-challenge case. That value comes out of the frivolous challenger's
+  bond, not out of user funds or the honest submitter.
+- The honest submitter's bond return is not "stolen", since it was never
+  escrowed. The protocol does not pay submitters for work, so there is no
+  work reward to steal.
+- **Revisit this decision** if any of these change: a submitter reward or
+  fee share is added to the unchallenged path; `DISPUTER_BOND` grows enough
+  that ½ of it is a meaningful prize; or the off-chain intake starts
+  publishing pending outcomes before they are on-chain.
+
 #### Why Optimistic Works for iPredict
 
 - Most markets are uncontroversial (BTC price, sports scores)
 - Fast resolution for obvious outcomes (bond posted, no challenge → auto-finalize in 24h)
 - Challenge mechanism adds security for disputed outcomes
 - No oracle providers need to be registered in advance
+
+---
+
+### Optimistic Oracle Contract API
+
+Constants as deployed (`contracts/prediction_market/src/lib.rs`):
+
+```rust
+const SUBMITTER_BOND:  i128 = 100_0000000; // 100 XLM — minimum submitter bond
+const DISPUTER_BOND:   i128 = 200_0000000; // 200 XLM — minimum disputer bond
+const CHALLENGE_WINDOW: u64 = 86_400;      // 24h to challenge a submission
+const COUNCIL_WINDOW:   u64 = 259_200;     // 72h for the council to rule
+const COUNCIL_FEE_BPS: i128 = 1_000;       // 10% of the loser's bond
+```
+
+| Function | Caller | Effect |
+|---|---|---|
+| `submit_outcome(submitter, market_id, outcome, bond)` | anyone | Escrows `bond` (≥ `SUBMITTER_BOND`), records the submission in state `Submitted`, starts the challenge window. Market must be expired, unresolved and not cancelled; one submission per market. |
+| `challenge(challenger, market_id, bond)` | anyone | Escrows `bond` (≥ `DISPUTER_BOND` **and** strictly greater than the submitter's bond) inside the window, asserts the opposite outcome, moves the submission to `Escalated`. |
+| `finalize_outcome(market_id)` | anyone | After the challenge window with no challenge: returns the bond in full and resolves the market with the submitted outcome. |
+| `resolve_challenge(caller, market_id, outcome)` | admin or registered resolver (the council) | Rules on an escalated market, distributes the bonds and resolves the market. |
+| `get_oracle_submission(market_id)` | view | Returns the full `OracleSubmission` record. |
+
+Bond settlement on a council ruling (escrow always nets to zero):
+
+| Ruling | Winner receives | Credited to `AccumulatedFees` |
+|---|---|---|
+| Submitter correct | own bond + ½ of the disputer bond | remainder of the disputer bond (includes the 10% council fee) |
+| Disputer correct | both bonds, less the 10% council fee | 10% council fee on the submitter bond |
+
+An unchallenged finalization takes no fee — the bond is returned whole.
+
+If a market is cancelled or force-resolved (via `resolve_market`) while an
+oracle submission is open, the finalizers still run so bonds are never stranded
+in escrow — they simply skip the resolution step and leave the market as it is.
+
+Oracle-specific contract errors: `21` submission exists, `22` submission not
+found, `23` already challenged, `24` challenge window not elapsed, `25` challenge
+window closed, `26` invalid state transition, `27` bond too small. These errors
+are reachable and documented at their definition site in the contract source.
+
+---
+
+### Oracle Event Topics
+
+Every state transition publishes one typed event. Topics are
+`(Symbol "oracle", Symbol <action>)` — the same domain/action shape the indexer
+already routes on for `mkt` and `referral`. Event data is a map keyed by the
+field names below, so handlers read `payload.market_id`, `payload.outcome`, …
+exactly as `market_resolved` does.
+
+| Topics | Emitted by | Data fields |
+|---|---|---|
+| `["oracle", "submitted"]` | `submit_outcome` | `market_id: u64`, `submitter: Address`, `outcome: bool`, `bond: i128`, `submitted_at: u64`, `challenge_deadline: u64` |
+| `["oracle", "challenged"]` | `challenge` | `market_id: u64`, `challenger: Address`, `outcome: bool` (challenger's side), `bond: i128`, `submitter: Address`, `submitter_bond: i128`, `challenged_at: u64` |
+| `["oracle", "escalated"]` | `challenge` | `market_id: u64`, `submitter: Address`, `challenger: Address`, `outcome: bool` (disputed submission), `total_bond: i128`, `escalated_at: u64`, `council_deadline: u64` |
+| `["oracle", "finalized"]` | `finalize_outcome`, `resolve_challenge` | `market_id: u64`, `outcome: bool`, `challenged: bool`, `submitter: Address`, `challenger: Option<Address>`, `submitter_payout: i128`, `challenger_payout: i128`, `council_fee: i128`, `protocol_credit: i128`, `finalized_at: u64` |
+
+Notes for indexer handlers:
+
+- `challenge` emits `challenged` **and** `escalated` in that order, in one
+  transaction — the `Challenged` state is never observable on-chain.
+- `finalized.challenged` distinguishes the two paths: `false` for an
+  unchallenged auto-finalization (all payout/fee fields are the returned bond
+  and zeros), `true` for a council ruling.
+- `protocol_credit` is the total added to `AccumulatedFees`; `council_fee` is
+  the 10% share of the loser's bond within it.
+- A `finalized` event normally means the market is now resolved, so it should
+  invalidate the same caches as `market_resolved`. The exception is a market
+  cancelled or force-resolved out of band — there the event only settles bonds,
+  so handlers should read market state rather than assume the outcome.
 
 ---
 
@@ -291,6 +435,7 @@ CREATE INDEX idx_events_ledger   ON events(ledger_seq DESC);
 import { rpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 
 const POLL_INTERVAL_MS = 5_000;
+// Capped at 1000 (MAX_EVENTS_PER_PAGE) to bound backfill memory usage.
 const EVENTS_PER_PAGE = 200;
 
 async function indexEvents(fromLedger: number): Promise<number> {
@@ -304,10 +449,16 @@ async function indexEvents(fromLedger: number): Promise<number> {
     limit: EVENTS_PER_PAGE
   });
 
-  for (const event of response.events) {
-    const topics = event.topic.map(t => scValToNative(t));
-    const data = scValToNative(event.value);
-    await writeEventToDb(event.ledger, event.txHash, topics, data);
+  // Process in chunks to bound memory and yield to the event loop.
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < response.events.length; i += CHUNK_SIZE) {
+    const chunk = response.events.slice(i, i + CHUNK_SIZE);
+    for (const event of chunk) {
+      const topics = event.topic.map(t => scValToNative(t));
+      const data = scValToNative(event.value);
+      await writeEventToDb(event.ledger, event.txHash, topics, data);
+    }
+    await new Promise(resolve => setImmediate(resolve));
   }
 
   return response.latestLedger;
@@ -434,6 +585,61 @@ POST /api/oracle/submit
      Response: { accepted: boolean, submissionsNeeded: number }
 ```
 
+### Oracle submission signature (canonical message)
+
+`/api/oracle/submit` (and its versioned `POST /api/v1/oracle/submit`) rejects
+submissions whose `signature` does not verify against the claimed `provider`
+keypair. The endpoint returns `401` and records nothing on failure, so the
+shared API key alone cannot forge an outcome attributed to a provider.
+
+The `signature` is the Stellar SDK ed25519 signature over the **exact** UTF-8
+bytes of this canonical message (LF-separated, no trailing newline, fields in
+this order):
+
+```
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
+```
+
+Rules:
+- `<marketId>` is the integer market id; `<outcome>` is the string form of the
+  outcome (`"YES"` / `"NO"` or any other string value).
+- `<provider>` is the uppercase Stellar public key (G…) claimed in the body.
+- `<timestamp>` is the Unix timestamp in **seconds** from the body — `0` when
+  the body omits it.
+- `<nonce>` is the nonce string from the body — the empty string when omitted.
+  Both timestamp and nonce make the signature non-replayable; providers should
+  send at least one.
+- No other field, whitespace or trailing newline is part of the message.
+
+The endpoint reconstructs this exact message from the request and calls
+`Keypair.fromPublicKey(provider).verify(message, signature)`. The signature is
+the base64 output of `Keypair.sign(message)`.
+
+Minimal signing implementation:
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+const message = [
+  "ipredict-oracle-submit",
+  `market_id:${marketId}`,
+  `outcome:${outcome}`,
+  `provider:${provider}`,
+  `timestamp:${timestamp}`,
+  `nonce:${nonce}`,
+].join("\n");
+
+const signature = kp.sign(Buffer.from(message, "utf8")).toString("base64");
+```
+
+Any change to field order or stringification invalidates existing signatures, so
+keep this exact serialisation when implementing a signer.
+
 ---
 
 ### Caching Strategy
@@ -505,12 +711,12 @@ services:
 #### Indexer Image Runbook
 
 Build the production indexer image from the `indexer/` directory. The Dockerfile
-lives under `indexer/src/` so the build context can still include
+lives under `indexer/` so the build context can still include
 `package-lock.json`, `tsconfig.json`, and the full source tree.
 
 ```bash
 cd indexer
-docker build -f src/Dockerfile -t ipredict-indexer:local .
+docker build -t ipredict-indexer:local .
 ```
 
 Run the image with the same environment variables documented in
@@ -534,8 +740,10 @@ const METRICS = {
 
   // Application health
   "api_request_duration_ms":  "histogram",
-  "cache_hit_rate":           "gauge",
-  "db_query_duration_ms":     "histogram",
+  "cache_hit_rate":           "gauge",    // whole cache, windowed in PromQL
+  "cache_namespace_hit_rate": "gauge",    // per key namespace: market, bets, …
+  "negative_cache_hit_rate":  "gauge",    // not-found lookups, counted apart
+  "db_query_duration_ms":     "histogram", // the load cache misses create
 
   // Business metrics
   "markets_created_total":    "counter",
@@ -551,13 +759,35 @@ const METRICS = {
 
 // Alerts
 const ALERTS = [
-  { name: "IndexerStalled",     condition: "indexer_lag_ledgers > 100" },
+  { name: "IndexerLagWarning",   condition: "indexer_lag_ledgers > 100 for 5m" },
+  { name: "IndexerLagCritical",  condition: "indexer_lag_ledgers > 500 for 10m" },
+  { name: "IndexerCursorStalled", condition: "time() - indexer_cursor_last_advanced_timestamp_seconds > 60 for 5m" },
   { name: "HighRPCErrorRate",   condition: "rpc_errors_total rate > 5/min" },
   { name: "MarketStuck",        condition: "market unresolved > 48h past expiry" },
   { name: "HighAPILatency",     condition: "api_p99 > 2000ms" },
   { name: "DatabaseSlow",       condition: "db_query_p99 > 500ms" },
+  { name: "LowCacheHitRate",    condition: "cache hit rate < 50% over 10m" },
+  { name: "CacheHitRateBelowBaseline",
+    condition: "one namespace < 80% of its own 6h baseline, ≥100 lookups" },
 ];
 ```
+
+Per-namespace hit rate is what makes a hit-rate alert actionable: the
+aggregate tells you *something* changed, while `market` vs `bets` vs
+`leaderboard` tells you which key structure broke. `CacheHitRateBelowBaseline`
+compares each namespace against its own recent history rather than a fixed
+number, so a namespace that normally runs cold does not page and one that
+normally runs hot does not hide a regression behind an absolute floor.
+Negative-cache lookups (answers of "this does not exist") are a separate
+metric family: folding them into `cache_hit_rate` would let a 404 storm prop
+the hit rate up while Postgres ran the same zero-row query over and over.
+
+The **Cache & Database Load** Grafana dashboard (`infra/grafana/cache.json`)
+plots hit rate by namespace, misses falling through to the database, the
+negative-cache hit rate, `db_query_duration_ms` rate and latency, pool
+occupancy and API latency on one time axis with a shared crosshair, so a
+hit-rate dip and the query spike it causes are read as one event.
+
 
 ---
 
@@ -616,172 +846,215 @@ jobs:
 
 ---
 
-## Part 3 — Maintenance Mode (#639)
+## Part 5 — Oracle Provider Integration Contract
 
-> **Status:** Implemented. Available on the `implementation-drips` branch.
+This contract specifies how an external oracle provider integrates with the iPredict backend submission API (`POST /api/v1/oracle/submit`).
 
-### Overview
+### 1. Authentication & Credential Lifecycle
 
-The backend supports a toggleable maintenance mode that lets operators gracefully signal downtime or restrict writes without restarting any process. The mode is stored in Redis so it applies across all API instances immediately and survives restarts.
+All requests to `/api/v1/oracle/submit` must be authenticated with a configured provider API key.
 
-### States
+#### Header Formats
+The API key may be passed via any of the following headers:
+- `Authorization: Bearer <API_KEY>`
+- `Authorization: API-Key <API_KEY>`
+- `x-api-key: <API_KEY>`
 
-| Mode | Effect |
-|---|---|
-| `off` (default) | All routes behave normally. Zero overhead — the middleware returns immediately. |
-| `read_only` | `GET`, `HEAD`, `OPTIONS` pass through. All state-changing methods (`POST`, `PUT`, `PATCH`, `DELETE`) return 503 with a `Retry-After` header. |
-| `full` | Every route returns 503 except `/healthz`, `/readyz`, and `/admin/maintenance`. |
+#### Provider Identity Binding
+Each API key is bound to a specific Stellar provider public key (`G...` address). When a submission is processed:
+1. The server authenticates the key (401 if missing or invalid).
+2. The server verifies that the key is authorized to submit for the `provider` address declared in the payload (403 `FORBIDDEN` if attempting to submit on behalf of an address the key does not own).
 
-### Response Contract
-
-Blocked requests receive:
-
-```
-HTTP/1.1 503 Service Unavailable
-Retry-After: 120
-Content-Type: application/json
-
-{"error":"maintenance","mode":"full","retryAfterSeconds":120}
-```
-
-The `Retry-After` value is set by `MAINTENANCE_RETRY_AFTER_SECONDS` (default: 120 seconds).
-
-### Toggling at Runtime
-
-Toggling requires a `Bearer` token matching `MAINTENANCE_ADMIN_SECRET` (minimum 32 characters). Callers with missing or wrong credentials receive 401 and no information about the current mode is disclosed.
-
-```bash
-# Read current mode
-curl -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
-     https://api.example.com/admin/maintenance
-
-# Set to read_only
-curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{"mode":"read_only"}' \
-     https://api.example.com/admin/maintenance
-
-# Set to full maintenance
-curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{"mode":"full"}' \
-     https://api.example.com/admin/maintenance
-
-# Return to normal
-curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{"mode":"off"}' \
-     https://api.example.com/admin/maintenance
-```
-
-Every mode change is written to the structured log at `warn` level with the old mode, new mode, and actor field.
-
-### Health Probe Semantics
-
-| Probe | In maintenance (`full` or `read_only`) | On dependency failure |
-|---|---|---|
-| `GET /healthz` (liveness) | **200 `{status:"ok"}`** — always, so the orchestrator never restarts a healthy process | 200 (liveness only checks process, not deps) |
-| `GET /readyz` (readiness) | **200 `{status:"ready (maintenance)", maintenance:{mode:"full"}}`** — load balancers can drain traffic | **503 `{status:"not ready"}`** |
-
-The key distinction: `readyz` returns **200** (not 503) during maintenance so that a rolling deploy or autoscaler does not mark the instance unhealthy. Load balancers that treat 503 as "remove from rotation" should instead watch for `status !== "ready"` in the JSON body.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `MAINTENANCE_MODE` | `off` | Initial mode on startup. Redis value takes precedence at runtime. |
-| `MAINTENANCE_RETRY_AFTER_SECONDS` | `120` | Value of the `Retry-After` response header. |
-| `MAINTENANCE_ADMIN_SECRET` | _(none — toggle disabled)_ | Bearer token for the admin toggle endpoint. Must be ≥ 32 characters. Generate with `openssl rand -base64 32`. |
-
-### Troubleshooting
-
-- **Toggle endpoint returns 404**: `MAINTENANCE_ADMIN_SECRET` is not set. Set it and restart (or use a live reload mechanism).
-- **Mode set but old responses still served**: The mode is read from Redis on every request. If Redis is unreachable the mode falls back to `MAINTENANCE_MODE` from the environment. Check Redis connectivity.
-- **503 on health probes**: Check that the probe URL is exactly `/healthz` or `/readyz` — these are the only paths exempt from full-maintenance blocking.
+#### Credential Rotation
+Multiple API keys can be bound to the same provider in backend configuration (`ORACLE_API_KEYS` in JSON or comma-separated format). To rotate credentials without downtime:
+1. Operator issues a new secondary API key bound to the provider.
+2. Provider switches client requests to the new key.
+3. Operator deprecates and removes the old key after verification.
 
 ---
 
-## Part 4 — RPC Endpoint Failover (#638)
+### 2. Canonical Signing Payload Specification
 
-> **Status:** Implemented. Available on the `implementation-drips` branch.
+Providers sign a canonical UTF-8 formatted string with their Ed25519 Stellar keypair. The signature is transmitted base64-encoded in the `signature` field.
 
-### Overview
+#### Format Specification
+The canonical message consists of 6 lines separated strictly by LF (`\n`, 0x0A) with no trailing newline:
 
-The indexer and oracle previously used a single `SOROBAN_RPC_URL`. A new `SOROBAN_RPC_URLS` environment variable accepts a comma-separated ordered list of endpoints. The endpoint pool automatically fails over to the next healthy endpoint when the active one becomes unavailable, then probes for primary recovery in the background.
-
-### Configuration
-
-```bash
-# Multi-endpoint (new, recommended)
-SOROBAN_RPC_URLS=https://primary.sorobanrpc.com,https://secondary.sorobanrpc.com,https://tertiary.sorobanrpc.com
-
-# Single-endpoint (legacy, still fully supported)
-SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+```text
+ipredict-oracle-submit
+market_id:<marketId>
+outcome:<outcome>
+provider:<provider>
+timestamp:<timestamp>
+nonce:<nonce>
 ```
 
-Rules:
-- `SOROBAN_RPC_URLS` takes precedence over `SOROBAN_RPC_URL` when both are set.
-- URLs are trimmed of whitespace and deduplicated while preserving order.
-- At least one of the two must be set; the process exits with a clear error if neither is.
+#### Field Rules
+- Line 1: Constant literal `ipredict-oracle-submit`
+- Line 2: `market_id:<marketId>` (integer ID, e.g. `42`)
+- Line 3: `outcome:<outcome>` (canonical outcome: `YES` or `NO`)
+- Line 4: `provider:<provider>` (56-character Stellar public key string `G...`)
+- Line 5: `timestamp:<timestamp>` (Unix timestamp in seconds as integer, or `0` if omitted)
+- Line 6: `nonce:<nonce>` (opaque string nonce, or empty string if omitted)
 
-### Failover Behaviour
+#### Worked Example (Reproducible)
+Given:
+- `marketId`: `42`
+- `outcome`: `"YES"`
+- `provider`: `"GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI"`
+- `timestamp`: `1700000000`
+- `nonce`: `"nonce-test-123"`
 
-1. All calls go through `EndpointPool.withFailover()`.
-2. If the active endpoint throws (timeout, 5xx, connection error), the pool marks it failed and tries the next endpoint.
-3. Each failed endpoint enters an exponential backoff cooldown: starts at 5 seconds, doubles on each failure, caps at 5 minutes.
-4. A background probe runs every 60 seconds against the primary. When it succeeds, the pool switches back and logs the recovery.
-5. If all endpoints are exhausted, the error surfaces to the caller — there is no infinite retry loop.
-
-### Ledger Monotonicity Rule (Indexer)
-
-The indexer tracks the highest processed ledger `H` (the checkpoint). Before accepting events from any endpoint, the pool checks that endpoint's `latestLedger ≥ H`.
-
-**Worked example:**
-
-```
-H = 1000  (last processed ledger)
-Primary dies.
-Secondary reports latestLedger = 998  → REJECTED (would create a gap)
-  — indexer logs: "Endpoint … is behind (latest=998, need=1001)"
-  — cursor stays at 1000, no events accepted from this endpoint
-Secondary reaches latestLedger = 1001 → ACCEPTED
-  — events fetched from startLedger = 1001
-  — checkpoint updated to 1001
-Primary recovers with latestLedger = 1005
-  — pool probe fires, switches back to primary
-  — next fetch from startLedger = 1002 (no gap, no duplicate)
+Canonical string:
+```text
+ipredict-oracle-submit
+market_id:42
+outcome:YES
+provider:GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI
+timestamp:1700000000
+nonce:nonce-test-123
 ```
 
-The checkpoint value never decreases. `startLedger` is always `checkpoint + 1`.
+Hex representation of canonical UTF-8 bytes:
+```text
+69707265646963742d6f7261636c652d7375626d69740a6d61726b65745f69643a34320a6f7574636f6d653a5945530a70726f76696465723a47425a584e375049525a474e4d484741374d5555554634475750593541595056364c5934555632474c36564a474951525846444e4d4144490a74696d657374616d703a313730303030303030300a6e6f6e63653a6e6f6e63652d746573742d313233
+```
 
-### Oracle Submission Safety
+Using Stellar Secret Key `SDN6XAY2H7G4QO3U7I5QW6T4D5J7E3W2Q1Z9X8C7V6B5N4M3L2K1J0I`:
+- Sign the canonical string bytes via `Keypair.sign(Buffer.from(canonical, "utf8"))`.
+- Base64-encode the resulting 64-byte signature and pass it in the `signature` field.
 
-For transaction reads (`getAccount`, `getTransaction`, `prepareTransaction`) the oracle uses `withFailover` normally. For `sendTransaction` the oracle always uses the primary server and relies on the idempotency check in `resolveMarketOnChain` (`isAlreadyResolved` queries durable state before every submission) to prevent double-submission if a failover occurs mid-flight.
+---
 
-### Observability
+### 3. Outcome & Bond Specifications
 
-Every endpoint switch is written to the structured log at `warn` level:
+#### Binary Outcome Encoding
+- **Canonical values:** `"YES"` or `"NO"`.
+- **Accepted aliases:** `"yes"`, `"true"`, `true`, `"1"`, `1` are normalized to `"YES"`. `"no"`, `"false"`, `false`, `"0"`, `0` are normalized to `"NO"`.
+- Signature verification is always performed against the **canonical** outcome (`YES` or `NO`).
 
+#### Submitter Bond
+- Submissions require posting a bond specified in **stroops** (`1 XLM = 10,000,000 stroops`).
+- `bondAmount` may be passed as a number or string (e.g. `1000000000` for 100 XLM).
+- Must meet or exceed the backend's configured minimum `SUBMITTER_BOND_XLM * 10,000,000`.
+
+---
+
+### 4. API Endpoints and Schema
+
+#### Request: `POST /api/v1/oracle/submit`
+Headers:
+```http
+Content-Type: application/json
+Authorization: Bearer <API_KEY>
+Idempotency-Key: <UUID> (optional)
+```
+
+Body:
 ```json
 {
-  "event": "rpc_endpoint_switched",
-  "from": "https://primary.sorobanrpc.com",
-  "to": "https://secondary.sorobanrpc.com",
-  "fromIndex": 0,
-  "toIndex": 1,
-  "reason": "connection refused"
+  "marketId": 42,
+  "outcome": "YES",
+  "provider": "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+  "bondAmount": 1000000000,
+  "signature": "<base64-signature>",
+  "nonce": "unique-random-nonce-123",
+  "timestamp": 1700000000
 }
 ```
 
-API keys and passwords embedded in URLs (query params `apikey`, `api_key`, `token`, `key`, `secret`, `auth`; and HTTP Basic credentials) are redacted to `***` before any log line is written.
+#### Successful Response: `200 OK`
+```json
+{
+  "accepted": true,
+  "count": 1,
+  "threshold": 3,
+  "submissionsNeeded": 2
+}
+```
+- `accepted` (boolean): `true` if persisted.
+- `count` (number): Current total of valid submissions recorded for this market (including this one).
+- `threshold` (number): Configured threshold needed for aggregator consensus.
+- `submissionsNeeded` (number): Remaining submissions needed (`max(0, threshold - count)`).
 
-The `activeRpcEndpointIndex` gauge in `indexer/src/metrics.ts` tracks which endpoint is currently active (0 = primary, 1 = secondary, …; -1 = single-endpoint mode). Wire this into your Prometheus exporter or log-scraping pipeline alongside `indexer_lag_ledgers`.
+---
 
-### Troubleshooting
+### 5. Error Code Enumeration & Remediation
 
-| Symptom | Likely cause | Action |
-|---|---|---|
-| `All RPC endpoints failed` in logs | All endpoints unreachable or all behind | Check network; verify endpoints are synced |
-| Indexer stuck, repeated "Endpoint is behind" logs | Secondary lagging after primary failure | Wait for secondary to catch up, or provision a better-synced secondary |
-| Unexpected switch back to primary | Probe interval fired, primary healthy | Expected behaviour — no action needed |
-| `Either SOROBAN_RPC_URLS or SOROBAN_RPC_URL must be set` on startup | Neither env var present | Set at least one in `.env` |
+| Status | Error Code | Cause | Remediation |
+|---|---|---|---|
+| `400` | `BAD_REQUEST` | Missing or invalid field in request body schema | Verify required fields: `marketId`, `outcome`, `provider`, `bondAmount`, `signature`. |
+| `400` | `BAD_REQUEST` | Bond amount below minimum (`bondNumeric < minBondStroops`) | Increase `bondAmount` to match minimum (e.g. 100 XLM = `1000000000` stroops). |
+| `400` | `BAD_REQUEST` | Timestamp outside acceptance window | Sync system clock using NTP; ensure `timestamp` is within `ORACLE_TIMESTAMP_WINDOW_SEC` (default 300s). |
+| `400` | `BAD_REQUEST` | Nonce has already been used | Generate a unique cryptographic nonce or UUIDv4 for each request. |
+| `401` | `UNAUTHORIZED` | Missing `Authorization` or `x-api-key` header | Provide the API key via `Authorization: Bearer <API_KEY>` or `x-api-key`. |
+| `401` | `UNAUTHORIZED` | Invalid API key presented | Verify API key matches credentials provided by the platform operator. |
+| `401` | `UNAUTHORIZED` | Invalid signature for provider | Rebuild canonical string byte-for-byte; ensure provider private key corresponds to `provider` public key. |
+| `403` | `FORBIDDEN` | API key bound to another provider address | Use the API key assigned to the `provider` address declared in payload. |
+| `409` | `CONFLICT` | Market already has an oracle submission | Market already recorded an outcome submission; duplicate submissions for the same market are rejected. |
+| `409` | `CONFLICT` | Idempotency key reused with different payload | If retrying with the same idempotency key, the body must match identically. Otherwise, use a new key. |
+| `500` | `INTERNAL_SERVER_ERROR` | Database or unhandled server exception | Retry with exponential backoff and provide `Idempotency-Key` to avoid double-processing. |
+
+---
+
+### 6. Minimal Working Client Example (TypeScript)
+
+```typescript
+import { Keypair } from "@stellar/stellar-sdk";
+
+export interface SubmitOutcomeParams {
+  apiUrl: string;
+  apiKey: string;
+  marketId: number;
+  outcome: "YES" | "NO";
+  keypair: Keypair;
+  bondAmountStroops?: number;
+}
+
+export async function submitOracleOutcome(params: SubmitOutcomeParams) {
+  const { apiUrl, apiKey, marketId, outcome, keypair, bondAmountStroops = 1_000_000_000 } = params;
+  const provider = keypair.publicKey();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomUUID();
+
+  // 1. Build canonical signing message (LF-separated, no trailing newline)
+  const canonicalMessage = [
+    "ipredict-oracle-submit",
+    `market_id:${marketId}`,
+    `outcome:${outcome}`,
+    `provider:${provider}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join("\n");
+
+  // 2. Sign canonical message with Ed25519 keypair
+  const signature = keypair.sign(Buffer.from(canonicalMessage, "utf8")).toString("base64");
+
+  // 3. Post to the API
+  const response = await fetch(`${apiUrl}/api/v1/oracle/submit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      "Idempotency-Key": nonce,
+    },
+    body: JSON.stringify({
+      marketId,
+      outcome,
+      provider,
+      bondAmount: bondAmountStroops,
+      signature,
+      timestamp,
+      nonce,
+    }),
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`Oracle submission failed (${response.status}): ${body.error?.message || JSON.stringify(body)}`);
+  }
+
+  return body; // { accepted: true, count: 1, threshold: 3, submissionsNeeded: 2 }
+}
+```
+

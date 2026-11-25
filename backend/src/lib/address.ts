@@ -1,6 +1,6 @@
 import { StrKey } from "@stellar/stellar-sdk";
 
-const INVALID_ADDRESS_MESSAGE = "Invalid Stellar address";
+export const INVALID_ADDRESS_MESSAGE = "Invalid Stellar address format";
 
 function canonicalAddress(address: unknown): string | null {
   if (typeof address !== "string") {

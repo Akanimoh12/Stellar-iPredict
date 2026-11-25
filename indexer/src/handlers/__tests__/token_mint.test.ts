@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { decodeTokenMint, handleTokenMint, TOKEN_MINT_TOPIC } from "../token_mint.js";
+import {
+  decodeTokenMint as decodeConsolidatedTokenMint,
+  handleTokenMint as handleConsolidatedTokenMint,
+} from "../token.js";
 import type { DecodedEvent, HandlerContext } from "../types.js";
 
 const ADDRESS = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -22,6 +26,11 @@ function createContext(): HandlerContext {
 }
 
 describe("decodeTokenMint", () => {
+  it("keeps the legacy module wired to the consolidated implementation", () => {
+    expect(decodeTokenMint).toBe(decodeConsolidatedTokenMint);
+    expect(handleTokenMint).toBe(handleConsolidatedTokenMint);
+  });
+
   it("decodes a token_mint payload", () => {
     expect(decodeTokenMint(createEvent({ to: ADDRESS, amount: 1250n }))).toEqual({
       to: ADDRESS,
@@ -57,6 +66,10 @@ describe("handleTokenMint", () => {
       expect.stringContaining("INSERT INTO token_balances"),
       [ADDRESS, "99.5"],
     );
-    expect(context.redis?.del).toHaveBeenCalledWith(`token_balance:${ADDRESS}`, "stats:global");
+    expect(context.redis?.del).toHaveBeenCalledWith(
+      `token_balance:${ADDRESS}`,
+      "stats:global",
+      "leaderboard:top20",
+    );
   });
 });

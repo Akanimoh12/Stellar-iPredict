@@ -11,7 +11,7 @@ export interface Queryable {
 }
 
 export interface CacheClient {
-  del(...keys: string[]): Promise<unknown>;
+  del(...keys: string[]): Promise<number> | number;
 }
 
 export interface Logger {

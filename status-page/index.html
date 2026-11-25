@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iPredict — Status</title>
+  <meta name="description" content="Real-time status of the iPredict prediction market platform." />
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2d3a;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --ok:        #22c55e;
+      --warn:      #f59e0b;
+      --down:      #ef4444;
+      --ok-bg:     rgba(34,197,94,.10);
+      --warn-bg:   rgba(245,158,11,.10);
+      --down-bg:   rgba(239,68,68,.10);
+      --radius:    8px;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    body { background: var(--bg); color: var(--text); font-family: var(--font);
+           font-size: 15px; line-height: 1.6; min-height: 100vh; }
+    a { color: #6366f1; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    .page { max-width: 720px; margin: 0 auto; padding: 48px 20px 80px; }
+    header { display: flex; align-items: center; justify-content: space-between;
+             margin-bottom: 40px; }
+    header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.3px; }
+    header .logo { display: flex; align-items: center; gap: 10px; }
+    header .logo span { font-size: 13px; color: var(--muted); }
+
+    /* ── Overall status banner ────────────────────────────────────────────── */
+    .banner { border-radius: var(--radius); padding: 20px 24px;
+              display: flex; align-items: center; gap: 16px;
+              margin-bottom: 40px; border: 1px solid var(--border); }
+    .banner.ok   { background: var(--ok-bg);   border-color: var(--ok);   }
+    .banner.degraded { background: var(--warn-bg); border-color: var(--warn); }
+    .banner.down { background: var(--down-bg); border-color: var(--down); }
+    .banner.loading { background: var(--surface); }
+    .banner .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .banner.ok   .dot { background: var(--ok);   }
+    .banner.degraded .dot { background: var(--warn); animation: pulse 2s infinite; }
+    .banner.down .dot { background: var(--down); animation: pulse 1.2s infinite; }
+    .banner.loading .dot { background: var(--muted); }
+    @keyframes pulse {
+      0%,100% { opacity: 1; } 50% { opacity: .3; }
+    }
+    .banner-text h2 { font-size: 18px; font-weight: 600; }
+    .banner-text p { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Section ─────────────────────────────────────────────────────────── */
+    .section { margin-bottom: 32px; }
+    .section-title { font-size: 11px; font-weight: 600; letter-spacing: .08em;
+                     text-transform: uppercase; color: var(--muted);
+                     margin-bottom: 12px; }
+
+    /* ── Component rows ──────────────────────────────────────────────────── */
+    .component-list { border: 1px solid var(--border); border-radius: var(--radius);
+                      overflow: hidden; }
+    .component-row { display: flex; align-items: center; justify-content: space-between;
+                     padding: 14px 20px; background: var(--surface); }
+    .component-row + .component-row { border-top: 1px solid var(--border); }
+    .component-name { font-size: 14px; font-weight: 500; }
+    .component-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .badge { font-size: 11px; font-weight: 600; padding: 3px 9px;
+             border-radius: 99px; letter-spacing: .03em; }
+    .badge.ok       { background: var(--ok-bg);   color: var(--ok);   }
+    .badge.degraded { background: var(--warn-bg); color: var(--warn); }
+    .badge.down     { background: var(--down-bg); color: var(--down); }
+    .badge.unknown  { background: rgba(100,116,139,.15); color: var(--muted); }
+
+    /* ── Incident list ───────────────────────────────────────────────────── */
+    .incident { border: 1px solid var(--border); border-radius: var(--radius);
+                background: var(--surface); padding: 18px 20px; margin-bottom: 12px; }
+    .incident-header { display: flex; align-items: flex-start;
+                       justify-content: space-between; gap: 12px; }
+    .incident-title { font-size: 14px; font-weight: 600; }
+    .incident-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .incident-severity { font-size: 11px; font-weight: 600; padding: 2px 8px;
+                         border-radius: 99px; margin-top: 2px; display: inline-block; }
+    .incident-severity.partial  { background: var(--warn-bg); color: var(--warn); }
+    .incident-severity.major    { background: var(--down-bg); color: var(--down); }
+    .incident-severity.resolved { background: var(--ok-bg);   color: var(--ok); }
+    .incident-severity.maintenance { background: rgba(99,102,241,.15); color: #818cf8; }
+    .incident-body { margin-top: 10px; font-size: 13px; color: #94a3b8;
+                     line-height: 1.65; white-space: pre-wrap; }
+    .incident-updates { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .update-row { display: flex; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+    .update-time { color: var(--muted); white-space: nowrap; min-width: 80px; }
+    .update-text { color: #94a3b8; }
+    .no-incidents { padding: 24px 20px; background: var(--surface);
+                    border: 1px solid var(--border); border-radius: var(--radius);
+                    text-align: center; color: var(--muted); font-size: 14px; }
+
+    /* ── Footer ──────────────────────────────────────────────────────────── */
+    footer { margin-top: 48px; border-top: 1px solid var(--border);
+             padding-top: 20px; font-size: 12px; color: var(--muted);
+             display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    .refresh-info { display: flex; align-items: center; gap: 6px; }
+    .refresh-dot { width: 6px; height: 6px; border-radius: 50%;
+                   background: var(--ok); animation: pulse 3s infinite; }
+
+    /* ── Error state ─────────────────────────────────────────────────────── */
+    .fetch-error { background: var(--down-bg); border: 1px solid var(--down);
+                   border-radius: var(--radius); padding: 14px 18px;
+                   font-size: 13px; color: #fca5a5; margin-bottom: 24px; display: none; }
+    .fetch-error.visible { display: block; }
+
+    /* ── Manual override banner ──────────────────────────────────────────── */
+    .override-banner { border-radius: var(--radius); padding: 14px 18px;
+                       font-size: 13px; margin-bottom: 24px; display: none;
+                       background: rgba(99,102,241,.12);
+                       border: 1px solid rgba(99,102,241,.4); color: #c7d2fe; }
+    .override-banner.visible { display: block; }
+
+    @media (max-width: 480px) {
+      .component-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+      .incident-header { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="logo">
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect width="32" height="32" rx="8" fill="#6366f1"/>
+        <path d="M8 22 L16 10 L24 22" stroke="white" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="16" cy="10" r="2" fill="white"/>
+      </svg>
+      <span>iPredict Status</span>
+    </div>
+    <a href="https://ipredict-stellar.vercel.app" aria-label="Open iPredict app">
+      ↗ iPredict App
+    </a>
+  </header>
+
+  <!-- Manual override — shown when incidents.json carries a current override -->
+  <div class="override-banner" id="overrideBanner" role="status" aria-live="polite"></div>
+
+  <!-- Fetch error — shown when /status is unreachable -->
+  <div class="fetch-error" id="fetchError" role="alert">
+    ⚠ Could not reach the status API. Displaying the last known snapshot from the
+    automated check. The platform may be experiencing an outage.
+  </div>
+
+  <!-- Overall banner -->
+  <div class="banner loading" id="banner" role="status" aria-live="polite">
+    <div class="dot"></div>
+    <div class="banner-text">
+      <h2 id="bannerTitle">Checking status…</h2>
+      <p id="bannerSub">Fetching real-time data</p>
+    </div>
+  </div>
+
+  <!-- Components -->
+  <div class="section">
+    <div class="section-title">Components</div>
+    <div class="component-list" id="componentList">
+      <!-- populated by JS -->
+      <div class="component-row">
+        <div>
+          <div class="component-name">API</div>
+          <div class="component-meta" id="apiMeta">—</div>
+        </div>
+        <span class="badge unknown" id="apiBadge">Checking</span>
+      </div>
+      <div class="component-row">
+        <div>
+          <div class="component-name">Database</div>
+          <div class="component-meta" id="dbMeta">—</div>
+        </div>
+        <span class="badge unknown" id="dbBadge">Checking</span>
+      </div>
+      <div class="component-row">
+        <div>
+          <div class="component-name">Cache (Redis)</div>
+          <div class="component-meta" id="redisMeta">—</div>
+        </div>
+        <span class="badge unknown" id="redisBadge">Checking</span>
+      </div>
+      <div class="component-row">
+        <div>
+          <div class="component-name">Indexer</div>
+          <div class="component-meta" id="indexerMeta">—</div>
+        </div>
+        <span class="badge unknown" id="indexerBadge">Checking</span>
+      </div>
+      <div class="component-row">
+        <div>
+          <div class="component-name">Market Resolution (Oracle)</div>
+          <div class="component-meta" id="oracleMeta">—</div>
+        </div>
+        <span class="badge unknown" id="oracleBadge">Checking</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Incident history -->
+  <div class="section">
+    <div class="section-title">Incident History</div>
+    <div id="incidentList">
+      <div class="no-incidents" id="noIncidents">Loading…</div>
+    </div>
+  </div>
+
+  <footer>
+    <span>Data sourced from <code>GET /status</code> · <a href="https://github.com/Akanimoh12/Stellar-iPredict">GitHub</a></span>
+    <span class="refresh-info">
+      <span class="refresh-dot"></span>
+      <span id="lastChecked">Auto-refreshes every 60 s</span>
+    </span>
+  </footer>
+</div>
+
+<script>
+  // ── Configuration ──────────────────────────────────────────────────────────
+  // STATUS_API_URL: the backend /status endpoint.
+  // Override this at deploy time by replacing the placeholder, or point a
+  // reverse proxy at it so the status page doesn't need CORS headers.
+  const STATUS_API_URL = (window.STATUS_API_URL || 'https://ipredict-stellar.vercel.app/status').replace(/\/$/, '');
+
+  // INCIDENTS_URL: the static incidents.json file served alongside this page.
+  // On Cloudflare Pages / GitHub Pages this is just /incidents.json.
+  const INCIDENTS_URL = window.INCIDENTS_URL || './incidents.json';
+
+  // SNAPSHOT_URL: the last-known-good snapshot written by the GitHub Actions
+  // workflow. Shown when the live fetch fails (platform is down).
+  const SNAPSHOT_URL = window.SNAPSHOT_URL || './snapshot.json';
+
+  const REFRESH_INTERVAL_MS = 60_000;
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function levelLabel(level) {
+    if (level === 'ok')       return { text: 'All Systems Operational', sub: 'Every component is working correctly.', cls: 'ok' };
+    if (level === 'degraded') return { text: 'Partial Degradation',     sub: 'Some components are experiencing issues.', cls: 'degraded' };
+    if (level === 'down')     return { text: 'Major Outage',            sub: 'The platform is currently unavailable.', cls: 'down' };
+    return { text: 'Status Unknown', sub: 'Unable to retrieve real-time data.', cls: 'loading' };
+  }
+
+  function badge(ok, label) {
+    if (ok === null || ok === undefined) return `<span class="badge unknown">${label || 'Unknown'}</span>`;
+    if (ok)  return `<span class="badge ok">Operational</span>`;
+    return `<span class="badge down">Disrupted</span>`;
+  }
+
+  function fmtLatency(ms) {
+    if (ms === undefined || ms === null) return '';
+    return ` · ${ms} ms`;
+  }
+
+  function fmtAgo(isoString) {
+    if (!isoString) return '';
+    const secs = Math.round((Date.now() - new Date(isoString).getTime()) / 1000);
+    if (secs < 60)   return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return new Date(isoString).toLocaleDateString();
+  }
+
+  function fmtDate(isoString) {
+    if (!isoString) return '';
+    return new Date(isoString).toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+    });
+  }
+
+  // ── Apply feed to DOM ──────────────────────────────────────────────────────
+  function applyFeed(feed, stale) {
+    const { text, sub, cls } = levelLabel(feed.status);
+    const banner = document.getElementById('banner');
+    banner.className = `banner ${cls}`;
+    document.getElementById('bannerTitle').textContent = text;
+    document.getElementById('bannerSub').textContent = stale
+      ? sub + ' (snapshot from last automated check)'
+      : sub;
+
+    // API
+    const apiOk = feed.api?.ok;
+    setBadge('apiBadge', apiOk, fmtLatency(feed.api?.db?.latencyMs));
+    document.getElementById('apiMeta').textContent = apiOk
+      ? 'Serving requests normally'
+      : 'Not serving requests';
+
+    // DB
+    const dbResult = feed.api?.db;
+    setBadge('dbBadge', dbResult?.ok, fmtLatency(dbResult?.latencyMs));
+    document.getElementById('dbMeta').textContent = dbResult?.ok
+      ? 'Connected' + fmtLatency(dbResult?.latencyMs)
+      : 'Unreachable';
+
+    // Redis
+    const redisResult = feed.api?.redis;
+    setBadge('redisBadge', redisResult?.ok, '');
+    document.getElementById('redisMeta').textContent = redisResult?.ok
+      ? 'Connected'
+      : 'Unreachable — requests served from database';
+
+    // Indexer
+    const idx = feed.indexer;
+    const idxOk = idx?.ok;
+    setBadge('indexerBadge', idxOk, '');
+    if (idx?.lagSeconds !== null && idx?.lagSeconds !== undefined) {
+      document.getElementById('indexerMeta').textContent =
+        `Lag: ${idx.lagSeconds}s · Last ledger: ${idx.lastIndexedLedger ?? '—'}`;
+    } else if (idx?.lastIndexedLedger !== null) {
+      document.getElementById('indexerMeta').textContent =
+        `Last ledger: ${idx.lastIndexedLedger ?? '—'}`;
+    } else {
+      document.getElementById('indexerMeta').textContent = idxOk === false
+        ? 'No events indexed yet or indexer stalled'
+        : '—';
+    }
+
+    // Oracle (derived from feed — no separate endpoint polled to keep page simple)
+    // We infer oracle health from the overall status and indexer lag:
+    // the feed does not include oracle delay directly but the backend
+    // /api/markets/resolution-status does; we show a conservative indicator.
+    // The snapshot written by the GitHub Actions workflow can include oracleStatus
+    // if the workflow fetches it; we fall back gracefully when absent.
+    const oracle = feed.oracleStatus;
+    if (oracle) {
+      const oracleOk = oracle.status === 'on_time';
+      setBadge('oracleBadge', oracleOk, '');
+      const labelMap = { on_time: 'Resolving on time', delayed: 'Resolution delayed', stalled: 'Stalled — possible outage' };
+      document.getElementById('oracleMeta').textContent =
+        (labelMap[oracle.status] || oracle.status) +
+        (oracle.overdueMarkets ? ` · ${oracle.overdueMarkets} overdue market(s)` : '');
+    } else {
+      // Cannot determine independently — show as unknown
+      document.getElementById('oracleBadge').className = 'badge unknown';
+      document.getElementById('oracleBadge').textContent = 'Unknown';
+      document.getElementById('oracleMeta').textContent = 'Oracle status not included in feed';
+    }
+
+    const ts = feed.generatedAt;
+    document.getElementById('lastChecked').textContent =
+      `Snapshot from ${fmtAgo(ts)} (${fmtDate(ts)})`;
+  }
+
+  function setBadge(id, ok, extra) {
+    const el = document.getElementById(id);
+    if (ok === null || ok === undefined) {
+      el.className = 'badge unknown';
+      el.textContent = 'Unknown';
+    } else if (ok) {
+      el.className = 'badge ok';
+      el.textContent = 'Operational' + (extra || '');
+    } else {
+      el.className = 'badge down';
+      el.textContent = 'Disrupted';
+    }
+  }
+
+  // ── Render incidents ───────────────────────────────────────────────────────
+  function renderIncidents(incidents) {
+    const el = document.getElementById('incidentList');
+    if (!incidents || incidents.length === 0) {
+      el.innerHTML = `<div class="no-incidents">✓ No incidents in the last 90 days.</div>`;
+      return;
+    }
+    el.innerHTML = incidents.map(inc => {
+      const updates = (inc.updates || []).map(u =>
+        `<div class="update-row">
+           <span class="update-time">${fmtAgo(u.at)}</span>
+           <span class="update-text">${esc(u.text)}</span>
+         </div>`
+      ).join('');
+      return `<div class="incident">
+        <div class="incident-header">
+          <div>
+            <div class="incident-title">${esc(inc.title)}</div>
+            <span class="incident-severity ${esc(inc.severity)}">${esc(inc.severity)}</span>
+          </div>
+          <div class="incident-date">${fmtDate(inc.startedAt)}</div>
+        </div>
+        <div class="incident-body">${esc(inc.body)}</div>
+        ${updates ? `<div class="incident-updates">${updates}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  function esc(s) {
+    if (s === undefined || s === null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ── Manual override ───────────────────────────────────────────────────────
+  // If incidents.json has an `override` object with `message` and optional
+  // `endsAt` (ISO 8601), we surface it at the top of the page so operators
+  // can post a notice without re-deploying.
+  function applyOverride(incidentsData) {
+    const o = incidentsData?.override;
+    const el = document.getElementById('overrideBanner');
+    if (!o || !o.message) { el.classList.remove('visible'); return; }
+    if (o.endsAt && new Date(o.endsAt) < new Date()) { el.classList.remove('visible'); return; }
+    el.innerHTML = `<strong>📢 Operator notice:</strong> ${esc(o.message)}${o.endsAt ? ` (until ${fmtDate(o.endsAt)})` : ''}`;
+    el.classList.add('visible');
+  }
+
+  // ── Fetch cycle ────────────────────────────────────────────────────────────
+  let lastFeed = null;
+
+  async function fetchStatus() {
+    let feed = null;
+    let stale = false;
+
+    try {
+      const res = await fetch(`${STATUS_API_URL}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      feed = await res.json();
+      document.getElementById('fetchError').classList.remove('visible');
+      lastFeed = feed;
+    } catch (_err) {
+      document.getElementById('fetchError').classList.add('visible');
+      // Fall back to the prebuilt snapshot written by GitHub Actions.
+      if (!lastFeed) {
+        try {
+          const snap = await fetch(SNAPSHOT_URL, { cache: 'no-store' });
+          if (snap.ok) { lastFeed = await snap.json(); }
+        } catch (_) { /* ignore */ }
+      }
+      if (lastFeed) {
+        feed = lastFeed;
+        stale = true;
+      }
+    }
+
+    if (feed) applyFeed(feed, stale);
+  }
+
+  async function fetchIncidents() {
+    try {
+      const res = await fetch(INCIDENTS_URL, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      applyOverride(data);
+      renderIncidents(data.incidents || []);
+    } catch (_) {
+      renderIncidents([]);
+    }
+  }
+
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
+  (async function init() {
+    await Promise.all([fetchStatus(), fetchIncidents()]);
+    setInterval(fetchStatus, REFRESH_INTERVAL_MS);
+    // Incidents refresh every 5 minutes — they change rarely.
+    setInterval(fetchIncidents, 5 * 60_000);
+  })();
+</script>
+</body>
+</html>

@@ -29,8 +29,15 @@ export default function MarketGrid({ markets, loading = false }: MarketGridProps
   if (loading) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <SkeletonCard key={i} />
+        {[
+          "market-skeleton-1",
+          "market-skeleton-2",
+          "market-skeleton-3",
+          "market-skeleton-4",
+          "market-skeleton-5",
+          "market-skeleton-6",
+        ].map((key) => (
+          <SkeletonCard key={key} />
         ))}
       </div>
     );

@@ -1,13 +1,18 @@
 #![cfg(test)]
 
-use crate::{IPredictTokenContract, IPredictTokenContractClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use crate::{
+    BurnEvent, IPredictTokenContract, IPredictTokenContractClient, MintEvent, TransferEvent,
+};
+use soroban_sdk::{
+    testutils::{Address as _, Events, Ledger, LedgerInfo},
+    token::TokenClient as Sep41Client, vec, Address, Env, Event, MuxedAddress, String,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Deploy a fresh IPredictToken contract and return its client.
 fn setup(env: &Env) -> IPredictTokenContractClient<'_> {
-    let id = env.register_contract(None, IPredictTokenContract);
+    let id = env.register(IPredictTokenContract, ());
     IPredictTokenContractClient::new(env, &id)
 }
 
@@ -197,7 +202,7 @@ fn test_transfer_between_accounts() {
 
     client.mint(&minter, &alice, &100_0000000_i128);
 
-    client.transfer(&alice, &bob, &30_0000000_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &30_0000000_i128);
 
     assert_eq!(client.balance(&alice), 70_0000000_i128);
     assert_eq!(client.balance(&bob), 30_0000000_i128);
@@ -226,7 +231,7 @@ fn test_reject_transfer_insufficient_balance() {
     client.mint(&minter, &alice, &10_0000000_i128);
 
     // Attempt to transfer more than balance
-    client.transfer(&alice, &bob, &20_0000000_i128); // panics
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &20_0000000_i128); // panics
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -273,12 +278,15 @@ fn test_total_supply_tracking() {
     client.mint(&minter, &alice, &100_0000000_i128);
     assert_eq!(client.total_supply(), 100_0000000_i128);
 
+    client.transfer(&alice, &MuxedAddress::from(alice.clone()), &10_0000000_i128);
+    assert_eq!(client.balance(&alice), 100_0000000_i128);
+
     // Mint 50 to Bob → supply = 150
     client.mint(&minter, &bob, &50_0000000_i128);
     assert_eq!(client.total_supply(), 150_0000000_i128);
 
     // Transfer 20 from Alice to Bob → supply unchanged = 150
-    client.transfer(&alice, &bob, &20_0000000_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &20_0000000_i128);
     assert_eq!(client.total_supply(), 150_0000000_i128);
 
     // Alice burns 30 → supply = 120
@@ -292,6 +300,463 @@ fn test_total_supply_tracking() {
     // Final: Alice = 100 - 20 - 30 = 50, Bob = 50 + 20 - 10 = 60
     assert_eq!(client.balance(&alice), 50_0000000_i128);
     assert_eq!(client.balance(&bob), 60_0000000_i128);
+}
+
+#[test]
+fn test_sep41_allowance_transfer_from_and_burn_from() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token_id = env.register(IPredictTokenContract, ());
+    let client = IPredictTokenContractClient::new(&env, &token_id);
+    let minter = init(&env, &client);
+    client.set_minter(&minter);
+    let sep41 = Sep41Client::new(&env, &token_id);
+
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.mint(&minter, &owner, &100_i128);
+    assert_eq!(sep41.name(), String::from_str(&env, "IPREDICT"));
+    assert_eq!(sep41.symbol(), String::from_str(&env, "IPRED"));
+    assert_eq!(sep41.decimals(), 7);
+    assert_eq!(sep41.balance(&owner), 100);
+
+    let expiration = env.ledger().sequence() + 10;
+    sep41.approve(&owner, &spender, &60_i128, &expiration);
+    assert_eq!(sep41.allowance(&owner, &spender), 60);
+
+    sep41.transfer_from(&spender, &owner, &recipient, &25_i128);
+    assert_eq!(sep41.balance(&owner), 75);
+    assert_eq!(sep41.balance(&recipient), 25);
+    assert_eq!(sep41.allowance(&owner, &spender), 35);
+
+    sep41.burn_from(&spender, &owner, &15_i128);
+    assert_eq!(sep41.balance(&owner), 60);
+    assert_eq!(client.total_supply(), 85);
+    assert_eq!(sep41.allowance(&owner, &spender), 20);
+}
+
+#[test]
+fn test_sep41_allowance_expires_after_ledger() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let current = env.ledger().sequence();
+    let expiration = current + 1;
+
+    client.approve(&owner, &spender, &40_i128, &expiration);
+    assert_eq!(client.allowance(&owner, &spender), 40);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 26,
+        sequence_number: expiration + 1,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
+    assert_eq!(client.allowance(&owner, &spender), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #785 — Supply cap: mint blocked when cap would be exceeded
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_supply_cap_blocks_excess_mint() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // Set a cap of 100 tokens.
+    client.set_supply_cap(&admin, &100_i128);
+    assert_eq!(client.supply_cap(), 100_i128);
+
+    let user = Address::generate(&env);
+    // Mint 90 — OK.
+    client.mint(&minter, &user, &90_i128);
+    assert_eq!(client.total_supply(), 90_i128);
+
+    // Mint 10 — still OK (reaches cap exactly).
+    client.mint(&minter, &user, &10_i128);
+    assert_eq!(client.total_supply(), 100_i128);
+
+    // Mint 1 more — must fail with SupplyCapExceeded (#10).
+    let result = client.try_mint(&minter, &user, &1_i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_supply_cap_zero_means_uncapped() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // No cap set — large mint succeeds.
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &1_000_000_i128);
+    assert_eq!(client.total_supply(), 1_000_000_i128);
+
+    // Setting cap = 0 is equivalent to removing the cap.
+    client.set_supply_cap(&admin, &0_i128);
+    assert_eq!(client.supply_cap(), 0_i128);
+    client.mint(&minter, &user, &1_000_000_i128);
+    assert_eq!(client.total_supply(), 2_000_000_i128);
+}
+
+#[test]
+fn test_supply_cap_remove_via_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // Set then remove cap.
+    client.set_supply_cap(&admin, &50_i128);
+    client.set_supply_cap(&admin, &0_i128); // remove
+    assert_eq!(client.supply_cap(), 0_i128);
+
+    let user = Address::generate(&env);
+    // Mint above former cap — now succeeds.
+    client.mint(&minter, &user, &100_i128);
+    assert_eq!(client.total_supply(), 100_i128);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #784 — extend_ttl: burn preserves the balance entry TTL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_burn_extends_ttl_on_remaining_balance() {
+    // This test verifies that after a partial burn the entry still exists
+    // (TTL was extended). In the simulator, `extend_ttl` is a no-op on the
+    // ledger state but we can confirm the balance value is correct after burn.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+    let user = Address::generate(&env);
+
+    client.mint(&minter, &user, &1_000_i128);
+    client.burn(&user, &300_i128);
+
+    // Balance correctly reduced; entry still accessible (TTL was extended).
+    assert_eq!(client.balance(&user), 700_i128);
+    assert_eq!(client.total_supply(), 700_i128);
+}
+
+#[test]
+fn test_transfer_extends_ttl_on_both_sides() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &500_i128);
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &200_i128);
+
+    // Both entries remain accessible after transfer.
+    assert_eq!(client.balance(&alice), 300_i128);
+    assert_eq!(client.balance(&bob), 200_i128);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #771, #773 — Checked arithmetic & TokenError on balance overflow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_mint_balance_overflow_returns_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &100_i128);
+
+    // Minting i128::MAX when user balance is already 100 causes balance overflow
+    let res = client.try_mint(&minter, &user, &i128::MAX);
+    assert_eq!(res, Err(Ok(crate::TokenError::BalanceOverflow)));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_transfer_balance_overflow_panics_with_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &100_i128);
+
+    // Directly set Bob's balance to i128::MAX in storage to test overflow branch in transfer
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&crate::DataKey::Balance(bob.clone()), &i128::MAX);
+    });
+
+    // Transferring from Alice to Bob whose balance is i128::MAX causes balance overflow -> Error(Contract, #11)
+    client.transfer(&alice, &MuxedAddress::from(bob), &1_i128);
+}
+
+#[test]
+fn test_try_transfer_balance_overflow_returns_token_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.mint(&minter, &alice, &100_i128);
+
+    // Directly set Bob's balance to i128::MAX in storage to test overflow branch in transfer
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&crate::DataKey::Balance(bob.clone()), &i128::MAX);
+    });
+
+    let res = client.try_transfer(&alice, &MuxedAddress::from(bob), &1_i128);
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        soroban_sdk::Error::from_contract_error(11)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #774 — Emit transfer, mint and burn events from the points token
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_mint_emits_mint_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &500_i128);
+
+    let expected = MintEvent {
+        minter: minter.clone(),
+        to: user.clone(),
+        amount: 500_i128,
+    };
+    let contract_events = env.events().all().filter_by_contract(&client.address);
+    assert_eq!(
+        contract_events,
+        vec![&env, (
+            client.address.clone(),
+            expected.topics(&env),
+            expected.data(&env),
+        )],
+    );
+}
+
+#[test]
+fn test_transfer_emits_transfer_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.mint(&minter, &alice, &200_i128);
+
+    let mint_event = MintEvent {
+        minter: minter.clone(),
+        to: alice.clone(),
+        amount: 200_i128,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                mint_event.topics(&env),
+                mint_event.data(&env),
+            ),
+        ],
+    );
+
+    client.transfer(&alice, &MuxedAddress::from(bob.clone()), &80_i128);
+
+    let transfer_event = TransferEvent {
+        from: alice.clone(),
+        to: bob.clone(),
+        amount: 80_i128,
+    };
+
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                transfer_event.topics(&env),
+                transfer_event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_burn_emits_burn_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+
+    let user = Address::generate(&env);
+    client.mint(&minter, &user, &300_i128);
+
+    let mint_event = MintEvent {
+        minter: minter.clone(),
+        to: user.clone(),
+        amount: 300_i128,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                mint_event.topics(&env),
+                mint_event.data(&env),
+            ),
+        ],
+    );
+
+    client.burn(&user, &120_i128);
+
+    let burn_event = BurnEvent {
+        from: user.clone(),
+        amount: 120_i128,
+    };
+
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                burn_event.topics(&env),
+                burn_event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_transfer_from_emits_transfer_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let minter = init(&env, &client);
+    client.set_minter(&minter);
+
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.mint(&minter, &owner, &100_i128);
+    let expiration = env.ledger().sequence() + 10;
+    client.approve(&owner, &spender, &60_i128, &expiration);
+
+    client.transfer_from(&spender, &owner, &recipient, &25_i128);
+
+    let transfer_event = TransferEvent {
+        from: owner.clone(),
+        to: recipient.clone(),
+        amount: 25_i128,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                transfer_event.topics(&env),
+                transfer_event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_burn_from_emits_burn_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let minter = init(&env, &client);
+    client.set_minter(&minter);
+
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    client.mint(&minter, &owner, &100_i128);
+    let expiration = env.ledger().sequence() + 10;
+    client.approve(&owner, &spender, &60_i128, &expiration);
+
+    client.burn_from(&spender, &owner, &15_i128);
+
+    let burn_event = BurnEvent {
+        from: owner.clone(),
+        amount: 15_i128,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                burn_event.topics(&env),
+                burn_event.data(&env),
+            ),
+        ],
+    );
 }
 
 

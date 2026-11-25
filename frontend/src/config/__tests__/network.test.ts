@@ -1,10 +1,10 @@
-import { USE_BACKEND, resolveSorobanUrl, NETWORK } from '../network';
+import { beforeEach, afterAll, describe, it, expect, vi } from "vitest";
 
 describe('Network Config', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    jest.resetModules();
+    vi.resetModules();
     process.env = { ...originalEnv };
   });
 
@@ -14,7 +14,7 @@ describe('Network Config', () => {
 
   describe('USE_BACKEND flag', () => {
     it('should be false by default if NEXT_PUBLIC_USE_BACKEND is not true', async () => {
-      process.env.NEXT_PUBLIC_USE_BACKEND = undefined;
+      delete process.env.NEXT_PUBLIC_USE_BACKEND;
       const { USE_BACKEND } = await import('../network');
       expect(USE_BACKEND).toBe(false);
     });

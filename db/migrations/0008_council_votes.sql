@@ -12,3 +12,4 @@ CREATE TABLE council_votes (
 );
 
 CREATE INDEX idx_council_votes_market_id ON council_votes(market_id);
+

@@ -1,3 +1,5 @@
+import type { Logger } from "./log.js";
+
 // Stellar Strkey for contracts: 'C' followed by 55 base-32 (A-Z2-7) characters
 const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
 
@@ -39,7 +41,19 @@ export function loadContractAllowlist(config: ContractFilterConfig = {}): string
   return ids;
 }
 
-export function makeContractFilter(allowlist: string[]): (contractId: string) => boolean {
+export function makeContractFilter(
+  allowlist: string[],
+  logger?: Pick<Logger, "debug">,
+): (contractId: string) => boolean {
   const set = new Set(allowlist);
-  return (contractId: string) => set.has(contractId);
+  return (contractId: string) => {
+    const allowed = set.has(contractId);
+    if (!allowed) {
+      logger?.debug("skipped event: contract not in configured allowlist", {
+        reason: "unconfigured_contract",
+        contractId,
+      });
+    }
+    return allowed;
+  };
 }

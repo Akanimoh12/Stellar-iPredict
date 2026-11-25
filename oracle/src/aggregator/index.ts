@@ -1,125 +1,227 @@
-import { rpc } from "@stellar/stellar-sdk";
-import { Pool } from "pg";
-import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
-import { EndpointPool } from "../rpc/endpoint-pool.js";
+/**
+ * Oracle Aggregator Public Module API
+ *
+ * This barrel module groups aggregator exports by domain concern:
+ * - Runner: Aggregator loop and worker process lifecycle (`./runner.js`)
+ * - Governance: Council config, votes, audits, and inactivity monitoring (`./governance.js`)
+ * - Bonds: Bond minimum monitoring, reconciliations, and dashboards (`./bonds.js`)
+ * - Settlement: Decision finalization, on-chain/off-chain submitters, notifications (`./settlement.js`)
+ * - Watchers: Submission, dispute, conflict, and stuck market detection (`./watchers.js`)
+ * - Metrics & Health: Observability, Prometheus metrics, and health checks (`./metrics.js`, `./health.js`)
+ *
+ * Consumers needing narrow imports can import directly from sub-modules (e.g. `./runner.js`, `./governance.js`)
+ * to avoid pulling in heavy transitive dependencies like `@stellar/stellar-sdk` or `pg`.
+ */
 
-export { detectConflict, type ConflictReport } from "./conflict-detection.js";
-export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
-export { ResolverKeyManager } from "./key-rotation.js";
-export { AggregatorMetrics, type ResolutionLagEntry, type AggregatorMetricsSnapshot } from "./metrics.js";
+// ── Alerts ──────────────────────────────────────────────────────────────────
 export {
+  createBetPatternAlertSender,
+  type BetPatternAlert,
+  type BetPatternAlertSender,
+} from "./alert.js";
+
+// ── Shared Soroban RPC circuit breaker (#637) ────────────────────────────────
+export {
+  configureSorobanRpcCircuitBreaker,
+  reportSorobanRpcCircuitRejection,
+  resetSorobanRpcCircuitBreaker,
+  sorobanRpcCircuitBreaker,
+  type ConfigureSorobanRpcCircuitBreakerOptions,
+} from "./rpc-circuit-breaker.js";
+export {
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+  createCircuitBreaker,
+  type CircuitBreakerSnapshot,
+  type CircuitBreakerState,
+} from "@ipredict/shared";
+
+// ── Trend-based heap diagnostics (#635) ──────────────────────────────────────
+export {
+  createHeapMonitor,
+  HeapMonitor,
+  type HeapGrowthAssessment,
+  type HeapMonitorOptions,
+  type HeapSample,
+  type HeapSnapshotResult,
+} from "@ipredict/shared";
+
+// ── Aggregator Runner & Lifecycle ───────────────────────────────────────────
+export {
+  runAggregator,
+  startAggregator,
+  createProductionDependencies,
+  systemClock,
+  ShutdownGracePeriodExceededError,
+  type AggregatorMarket,
+  type ProcessMarketContext,
+  type AggregatorDependencies,
+  type AggregatorClock,
+  type RunAggregatorOptions,
+} from "./runner.js";
+
+// ── Governance & Council ────────────────────────────────────────────────────
+export {
+  loadCouncilConfig,
+  isCouncilMember,
+  describeCouncilConfig,
+  hasQuorum,
+  meetsThreshold,
+  compareCouncilResolvers,
+  COUNCIL_SIZE,
+  COUNCIL_DEFAULT_THRESHOLD,
+  CouncilVoteManager,
+  buildAuditRecord,
+  collectCouncilAudit,
+  exportCouncilAudit,
+  toAuditCsv,
+  toAuditJson,
+  checkCouncilInactivity,
+  checkCouncilInactivityFromDb,
+  checkCouncilWindowExceeded,
+  checkCouncilWindowExceededFromDb,
+  checkCouncilNoVotesBeforeDeadline,
+  checkCouncilNoVotesBeforeDeadlineFromDb,
+  type CouncilConfig,
+  type CouncilResolverReport,
+  type AuditFormat,
+  type CouncilAuditInput,
+  type CouncilAuditRecord,
+  type CouncilInactivityAlert,
+  type CouncilWindowExceededAlert,
+  type CouncilNoVotesPageAlert,
+  type CouncilNoVotesPageOptions,
+  type CouncilInactivityMonitorOptions,
+  type EscalatedMarketRecord,
+} from "./governance.js";
+
+// ── Bonds & Reconciliation ──────────────────────────────────────────────────
+export {
+  assertBondSpendWithinHourlyLimit,
+  checkBondSpendFromDb,
+  checkBondMinimum,
+  checkBondMinimumFromDb,
+  BondSpendLimitExceededError,
+  getBondDashboardData,
+  reconcileBonds,
+  runBondReconciliation,
+  recordSettlement,
+  type BondAlert,
+  type BondSpendLimitOptions,
+  type BondSpendStatus,
+  type BondMonitorOptions,
+  type OracleSubmissionRecord,
+  type BondDashboardData,
+  type BondRefundDiscrepancy,
+  type BondReconciliationOptions,
+  type BondReconciliationResult,
+  type BondSettlement,
+  type RecordSettlementInput,
+  type TerminalSubmission,
+} from "./bonds.js";
+
+// ── Settlement, Submissions & Finalization ──────────────────────────────────
+export {
+  MarketAlreadyFinalizedError,
+  finalizeMarketDecision,
+  queryMarketState,
+  queryRegisteredResolvers,
+  resolveMarketOnChain,
+  createStellarSubmitter,
+  OffChainSubmitterService,
+  notifyFinalized,
+  createPostgresNotificationStore,
+  failedWebhookNotificationsTableSql,
+  submitWithRetry,
   computeTally,
   createPostgresSubmissionStore,
   SubmissionTracker,
-  type MarketTally,
-  type SubmissionStore,
-} from "./tally.js";
-export { loadCouncilConfig, isCouncilMember, describeCouncilConfig, type CouncilConfig } from "../config/council.js";
-export {
-  resolveMarketOnChain,
-  createStellarSubmitter,
+  selectThresholdOutcome,
   type OnChainSubmitter,
   type ResolveMarketResult,
-} from "../submitter/resolveMarket.js";
+  type DataAdapter,
+  type OffChainSubmitterOptions,
+  type OffChainSubmitterStore,
+  type SubmittedOutcomeResult,
+  type FinalizeNotification,
+  type FinalizeNotifierOptions,
+  type MarketTally,
+  type SubmissionStore,
+} from "./settlement.js";
 
-export interface AggregatorMarket { id: string; cancelled: boolean; }
-export interface AggregatorDependencies {
-  connect(): Promise<void>;
-  listExpiredUnresolvedMarkets(now: Date): Promise<AggregatorMarket[]>;
-  processMarket(market: AggregatorMarket): Promise<void>;
-  close(): Promise<void>;
-}
+// ── Watchers, Integrity & Dispute Escalations ───────────────────────────────
+export {
+  detectConflict,
+  detectStuckMarket,
+  detectStuckMarkets,
+  ResolverKeyManager,
+  ChallengeBot,
+  startChallengeBot,
+  detectNewSubmissions,
+  SubmissionWatcher,
+  detectDisputeEscalations,
+  DisputeEscalationWatcher,
+  loadCategoryResolverConfig,
+  getResolversForCategory,
+  isAuthorizedResolverForCategory,
+  describeCategoryResolverConfig,
+  MARKET_CATEGORIES,
+  validateSubmissionData,
+  assertCanFinalize,
+  createDefaultValidationConfig,
+  createStrictValidationConfig,
+  createBalancedValidationConfig,
+  type ConflictReport,
+  type StuckMarketAlert,
+  type StuckMarketInput,
+  type ChallengeBotOptions,
+  type OracleSubmission,
+  type ChallengeDecision,
+  type ChallengeResult,
+  type DetectNewSubmissionsResult,
+  type NewSubmissionAlert,
+  type SubmissionRecord,
+  type SubmissionWatcherOptions,
+  type DetectDisputeEscalationsResult,
+  type DisputeEscalationAlert,
+  type DisputeEscalationRecord,
+  type DisputeEscalationWatcherOptions,
+  type CategoryResolverConfig,
+  type MarketCategory,
+  type SubmissionValidationResult,
+  type SubmissionValidationConfig,
+} from "./watchers.js";
 
-export function createProductionDependencies(config: AggregatorConfig): AggregatorDependencies {
-  const database = new Pool({ connectionString: config.DATABASE_URL });
-  
-  // Use endpoint pool for RPC failover if multiple endpoints configured
-  const rpcEndpoints = config.SOROBAN_RPC_ENDPOINTS;
-  const pool = rpcEndpoints.length > 1 
-    ? new EndpointPool({ endpoints: rpcEndpoints })
-    : null;
-  
-  // Use first endpoint for direct access (single-endpoint case)
-  const server = new rpc.Server(rpcEndpoints[0]);
-  
-  return {
-    async connect() {
-      // Health check: verify DB and RPC connectivity
-      if (pool) {
-        // Multi-endpoint: use pool with failover
-        await Promise.all([
-          database.query("SELECT 1"),
-          pool.withFailover(async (srv) => await srv.getLatestLedger()),
-        ]);
-      } else {
-        // Single endpoint: direct connection
-        await Promise.all([
-          database.query("SELECT 1"),
-          server.getLatestLedger(),
-        ]);
-      }
-    },
-    async listExpiredUnresolvedMarkets(now) {
-      const result = await database.query<AggregatorMarket>(
-        `SELECT id::text, cancelled FROM markets
-         WHERE end_time <= $1 AND resolved = FALSE AND cancelled = FALSE
-         ORDER BY end_time ASC`,
-        [Math.floor(now.getTime() / 1_000)],
-      );
-      return result.rows;
-    },
-    async processMarket() {
-      // Threshold evaluation and finalization are composed by follow-up modules.
-    },
-    async close() { 
-      await database.end();
-      if (pool) {
-        pool.stop();
-      }
-    },
-  };
-}
+// ── Metrics & Health ────────────────────────────────────────────────────────
+export {
+  OracleMetricsCollector,
+  OracleMetricsServer,
+  ORACLE_METRICS_DEFAULT_PORT,
+  collectOracleMetrics,
+  loadOracleMetricsConfig,
+  serializeOracleMetrics,
+  startOracleMetrics,
+  type OracleMetricsConfig,
+  type OracleMetricsRuntime,
+  type OracleMetricsSnapshot,
+  type ResolutionLagSample,
+} from "../metrics/index.js";
 
-export async function runAggregator(
-  dependencies: AggregatorDependencies,
-  options: { signal: AbortSignal; pollIntervalMs: number },
-): Promise<void> {
-  await dependencies.connect();
-  try {
-    while (!options.signal.aborted) {
-      const markets = await dependencies.listExpiredUnresolvedMarkets(new Date());
-      for (const market of markets) {
-        if (options.signal.aborted) break;
-        await dependencies.processMarket(market);
-      }
-      if (!options.signal.aborted) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, options.pollIntervalMs);
-          options.signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve();
-          }, { once: true });
-        });
-      }
-    }
-  } finally {
-    await dependencies.close();
-  }
-}
+export {
+  AggregatorMetrics,
+  AggregatorMetricsServer,
+  DEFAULT_LAG_BUCKETS_HOURS,
+  ORACLE_RESOLUTION_LAG_H_METRIC,
+  createPostgresResolutionMetricStore,
+  type AggregatorMetricsServerOptions,
+  type AggregatorMetricsSnapshot,
+  type NamedMetric,
+  type ResolutionLagEntry,
+} from "./metrics.js";
 
-export async function startAggregator(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const config = loadAggregatorConfig(env);
-  const controller = new AbortController();
-  const shutdown = () => controller.abort();
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-  try {
-    await runAggregator(createProductionDependencies(config), {
-      signal: controller.signal,
-      pollIntervalMs: config.POLL_INTERVAL_MS,
-    });
-  } finally {
-    process.off("SIGINT", shutdown);
-    process.off("SIGTERM", shutdown);
-  }
-}
+export {
+  AggregatorHealthServer,
+  type AggregatorHealthServerOptions,
+  type DependencyCheckResult,
+  type ReadinessCheckResult,
+} from "./health.js";

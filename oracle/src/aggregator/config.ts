@@ -1,35 +1,13 @@
 import { z } from "zod";
+import { parseConfig } from "@ipredict/shared";
+import { normalizeEnvironment, optionalEnv } from "../config/env.js";
 
 const positiveInteger = z.coerce.number().int().positive();
 const positiveNumber = z.coerce.number().positive();
 const unitFraction = z.coerce.number().min(0).max(1);
 
-/**
- * Parses comma-separated RPC URLs, trims whitespace, deduplicates, and validates.
- */
-function parseRpcUrls(value: string | undefined): string[] {
-  if (!value || value.trim() === "") {
-    return [];
-  }
-
-  const urls = value
-    .split(",")
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
-
-  // Deduplicate
-  const unique = Array.from(new Set(urls));
-
-  // Validate each URL
-  for (const url of unique) {
-    try {
-      new URL(url);
-    } catch {
-      throw new Error(`Invalid URL in SOROBAN_RPC_URLS: ${url}`);
-    }
-  }
-
-  return unique;
+export function isStrictMajority(threshold: number, size: number): boolean {
+  return threshold > size / 2;
 }
 
 const schema = z.object({
@@ -39,6 +17,19 @@ const schema = z.object({
   SOROBAN_RPC_URL: z.string().url().optional(),
   SOROBAN_RPC_URLS: z.string().optional(),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
+  LOG_LEVEL: z.string().min(1).default("info"),
+
+  /** Configurable batch limit for expired market queries (Issue #447). */
+  AGGREGATOR_BATCH_SIZE: positiveInteger.default(50),
+
+  /** Health server options (Issue #449). */
+  HEALTH_ENABLED: z.coerce.boolean().default(true),
+  HEALTH_PORT: positiveInteger.default(9103),
+  HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
+  MAX_POLL_STALE_MS: positiveInteger.default(30_000),
+
+  /** Maximum time to drain an in-flight market after SIGTERM/SIGINT. */
+  SHUTDOWN_GRACE_MS: positiveInteger.default(20_000),
 
   /** Fraction (0–1) of dissenting votes that triggers a conflict flag. */
   CONFLICT_THRESHOLD: unitFraction.default(0.3),
@@ -47,34 +38,86 @@ const schema = z.object({
   STUCK_MARKET_HOURS: positiveNumber.default(6),
 
   /** Initial resolver key for signing finalization transactions. */
-  RESOLVER_KEY: z.string().min(1).optional(),
+  RESOLVER_KEY: optionalEnv(z.string().min(1)),
+
+  /**
+   * Market contract finalization transactions are sent to. processMarket skips
+   * every market while this or RESOLVER_KEY is unset. Declared here because
+   * the schema strips undeclared keys, which left it permanently undefined.
+   */
+  MARKET_CONTRACT_ID: optionalEnv(z.string().min(1)),
+
+  /**
+   * Pinned SHA-256 of each contract's deployed WASM, as `contractId=hex` pairs
+   * (issue #610). Checked once at startup; see docs/DEPLOYMENT-GUIDE.md.
+   */
+  EXPECTED_WASM_HASHES: optionalEnv(z.string().min(1)),
+
+  /** Stellar network passphrase for signing; defaults to testnet when unset. */
+  NETWORK_PASSPHRASE: optionalEnv(z.string().min(1)),
+
+  /** Optional webhook notified when a market is finalized. When unset, finalization is only logged. */
+  FINALIZE_WEBHOOK_URL: optionalEnv(z.string().url()),
+
+  /** Optional webhook URL for aggregator alert notifications (issue #462). */
+  ALERT_WEBHOOK_URL: optionalEnv(z.string().url()),
+
+  /**
+   * HMAC-SHA256 signing secret for finalization webhook deliveries (issue #461).
+   * When set, each delivery includes `X-Signature` and `X-Timestamp` headers.
+   * Keep this value distinct from API keys; rotate via a `_FILE` indirection.
+   */
+  WEBHOOK_SIGNING_SECRET: optionalEnv(z.string().min(1)),
+
+  /**
+   * Maximum total delivery attempts (initial + retries) for the finalization
+   * webhook (issue #460). Defaults to 5.
+   */
+  FINALIZE_WEBHOOK_MAX_ATTEMPTS: positiveInteger.default(5),
+
+  /**
+   * Milliseconds before the same (severity, marketId) alert is re-delivered
+   * (issue #462). Set to 0 to disable cooldown. Defaults to 15 minutes.
+   */
+  ALERT_COOLDOWN_MS: z.coerce.number().int().min(0).default(15 * 60 * 1_000),
+
+  SUBMIT_BASE_BACKOFF_MS: positiveInteger.default(1_000),
+  SUBMIT_MAX_BACKOFF_MS: positiveInteger.default(30_000),
+  /** Optimistic oracle — submitter bond in XLM. */
+  SUBMITTER_BOND_XLM: positiveNumber.default(100),
+
+  /** Optimistic oracle — disputer bond in XLM (must exceed submitter bond). */
+  DISPUTER_BOND_XLM: positiveNumber.default(200),
+
+  /** Optimistic oracle — seconds a submission remains open to challenge. */
+  CHALLENGE_WINDOW_SECONDS: positiveInteger.default(86_400),
+
+  /** Optimistic oracle — seconds the council has to rule after a challenge. */
+  COUNCIL_WINDOW_SECONDS: positiveInteger.default(259_200),
+
+  /** Optimistic oracle — council fee as basis points of the loser's bond (1000 = 10%). */
+  COUNCIL_FEE_BPS: positiveInteger.default(1_000),
 }).refine((value) => value.COUNCIL_THRESHOLD <= value.COUNCIL_SIZE, {
   message: "COUNCIL_THRESHOLD cannot exceed COUNCIL_SIZE",
-}).refine(
-  (data) => {
-    // At least one of SOROBAN_RPC_URLS or SOROBAN_RPC_URL must be set
-    return data.SOROBAN_RPC_URLS || data.SOROBAN_RPC_URL;
-  },
-  {
-    message: "Either SOROBAN_RPC_URLS or SOROBAN_RPC_URL must be set",
-  }
-).transform((data) => {
-  // Parse SOROBAN_RPC_URLS (takes precedence over single URL)
-  let rpcEndpoints: string[] = [];
-  
-  if (data.SOROBAN_RPC_URLS) {
-    rpcEndpoints = parseRpcUrls(data.SOROBAN_RPC_URLS);
-  } else if (data.SOROBAN_RPC_URL) {
-    rpcEndpoints = [data.SOROBAN_RPC_URL];
-  }
-
-  return {
-    ...data,
-    SOROBAN_RPC_ENDPOINTS: rpcEndpoints,
-  };
+  path: ["COUNCIL_THRESHOLD"],
+}).refine((value) => isStrictMajority(value.COUNCIL_THRESHOLD, value.COUNCIL_SIZE), {
+  message: "COUNCIL_THRESHOLD must be a strict majority (> half of COUNCIL_SIZE)",
+  path: ["COUNCIL_THRESHOLD"],
+}).refine((value) => value.SUBMIT_BASE_BACKOFF_MS <= value.SUBMIT_MAX_BACKOFF_MS, {
+  message: "SUBMIT_BASE_BACKOFF_MS cannot exceed SUBMIT_MAX_BACKOFF_MS",
+  path: ["SUBMIT_BASE_BACKOFF_MS"],
+}).refine((value) => value.DISPUTER_BOND_XLM > value.SUBMITTER_BOND_XLM, {
+  message: "DISPUTER_BOND_XLM must exceed SUBMITTER_BOND_XLM",
+  path: ["DISPUTER_BOND_XLM"],
 });
 
 export type AggregatorConfig = z.infer<typeof schema>;
+/**
+ * Validates the aggregator's environment (issue #631).
+ *
+ * Throws a `ConfigError` on failure; the entrypoint decides to exit. Schema and
+ * defaults stay in this file, the error shape is the shared one.
+ */
 export function loadAggregatorConfig(env: NodeJS.ProcessEnv = process.env): AggregatorConfig {
-  return schema.parse(env);
+  return parseConfig("ipredict-oracle", schema, normalizeEnvironment(env));
 }

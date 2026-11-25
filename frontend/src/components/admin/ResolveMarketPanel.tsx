@@ -21,6 +21,8 @@ export default function ResolveMarketPanel() {
 
   // Per-market tx state
   const [txState, setTxState] = useState<Record<number, { stage: TxStage; error?: string }>>({});
+  const lockedIdsRef = React.useRef<Set<number>>(new Set());
+  const [lockedIds, setLockedIds] = useState<Set<number>>(new Set());
 
   const fetchMarkets = useCallback(async () => {
     setLoading(true);
@@ -43,7 +45,9 @@ export default function ResolveMarketPanel() {
 
   const handleResolve = useCallback(
     async (marketId: number, outcome: boolean) => {
-      if (!publicKey) return;
+      if (!publicKey || lockedIdsRef.current.has(marketId)) return;
+      lockedIdsRef.current.add(marketId);
+      setLockedIds((prev) => new Set(prev).add(marketId));
       setTxState((prev) => ({ ...prev, [marketId]: { stage: "signing" } }));
       try {
         const result = await resolveMarket(publicKey, marketId, outcome, signTransaction);
@@ -58,8 +62,20 @@ export default function ResolveMarketPanel() {
               delete next[marketId];
               return next;
             });
+            lockedIdsRef.current.delete(marketId);
+            setLockedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(marketId);
+              return next;
+            });
           }, 2000);
         } else {
+          lockedIdsRef.current.delete(marketId);
+          setLockedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(marketId);
+            return next;
+          });
           const msg = result.error || "Failed to resolve market";
           setTxState((prev) => ({
             ...prev,
@@ -68,6 +84,12 @@ export default function ResolveMarketPanel() {
           showToast(msg, "error");
         }
       } catch (err) {
+        lockedIdsRef.current.delete(marketId);
+        setLockedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(marketId);
+          return next;
+        });
         const msg = err instanceof Error ? err.message : "Unknown error";
         setTxState((prev) => ({
           ...prev,
@@ -84,7 +106,9 @@ export default function ResolveMarketPanel() {
 
   const handleCancel = useCallback(
     async (marketId: number) => {
-      if (!publicKey) return;
+      if (!publicKey || lockedIdsRef.current.has(marketId)) return;
+      lockedIdsRef.current.add(marketId);
+      setLockedIds((prev) => new Set(prev).add(marketId));
       setTxState((prev) => ({ ...prev, [marketId]: { stage: "signing" } }));
       try {
         const result = await cancelMarket(publicKey, marketId, signTransaction);
@@ -93,8 +117,25 @@ export default function ResolveMarketPanel() {
           showToast("Market cancelled", "success");
           setTimeout(() => {
             setMarkets((prev) => prev.filter((m) => m.id !== marketId));
+            setTxState((prev) => {
+              const next = { ...prev };
+              delete next[marketId];
+              return next;
+            });
+            lockedIdsRef.current.delete(marketId);
+            setLockedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(marketId);
+              return next;
+            });
           }, 2000);
         } else {
+          lockedIdsRef.current.delete(marketId);
+          setLockedIds((prev) => {
+            const next = new Set(prev);
+            next.delete(marketId);
+            return next;
+          });
           const msg = result.error || "Failed to cancel market";
           setTxState((prev) => ({
             ...prev,
@@ -103,6 +144,12 @@ export default function ResolveMarketPanel() {
           showToast(msg, "error");
         }
       } catch (err) {
+        lockedIdsRef.current.delete(marketId);
+        setLockedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(marketId);
+          return next;
+        });
         setTxState((prev) => ({
           ...prev,
           [marketId]: {
@@ -112,7 +159,7 @@ export default function ResolveMarketPanel() {
         }));
       }
     },
-    [publicKey, signTransaction]
+    [publicKey, signTransaction, showToast]
   );
 
   if (loading) {
@@ -152,7 +199,8 @@ export default function ResolveMarketPanel() {
             const isPast = Date.now() > market.endTime * 1000;
             const mTx = txState[market.id];
             const isProcessing =
-              mTx && mTx.stage !== "idle" && mTx.stage !== "confirmed" && mTx.stage !== "failed";
+              ((mTx && mTx.stage !== "idle" && mTx.stage !== "confirmed" && mTx.stage !== "failed") ||
+                lockedIds.has(market.id)) ?? false;
 
             return (
               <div

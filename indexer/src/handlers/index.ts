@@ -1,14 +1,22 @@
 import { handleClaim, REWARD_CLAIMED_TOPIC } from "./claim.js";
 import { handleFeeWithdrawn, FEES_WITHDRAWN_TOPIC } from "./fee_withdrawn.js";
+import { handleOracleSubmission, ORACLE_SUBMISSION_TOPIC } from "./oracle_submission.js";
 import { handleRewardPoints, REWARD_POINTS_TOPIC } from "./reward_points.js";
-import { handleTokenMint, TOKEN_MINT_TOPIC } from "./token_mint.js";
+import {
+  handleTokenMint,
+  handleTokenTransfer,
+  TOKEN_MINT_TOPIC,
+  TOKEN_TRANSFER_TOPIC,
+} from "./token.js";
 import type { DecodedEvent, EventHandler, HandlerContext } from "./types.js";
 
 export const eventHandlers = {
   [REWARD_CLAIMED_TOPIC]: handleClaim,
   [FEES_WITHDRAWN_TOPIC]: handleFeeWithdrawn,
+  [ORACLE_SUBMISSION_TOPIC]: handleOracleSubmission,
   [REWARD_POINTS_TOPIC]: handleRewardPoints,
   [TOKEN_MINT_TOPIC]: handleTokenMint,
+  [TOKEN_TRANSFER_TOPIC]: handleTokenTransfer,
 } satisfies Record<string, EventHandler>;
 
 export type EventTopic = keyof typeof eventHandlers;
@@ -42,5 +50,15 @@ export async function dispatchEvent(
 export type { DecodedEvent, EventHandler, HandlerContext } from "./types.js";
 export { decodeClaim, handleClaim, REWARD_CLAIMED_TOPIC } from "./claim.js";
 export { decodeFeeWithdrawn, handleFeeWithdrawn, FEES_WITHDRAWN_TOPIC } from "./fee_withdrawn.js";
+export { decodeOracleSubmission, handleOracleSubmission, ORACLE_SUBMISSION_TOPIC } from "./oracle_submission.js";
 export { decodeRewardPoints, handleRewardPoints, REWARD_POINTS_TOPIC } from "./reward_points.js";
-export { decodeTokenMint, handleTokenMint, TOKEN_MINT_TOPIC } from "./token_mint.js";
+export {
+  decodeTokenMint,
+  decodeTokenTransfer,
+  handleTokenMint,
+  handleTokenTransfer,
+  TOKEN_MINT_TOPIC,
+  TOKEN_TRANSFER_TOPIC,
+  type TokenMintPayload,
+  type TokenTransferPayload,
+} from "./token.js";

@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { writeEventToDb } from "../event-router.js";
-import { metrics, resetMetrics, Counter, Gauge } from "../metrics.js";
+import {
+  metrics,
+  resetMetrics,
+  Counter,
+  Gauge,
+  RpcErrorCounter,
+  serializeMetrics,
+  serializeRpcErrors,
+} from "../metrics.js";
 import type { DbClient, DecodedContractEvent, RedisClient } from "../types.js";
 
 function makeDb(): DbClient {
@@ -120,6 +128,24 @@ describe("events_processed metric", () => {
 
     expect(metrics.eventsProcessed.get()).toBe(0);
   });
+
+  it("refreshes dead-letter depth from the database after adding a queue entry", async () => {
+    let pending = 0;
+    const db: DbClient = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("INSERT INTO dead_letter_events")) pending++;
+        if (sql.includes("COUNT(*)")) {
+          return { rows: [{ count: String(pending) }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+
+    await writeEventToDb(makeEvent(["unknown", "event"], {}), db, makeRedis());
+
+    expect(metrics.deadLetterQueueDepth.get()).toBe(1);
+    expect(serializeMetrics()).toContain("dead_letter_queue_depth 1");
+  });
 });
 
 describe("indexer_lag metric", () => {
@@ -135,9 +161,52 @@ describe("indexer_lag metric", () => {
     expect(metrics.indexerLag.get()).toBe(50);
   });
 
+  it("can track lag in seconds", () => {
+    metrics.indexerLagSeconds.set(500);
+    expect(metrics.indexerLagSeconds.get()).toBe(500);
+  });
+
   it("is reset by resetMetrics", () => {
     metrics.indexerLag.set(42);
+    metrics.indexerLagSeconds.set(210);
     resetMetrics();
     expect(metrics.indexerLag.get()).toBe(0);
+    expect(metrics.indexerLagSeconds.get()).toBe(0);
+  });
+});
+
+describe("rpc_errors_total metric", () => {
+  beforeEach(() => resetMetrics());
+
+  it("counts failures independently by service and operation", () => {
+    const counter = new RpcErrorCounter();
+    counter.inc({ service: "indexer", operation: "getEvents" });
+    counter.inc({ service: "indexer", operation: "getEvents" });
+    counter.inc({ service: "oracle", operation: "sendTransaction" });
+
+    expect(counter.get({ service: "indexer", operation: "getEvents" })).toBe(2);
+    expect(counter.get({ service: "oracle", operation: "sendTransaction" })).toBe(1);
+  });
+
+  it("rejects empty labels and ignores non-positive increments", () => {
+    const counter = new RpcErrorCounter();
+    expect(() => counter.inc({ service: "", operation: "getEvents" })).toThrow(TypeError);
+    counter.inc({ service: "indexer", operation: "getEvents" }, 0);
+    expect(counter.snapshot()).toEqual([]);
+  });
+
+  it("serializes valid Prometheus counter samples", () => {
+    metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" }, 2);
+    expect(serializeRpcErrors()).toBe(
+      '# HELP rpc_errors_total Total number of failed RPC calls.\n' +
+      '# TYPE rpc_errors_total counter\n' +
+      'rpc_errors_total{service="indexer",operation="getEvents"} 2\n',
+    );
+  });
+
+  it("is cleared by resetMetrics", () => {
+    metrics.rpcErrors.inc({ service: "indexer", operation: "getEvents" });
+    resetMetrics();
+    expect(metrics.rpcErrors.snapshot()).toEqual([]);
   });
 });

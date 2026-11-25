@@ -13,6 +13,8 @@ import {
   WIN_TOKENS,
   LOSE_TOKENS,
   TOTAL_FEE_BPS,
+  MIN_BET_XLM,
+  MAX_BETS_PER_USER,
 } from "@/config/network";
 import TxProgress from "@/components/ui/TxProgress";
 import ShareBetButton from "@/components/social/ShareBetButton";
@@ -31,6 +33,13 @@ interface BettingPanelProps {
   market: Market;
   userBet: Bet | null;
   balance: number;
+  /**
+   * True while the wallet balance is being fetched or refreshed. Betting is held
+   * until it clears so a bet is never validated against a zero or stale balance.
+   */
+  balanceLoading?: boolean;
+  /** Bets the user has already placed on this market (capped on-chain). */
+  userBetCount?: number;
   onSuccess?: () => void;
 }
 
@@ -43,6 +52,8 @@ export default function BettingPanel({
   market,
   userBet,
   balance,
+  balanceLoading = false,
+  userBetCount = 0,
   onSuccess,
 }: BettingPanelProps) {
   const { publicKey, connected } = useWallet();
@@ -52,6 +63,15 @@ export default function BettingPanel({
   const [side, setSide] = useState<boolean>(userBet?.isYes ?? true);
   const [amountStr, setAmountStr] = useState("");
   const [showShare, setShowShare] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = React.useRef(false);
+  // Set when the user has reviewed the bet summary and is deciding whether to sign.
+  const [confirming, setConfirming] = useState(false);
+
+  // Any change to the bet invalidates the summary the user reviewed.
+  useEffect(() => {
+    setConfirming(false);
+  }, [side, amountStr]);
 
   // Lock side if user already has a bet
   useEffect(() => {
@@ -71,16 +91,44 @@ export default function BettingPanel({
   // Never let it go negative.
   const spendable = Math.max(0, balance - RESERVE_BUFFER_XLM);
 
-  const isMinValid = amount >= 1;
+  // The contract has no maximum bet amount. Its per-user limits are a minimum bet
+  // and a cap on the number of bets per market, so the largest bet MAX may offer
+  // is the whole-XLM spendable balance, and only while the user can still bet.
+  const maxBetAmount = Math.max(0, Math.floor(spendable));
+  const canAffordMinBet = maxBetAmount >= MIN_BET_XLM;
+  const betLimitReached = userBetCount >= MAX_BETS_PER_USER;
+
+  const isBusy = loading || isSubmitting;
+  const isMinValid = amount >= MIN_BET_XLM;
   const isBalanceValid = amount <= spendable;
   const canSubmit =
-    connected && isActive && isMinValid && isBalanceValid && !loading;
+    connected &&
+    isActive &&
+    !balanceLoading &&
+    !betLimitReached &&
+    isMinValid &&
+    isBalanceValid &&
+    !isBusy;
 
-  // Calculate potential payout
+  // Calculate potential payout and live projected odds
   const { yesPercent, noPercent } = calculateOdds(
     market.totalYes,
     market.totalNo
   );
+
+  const projectedOdds = useMemo(() => {
+    if (netAmount <= 0) return { yesPercent, noPercent };
+    const simulatedYes = side ? market.totalYes + netAmount : market.totalYes;
+    const simulatedNo = !side ? market.totalNo + netAmount : market.totalNo;
+    return calculateOdds(simulatedYes, simulatedNo);
+  }, [yesPercent, noPercent, netAmount, side, market.totalYes, market.totalNo]);
+
+  const oddsShift = useMemo(() => {
+    if (netAmount <= 0) return 0;
+    return side
+      ? projectedOdds.yesPercent - yesPercent
+      : projectedOdds.noPercent - noPercent;
+  }, [netAmount, side, projectedOdds, yesPercent, noPercent]);
 
   const payout = useMemo(() => {
     const winningSide = side ? market.totalYes + netAmount : market.totalNo + netAmount;
@@ -94,10 +142,25 @@ export default function BettingPanel({
   const profitPercent =
     netAmount > 0 ? ((profit / netAmount) * 100).toFixed(0) : "0";
 
+  // Step 1: show the summary. Nothing is sent to the wallet yet.
+  const requestConfirm = () => {
+    if (!canSubmit || isBusy) return;
+    setConfirming(true);
+  };
+
+  // Step 2: the user confirmed the summary; this is the call that opens the wallet.
   const handleSubmit = async () => {
-    if (!canSubmit) return;
-    reset();
-    await submit(market.id, side, amount);
+    if (!canSubmit || isSubmittingRef.current || loading) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      reset();
+      await submit(market.id, side, amount);
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      setConfirming(false);
+    }
   };
 
   // Show share button after confirmed
@@ -115,12 +178,17 @@ export default function BettingPanel({
 
   const handleSetMax = () => {
     // Max = spendable balance (keeps the locked reserve + fee headroom intact),
-    // floored to whole XLM. Never negative.
-    setAmountStr(Math.max(0, Math.floor(spendable)).toString());
+    // floored to whole XLM. Offer nothing the contract would reject: not while the
+    // balance is loading, not once the per-market bet limit is hit, and not when
+    // the spendable balance cannot cover the minimum bet.
+    if (balanceLoading || betLimitReached || !canAffordMinBet) return;
+    setAmountStr(maxBetAmount.toString());
   };
 
   const hasExistingBet = userBet !== null;
   const oppositeDisabled = hasExistingBet;
+  const heldSide = userBet?.isYes ? "YES" : "NO";
+  const lockedSide = userBet?.isYes ? "NO" : "YES";
 
   return (
     <div className="card space-y-5">
@@ -141,34 +209,48 @@ export default function BettingPanel({
       {/* YES / NO toggle */}
       <div className="grid grid-cols-2 gap-3">
         <button
-          onClick={() => !oppositeDisabled || side === true ? setSide(true) : undefined}
-          disabled={oppositeDisabled && !side}
+          onClick={() => (!oppositeDisabled || side === true) && !isBusy ? setSide(true) : undefined}
+          disabled={(oppositeDisabled && !side) || isBusy}
           className={`relative py-3 rounded-xl font-semibold text-sm transition-all duration-200 ${
             side === true
               ? "bg-accent-green/20 text-accent-green border-2 border-accent-green shadow-lg shadow-accent-green/10"
-              : oppositeDisabled
+              : oppositeDisabled || isBusy
                 ? "bg-surface-hover text-slate-600 border border-surface-border cursor-not-allowed"
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-green/50 hover:text-accent-green"
           }`}
           title={oppositeDisabled && !side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
+          aria-describedby={oppositeDisabled && !side ? "opposite-side-note" : undefined}
         >
-          YES ({yesPercent}%)
+          YES ({side === true && netAmount > 0 ? projectedOdds.yesPercent : yesPercent}%)
         </button>
         <button
-          onClick={() => !oppositeDisabled || side === false ? setSide(false) : undefined}
-          disabled={oppositeDisabled && side}
+          onClick={() => (!oppositeDisabled || side === false) && !isBusy ? setSide(false) : undefined}
+          disabled={(oppositeDisabled && side) || isBusy}
           className={`relative py-3 rounded-xl font-semibold text-sm transition-all duration-200 ${
             side === false
               ? "bg-accent-red/20 text-accent-red border-2 border-accent-red shadow-lg shadow-accent-red/10"
-              : oppositeDisabled
+              : oppositeDisabled || isBusy
                 ? "bg-surface-hover text-slate-600 border border-surface-border cursor-not-allowed"
                 : "bg-surface-card text-slate-400 border border-surface-border hover:border-accent-red/50 hover:text-accent-red"
           }`}
           title={oppositeDisabled && side ? `You already bet ${userBet!.isYes ? "YES" : "NO"} on this market` : undefined}
+          aria-describedby={oppositeDisabled && side ? "opposite-side-note" : undefined}
         >
-          NO ({noPercent}%)
+          NO ({side === false && netAmount > 0 ? projectedOdds.noPercent : noPercent}%)
         </button>
       </div>
+
+      {/* Why the other side is unavailable: the contract allows one side per market */}
+      {hasExistingBet && (
+        <p
+          id="opposite-side-note"
+          role="note"
+          className="text-xs leading-snug text-amber-400"
+        >
+          A market only accepts one side per wallet. You hold {heldSide} here, so{" "}
+          {lockedSide} is locked and you can only add to {heldSide}.
+        </p>
+      )}
 
       {/* Amount input */}
       <div className="space-y-2">
@@ -181,7 +263,7 @@ export default function BettingPanel({
             placeholder="0.00"
             min="1"
             step="any"
-            disabled={!isActive || loading}
+            disabled={!isActive || isBusy}
             className="w-full px-4 py-3 rounded-xl bg-surface border border-surface-border text-slate-100 text-lg font-medium placeholder-slate-600 focus:outline-none focus:border-primary-600/50 focus:ring-1 focus:ring-primary-600/25 transition-all disabled:opacity-50"
           />
         </div>
@@ -192,7 +274,7 @@ export default function BettingPanel({
             <button
               key={qa}
               onClick={() => setAmountStr(qa.toString())}
-              disabled={!isActive || loading}
+              disabled={!isActive || isBusy}
               className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-surface-card border border-surface-border text-slate-400 hover:text-white hover:border-primary-600/50 transition-colors disabled:opacity-50"
             >
               {qa}
@@ -200,7 +282,13 @@ export default function BettingPanel({
           ))}
           <button
             onClick={handleSetMax}
-            disabled={!isActive || loading || spendable <= 0}
+            disabled={
+              !isActive ||
+              isBusy ||
+              balanceLoading ||
+              betLimitReached ||
+              !canAffordMinBet
+            }
             className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-primary-600/15 border border-primary-600/30 text-primary-400 hover:bg-primary-600/25 transition-colors disabled:opacity-50"
           >
             MAX
@@ -208,17 +296,66 @@ export default function BettingPanel({
         </div>
 
         {/* Wallet balance */}
-        <p className="text-xs text-slate-600">
-          Balance: {balance.toFixed(2)} XLM
-          <span className="text-slate-700">
-            {" "}· {spendable.toFixed(2)} bettable
-          </span>
-        </p>
+        {balanceLoading ? (
+          <p className="text-xs text-slate-600" role="status">
+            Balance: loading…
+          </p>
+        ) : (
+          <p className="text-xs text-slate-600">
+            Balance: {balance.toFixed(2)} XLM
+            <span className="text-slate-700">
+              {" "}· {spendable.toFixed(2)} bettable
+            </span>
+          </p>
+        )}
+        {connected && isActive && !balanceLoading && !canAffordMinBet && (
+          <p className="text-xs text-slate-500">
+            Not enough bettable XLM to cover the {MIN_BET_XLM} XLM minimum bet once
+            the account reserve is kept back.
+          </p>
+        )}
+        {userBetCount > 0 && !betLimitReached && (
+          <p className="text-xs text-slate-600">
+            {userBetCount} of {MAX_BETS_PER_USER} bets placed on this market
+          </p>
+        )}
       </div>
 
       {/* Payout calculator */}
       {amount > 0 && (
         <div className="space-y-2 px-4 py-3 rounded-xl bg-surface/60 border border-surface-border">
+          {/* Live Odds Preview */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-slate-400 font-medium">Live odds preview</span>
+            <span className="text-slate-200 font-medium">
+              {side ? (
+                <>
+                  YES {yesPercent}%{" "}
+                  <span className="text-accent-green">
+                    → {projectedOdds.yesPercent}%
+                  </span>
+                  {oddsShift !== 0 && (
+                    <span className="text-xs text-slate-400 ml-1">
+                      ({oddsShift > 0 ? `+${oddsShift}` : oddsShift}%)
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  NO {noPercent}%{" "}
+                  <span className="text-accent-green">
+                    → {projectedOdds.noPercent}%
+                  </span>
+                  {oddsShift !== 0 && (
+                    <span className="text-xs text-slate-400 ml-1">
+                      ({oddsShift > 0 ? `+${oddsShift}` : oddsShift}%)
+                    </span>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
+
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-500">
               Platform fee ({TOTAL_FEE_BPS / 100}%)
@@ -233,6 +370,12 @@ export default function BettingPanel({
             <span className="text-slate-500">If you win</span>
             <span className="text-accent-green font-medium">
               {payout.toFixed(2)} XLM (+{profitPercent}%)
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-slate-500">Effective payout rate</span>
+            <span className="text-slate-300 font-medium">
+              {netAmount > 0 ? `${(payout / netAmount).toFixed(2)}x` : "-"}
             </span>
           </div>
           <div className="border-t border-surface-border my-1" />
@@ -254,6 +397,14 @@ export default function BettingPanel({
       )}
 
       {/* Validation messages */}
+      {betLimitReached && (
+        <div role="alert" className="flex items-start gap-2 text-xs text-accent-red">
+          <FiAlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>
+            You have reached the limit of {MAX_BETS_PER_USER} bets on this market.
+          </span>
+        </div>
+      )}
       {amountStr && !isMinValid && (
         <div className="flex items-center gap-2 text-xs text-accent-red">
           <FiAlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -285,9 +436,75 @@ export default function BettingPanel({
       )}
 
       {/* Submit button */}
-      {!showShare ? (
+      {confirming && !showShare && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="bet-confirm-title"
+          className="space-y-3 px-4 py-4 rounded-xl bg-surface/80 border border-primary-600/40"
+        >
+          <p id="bet-confirm-title" className="text-sm font-semibold text-slate-100">
+            Confirm your bet
+          </p>
+          <dl className="space-y-1.5 text-sm">
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Side</dt>
+              <dd className={`font-medium ${side ? "text-accent-green" : "text-accent-red"}`}>
+                {side ? "YES" : "NO"}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Amount</dt>
+              <dd className="text-slate-200 font-medium">{amount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Platform fee ({TOTAL_FEE_BPS / 100}%)</dt>
+              <dd className="text-slate-400">{feeAmount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Staked after fee</dt>
+              <dd className="text-slate-300">{netAmount.toFixed(2)} XLM</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-slate-500">Expected payout if you win</dt>
+              <dd className="text-accent-green font-medium">{payout.toFixed(2)} XLM</dd>
+            </div>
+          </dl>
+          {!hasExistingBet && (
+            <p className="text-[11px] leading-snug text-amber-400">
+              One side per market: after this bet you can add more to{" "}
+              {side ? "YES" : "NO"}, but you cannot bet {side ? "NO" : "YES"} on
+              this market.
+            </p>
+          )}
+          <p className="text-[11px] leading-snug text-slate-600">
+            Your wallet will ask you to sign next. The network fee is about{" "}
+            {hasExistingBet ? "0.003 XLM" : "0.14 XLM on your first bet on this market"}.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={isBusy}
+              className="w-full btn-secondary py-2.5 text-sm disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!canSubmit}
+              className="w-full btn-primary py-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Confirm &amp; sign
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!showShare && !confirming ? (
         <button
-          onClick={handleSubmit}
+          onClick={requestConfirm}
           disabled={!canSubmit}
           className="w-full btn-primary py-3 text-base disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -295,13 +512,17 @@ export default function BettingPanel({
             ? "Connect Wallet"
             : !isActive
               ? "Market Closed"
-              : loading
-                ? "Processing..."
-                : hasExistingBet
-                  ? "Increase Position"
-                  : "Place Bet"}
+              : balanceLoading
+                ? "Loading balance…"
+                : betLimitReached
+                  ? "Bet limit reached"
+                  : isBusy
+                    ? "Processing..."
+                    : hasExistingBet
+                      ? "Increase Position"
+                      : "Place Bet"}
         </button>
-      ) : (
+      ) : showShare ? (
         <div className="space-y-3">
           <div className="text-center text-sm text-accent-green font-medium">
             Bet placed successfully!
@@ -324,7 +545,7 @@ export default function BettingPanel({
             Place Another Bet
           </button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

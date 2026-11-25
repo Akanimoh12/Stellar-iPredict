@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
     Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
@@ -11,6 +11,20 @@ const MIN_BET: i128 = 10_000_000; // 1 XLM in stroops
 
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
+const MAX_BETTOR_PAGE: u32 = 50; // upper bound on bettors returned per paged read (#786)
+
+/// Storage layout version. Bump with a matching `migrate` step (#791).
+/// Contracts deployed before versioning have no stored value and read as 1.
+const SCHEMA_VERSION: u32 = 1;
+
+// Market creation bounds (#792, #793)
+const MAX_QUESTION_LEN: u32 = 200;
+const MIN_MARKET_DURATION: u64 = 3_600;        // 1h: no markets already expired or about to close
+const MAX_MARKET_DURATION: u64 = 31_536_000;   // 365d: bounded horizon
+
+// Minimum net stake each side must hold before a market can resolve (#794).
+// A one-sided pool has no winners; such markets must be cancelled instead.
+const MIN_SIDE_LIQUIDITY: i128 = MIN_BET;
 
 // Fee constants — multiply before divide to avoid precision loss
 const TOTAL_FEE_BPS: i128 = 200;
@@ -23,9 +37,54 @@ const LOSE_POINTS: u64 = 10;
 const WIN_TOKENS: i128 = 10_0000000;
 const LOSE_TOKENS: i128 = 2_0000000;
 
-// TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
+// ── Storage TTL and Archival Strategy (Issue #533) ──────────────────────────
+// All persistent storage entries require explicit TTL management. Soroban entries
+// expire and are archived after TTL_BUMP seconds; archived entries can be restored
+// but incur significant gas costs. The oracle uses a two-level TTL strategy:
+//
+// TTL_BUMP (3,153,600 seconds ≈ 36.5 days):
+//   Initial TTL set on each storage write. Short enough to clean up abandoned
+//   entries within ~36 days, but sufficient for normal market operation.
+//
+// TTL_HIGH (6,307,200 seconds ≈ 73 days):
+//   Extended TTL when calling extend_ttl(). Markets and submissions remain alive
+//   for up to 73 days, comfortably exceeding the maximum submission lifetime:
+//   - Market expiry to submission window: immediate
+//   - Submission window (CHALLENGE_WINDOW): 24 hours
+//   - Council window (COUNCIL_WINDOW): 72 hours
+//   - Maximum total: 96 hours (4 days) from submission to finalization
+//
+// Every state transition extends TTL to prevent expiry during long disputes:
+// - submit_outcome() → extend_ttl (submission active)
+// - challenge() → extend_ttl (escalated, awaiting council)
+// - resolve_challenge() → extend_ttl (finalized, settlement happens)
+// - finalize_outcome() → extend_ttl (unchallenged finalization)
+// - finalize_challenge_timeout() → extend_ttl (timeout fallback)
+//
+// Cost implications:
+// - Each extend_ttl call costs ~1000-2000 gas; network writes ~$0.0001 at 10 stroops/op
+// - A typical 4-day dispute costs ~4 TTL extensions ≈ $0.0004
+// - Storage is restored from archival on demand (~5000 gas per restore)
+// - Expected cost for oracle operations: <$0.001 per transaction in 2025 conditions
+//
+// Monitoring: If a market approaches deadline and TTL is not extended, finalization
+// may fail with archival restoration costs. Entries in archive for >30 days are deleted.
+
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// ── Optimistic oracle (docs/ORACLE_AND_BACKEND.md — Option B) ─────────────────
+// Anyone may post an outcome with a bond once a market has expired. If nobody
+// challenges inside CHALLENGE_WINDOW the outcome finalizes and the bond is
+// returned. A challenger posting a strictly larger bond escalates the market to
+// the resolution council.
+
+const SUBMITTER_BOND: i128 = 100_0000000; // 100 XLM — minimum submitter bond
+const DISPUTER_BOND: i128  = 200_0000000; // 200 XLM — minimum disputer bond
+const CHALLENGE_WINDOW: u64 = 86_400;     // 24h to challenge a submission
+const COUNCIL_WINDOW: u64   = 259_200;    // 72h for the council to rule
+const COUNCIL_FEE_BPS: i128 = 1_000;      // 10% of the loser's bond
+const CANCELLATION_DEADLINE: u64 = 604_800; // 7d after expiry before permissionless cancellation
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +112,20 @@ pub enum MarketError {
     NotAuthorized      = 18,
     MarketNotCancelled = 19,
     RateLimitExceeded  = 20,
+    // ── Optimistic oracle ──
+    SubmissionExists   = 21,          // a submission already exists for this market
+    SubmissionNotFound = 22,          // no submission exists for this market
+    AlreadyChallenged  = 23,          // the submission has already been disputed
+    ChallengeWindowNotElapsed = 24,   // challenge window has not elapsed yet
+    OracleWindowClosed = 25,          // challenge window has already elapsed
+    OracleInvalidState = 26,          // transition not legal from the current state
+    OracleBondTooSmall = 27,          // bond below the minimum / not larger than submitter's
+    ContractPaused     = 28,          // global pause is on: new bets and markets are rejected (#788)
+    InvalidQuestion    = 28,          // question empty or longer than MAX_QUESTION_LEN
+    InvalidDuration    = 29,          // duration outside [MIN_MARKET_DURATION, MAX_MARKET_DURATION]
+    InsufficientLiquidity = 30,       // one side below MIN_SIDE_LIQUIDITY; resolution impossible
+    NoPendingAdmin     = 31,          // accept_admin called with no proposal
+    InvalidCategory    = 32,          // category not allowed by admin registry (#1016)
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -60,6 +133,7 @@ pub enum MarketError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,          // two-step admin transfer: proposed, not yet accepted
     // Config addresses — all in instance storage (shared, cheap)
     Cfg,                   // single packed Config struct — 1 read instead of 5
     MarketCount,
@@ -69,9 +143,22 @@ pub enum DataKey {
     BettorCount(u64),
     BettorAt(u64, u32),
     Resolver(Address),
+    Resolvers,
     FeeRecipient(Address),
     HasReferrer(Address),
     RateWindow,            // packed u64: high32=window_start_hi, low32=count
+    Submission(u64),       // market_id → OracleSubmission (optimistic oracle)
+    // Configurable oracle parameters (Issue #525, #526)
+    SubmitterBond,         // i128: configurable submitter bond minimum
+    DisputerBond,          // i128: configurable disputer bond minimum
+    ChallengeWindow,       // u64: challenge window in seconds
+    CouncilWindow,         // u64: council window in seconds
+    // Multisig voting (Issue #527)
+    CouncilVote(u64, Address),  // market_id, member → CouncilVoteRecord
+    CouncilVoteCount(u64),      // market_id → vote count
+    Categories,                 // allowed market categories registry (Issue #1016)
+    Paused,                     // bool: global pause for place_bet / create_market (#788)
+    SchemaVersion,              // u32: storage layout version (#790, #791)
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -109,6 +196,16 @@ pub enum Category {
 }
 
 #[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MarketStatus {
+    Open = 0,
+    Resolved = 1,
+    Cancelled = 2,
+    Expired = 3,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Market {
     pub id:        u64,
@@ -132,6 +229,154 @@ pub struct Bet {
     pub amount:  i128,
     pub is_yes:  bool,
     pub claimed: bool,
+}
+
+// ── Optimistic Oracle State Machine ───────────────────────────────────────────
+//
+//   OPEN → SUBMITTED (anyone posts outcome + bond)
+//        → CHALLENGED (disputer posts larger bond within CHALLENGE_WINDOW)
+//          → ESCALATED (council rules within COUNCIL_WINDOW)
+//            → FINALIZED (council decision, bonds distributed)
+//        → FINALIZED (unchallenged after CHALLENGE_WINDOW)
+//
+// `Challenged` is the instant a disputer's bond lands; the same call escalates
+// to the council, so it is only ever observed through the `challenged` event.
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OracleState {
+    Submitted,
+    Challenged,
+    Escalated,
+    Finalized,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    pub market_id:          u64,
+    pub submitter:          Address,
+    pub outcome:            bool,    // outcome asserted by the submitter
+    pub bond:               i128,    // submitter bond held in escrow
+    pub state:              OracleState,
+    pub submitted_at:       u64,
+    pub challenge_deadline: u64,     // submitted_at + CHALLENGE_WINDOW
+    pub challenger:         Option<Address>,
+    pub challenger_bond:    i128,    // 0 while unchallenged
+    pub escalated_at:       u64,     // 0 while unchallenged
+    pub council_deadline:   u64,     // escalated_at + COUNCIL_WINDOW, 0 while unchallenged
+    pub finalized_at:       u64,     // 0 until finalized
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CouncilVoteRecord {
+    pub member:    Address,
+    pub outcome:   bool,
+    pub voted_at:  u64,
+}
+
+// ── Oracle Events ─────────────────────────────────────────────────────────────
+// Topics are (Symbol "oracle", Symbol <action>) so the indexer can route on
+// domain/action exactly as it does for "mkt"/"referral". Payload structs are
+// emitted as maps — field names below are the indexer contract.
+// See docs/ORACLE_AND_BACKEND.md → "Oracle Event Topics".
+
+#[contractevent(topics = ["oracle", "submitted"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmittedEvent {
+    pub market_id:          u64,
+    pub submitter:          Address,
+    pub outcome:            bool,
+    pub bond:               i128,
+    pub submitted_at:       u64,
+    pub challenge_deadline: u64,
+}
+
+#[contractevent(topics = ["oracle", "challenged"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleChallengedEvent {
+    pub market_id:      u64,
+    pub challenger:     Address,
+    pub outcome:        bool, // outcome asserted by the challenger (opposite side)
+    pub bond:           i128,
+    pub submitter:      Address,
+    pub submitter_bond: i128,
+    pub challenged_at:  u64,
+}
+
+#[contractevent(topics = ["oracle", "escalated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleEscalatedEvent {
+    pub market_id:        u64,
+    pub submitter:        Address,
+    pub challenger:       Address,
+    pub outcome:          bool, // outcome under dispute (the submitter's)
+    pub total_bond:       i128, // submitter bond + challenger bond in escrow
+    pub escalated_at:     u64,
+    pub council_deadline: u64,
+}
+
+#[contractevent(topics = ["oracle", "finalized"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleFinalizedEvent {
+    pub market_id:         u64,
+    pub outcome:           bool,
+    pub challenged:        bool, // false = unchallenged auto-finalize, true = council ruling
+    pub submitter:         Address,
+    pub challenger:        Option<Address>,
+    pub submitter_payout:  i128,
+    pub challenger_payout: i128,
+    pub council_fee:       i128, // 10% of the loser's bond (0 when unchallenged)
+    pub protocol_credit:   i128, // total added to AccumulatedFees (fee + residual)
+    pub finalized_at:      u64,
+}
+
+#[contractevent(topics = ["oracle", "timedout"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeTimedOutEvent {
+    pub market_id:         u64,
+    pub outcome:           bool,
+    pub submitter:         Address,
+    pub submitter_payout:  i128,
+    pub challenger:        Address,
+    pub challenger_payout: i128,
+    pub finalized_at:      u64,
+}
+
+#[contractevent(topics = ["oracle", "vote_cast"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteCastEvent {
+    pub market_id:  u64,
+    pub member:     Address,
+    pub outcome:    bool,
+    pub voted_at:   u64,
+}
+
+#[contractevent(topics = ["oracle", "bond_minimums_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BondMinimumsUpdatedEvent {
+    pub old_submitter_bond: i128,
+    pub new_submitter_bond: i128,
+    pub old_disputer_bond:  i128,
+    pub new_disputer_bond:  i128,
+    pub updated_at:         u64,
+}
+
+#[contractevent(topics = ["oracle", "window_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowUpdatedEvent {
+    pub window_type:    Symbol,
+    pub old_value:      u64,
+    pub new_value:      u64,
+    pub updated_at:     u64,
+}
+
+#[contractevent(topics = ["oracle", "cancelled"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCancelledEvent {
+    pub market_id:     u64,
+    pub cancelled_at:  u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -165,6 +410,11 @@ impl PredictionMarketContract {
         });
         env.storage().instance().set(&DataKey::MarketCount, &0_u64);
         env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
+        // Initialize configurable oracle parameters with defaults (Issue #525, #526)
+        env.storage().instance().set(&DataKey::SubmitterBond, &SUBMITTER_BOND);
+        env.storage().instance().set(&DataKey::DisputerBond, &DISPUTER_BOND);
+        env.storage().instance().set(&DataKey::ChallengeWindow, &CHALLENGE_WINDOW);
+        env.storage().instance().set(&DataKey::CouncilWindow, &COUNCIL_WINDOW);
         Ok(())
     }
 
@@ -181,8 +431,64 @@ impl PredictionMarketContract {
         Ok(())
     }
 
+    /// Storage migration hook (#791). Admin only and idempotent. Call it once after
+    /// `upgrade`: the swapped WASM only runs on the next invocation, so it cannot
+    /// migrate inside `upgrade` itself. Add an `if from < N { ... }` block per layout change.
+    pub fn migrate(env: Env, admin: Address) -> Result<u32, MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let from = Self::stored_schema_version(&env);
+        if from < SCHEMA_VERSION {
+            // Layout migrations go here, in order, e.g. `if from < 2 { ... }`.
+        }
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
+        Ok(SCHEMA_VERSION)
+    }
+
+    /// Storage layout version of the deployed state (#790).
+    pub fn schema_version(env: Env) -> u32 {
+        Self::stored_schema_version(&env)
+    }
+
+    /// Build version of the deployed WASM, from the crate version (#790).
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Global pause for `place_bet` and `create_market`. Admin only. (#788)
+    /// Claims, refunds and resolution stay available while paused.
+    pub fn set_paused(env: Env, admin: Address, paused: bool) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
     /// Update the packed Config (token / referral / leaderboard / xlm_sac). Admin only.
     /// Used to correct an address set at initialize time.
+    /// Step 1 of admin rotation: the current admin nominates `new_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2 of admin rotation: the nominee accepts, becoming admin.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), MarketError> {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&DataKey::PendingAdmin)
+            .ok_or(MarketError::NoPendingAdmin)?;
+        if pending != new_admin { return Err(MarketError::NotAdmin); }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
+    }
+
     pub fn set_config(
         env: Env,
         admin: Address,
@@ -207,12 +513,124 @@ impl PredictionMarketContract {
         env.storage().instance().get(&DataKey::Cfg).unwrap()
     }
 
+    /// Set bond minimums for optimistic oracle submissions. Admin only. (Issue #525)
+    pub fn set_bond_minimums(
+        env: Env,
+        admin: Address,
+        submitter_bond: i128,
+        disputer_bond: i128,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+
+        if submitter_bond <= 0 || disputer_bond <= 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+        if disputer_bond <= submitter_bond {
+            return Err(MarketError::OracleBondTooSmall);
+        }
+
+        let old_submitter: i128 = env.storage().instance().get(&DataKey::SubmitterBond).unwrap_or(SUBMITTER_BOND);
+        let old_disputer: i128 = env.storage().instance().get(&DataKey::DisputerBond).unwrap_or(DISPUTER_BOND);
+
+        env.storage().instance().set(&DataKey::SubmitterBond, &submitter_bond);
+        env.storage().instance().set(&DataKey::DisputerBond, &disputer_bond);
+
+        BondMinimumsUpdatedEvent {
+            old_submitter_bond: old_submitter,
+            new_submitter_bond: submitter_bond,
+            old_disputer_bond: old_disputer,
+            new_disputer_bond: disputer_bond,
+            updated_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Get current submitter bond minimum.
+    pub fn get_submitter_bond(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::SubmitterBond).unwrap_or(SUBMITTER_BOND)
+    }
+
+    /// Get current disputer bond minimum.
+    pub fn get_disputer_bond(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::DisputerBond).unwrap_or(DISPUTER_BOND)
+    }
+
+    /// Set challenge window duration in seconds. Admin only. (Issue #526)
+    pub fn set_challenge_window(
+        env: Env,
+        admin: Address,
+        window_secs: u64,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+
+        if window_secs == 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+
+        let old_window: u64 = env.storage().instance().get(&DataKey::ChallengeWindow).unwrap_or(CHALLENGE_WINDOW);
+        env.storage().instance().set(&DataKey::ChallengeWindow, &window_secs);
+
+        WindowUpdatedEvent {
+            window_type: Symbol::new(&env, "challenge"),
+            old_value: old_window,
+            new_value: window_secs,
+            updated_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Set council window duration in seconds. Admin only. (Issue #526)
+    pub fn set_council_window(
+        env: Env,
+        admin: Address,
+        window_secs: u64,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+
+        if window_secs == 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+
+        let old_window: u64 = env.storage().instance().get(&DataKey::CouncilWindow).unwrap_or(COUNCIL_WINDOW);
+        env.storage().instance().set(&DataKey::CouncilWindow, &window_secs);
+
+        WindowUpdatedEvent {
+            window_type: Symbol::new(&env, "council"),
+            old_value: old_window,
+            new_value: window_secs,
+            updated_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Get current challenge window in seconds.
+    pub fn get_challenge_window(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::ChallengeWindow).unwrap_or(CHALLENGE_WINDOW)
+    }
+
+    /// Get current council window in seconds.
+    pub fn get_council_window(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::CouncilWindow).unwrap_or(COUNCIL_WINDOW)
+    }
+
     // ── Resolver Management ───────────────────────────────────────────────
 
     pub fn add_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        let key = DataKey::Resolver(resolver);
+        let key = DataKey::Resolver(resolver.clone());
+        let mut resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
+        if !resolvers.iter().any(|current| current == resolver) {
+            resolvers.push_back(resolver.clone());
+            env.storage().instance().set(&DataKey::Resolvers, &resolvers);
+        }
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
         Ok(())
@@ -221,12 +639,27 @@ impl PredictionMarketContract {
     pub fn remove_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        env.storage().persistent().remove(&DataKey::Resolver(resolver));
+        env.storage().persistent().remove(&DataKey::Resolver(resolver.clone()));
+        let resolvers: Vec<Address> = env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env));
+        let mut remaining = Vec::new(&env);
+        for current in resolvers.iter() {
+            if current != resolver {
+                remaining.push_back(current);
+            }
+        }
+        env.storage().instance().set(&DataKey::Resolvers, &remaining);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
 
     pub fn is_resolver(env: Env, resolver: Address) -> bool {
         env.storage().persistent().get(&DataKey::Resolver(resolver)).unwrap_or(false)
+    }
+
+    /// Returns the resolver set used by the oracle aggregator for startup and
+    /// periodic configuration validation.
+    pub fn get_resolvers(env: Env) -> Vec<Address> {
+        env.storage().instance().get(&DataKey::Resolvers).unwrap_or(Vec::new(&env))
     }
 
     // ── Fee Recipient Management ──────────────────────────────────────────
@@ -247,6 +680,63 @@ impl PredictionMarketContract {
         Ok(())
     }
 
+    // ── Category Registry Management (admin only, Issue #1016) ─────────────
+
+    pub fn add_category(env: Env, admin: Address, category: Category) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let mut categories = Self::get_categories(env.clone());
+        for c in categories.iter() {
+            if c == category {
+                return Ok(());
+            }
+        }
+        categories.push_back(category);
+        env.storage().instance().set(&DataKey::Categories, &categories);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn remove_category(env: Env, admin: Address, category: Category) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let categories = Self::get_categories(env.clone());
+        let mut remaining = Vec::new(&env);
+        for c in categories.iter() {
+            if c != category {
+                remaining.push_back(c);
+            }
+        }
+        env.storage().instance().set(&DataKey::Categories, &remaining);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn get_categories(env: Env) -> Vec<Category> {
+        if let Some(cats) = env.storage().instance().get(&DataKey::Categories) {
+            cats
+        } else {
+            let mut default_cats = Vec::new(&env);
+            default_cats.push_back(Category::Crypto);
+            default_cats.push_back(Category::Sports);
+            default_cats.push_back(Category::Politics);
+            default_cats.push_back(Category::Entertainment);
+            default_cats.push_back(Category::Science);
+            default_cats.push_back(Category::Other);
+            default_cats
+        }
+    }
+
+    pub fn is_category_allowed(env: Env, category: Category) -> bool {
+        let categories = Self::get_categories(env);
+        for c in categories.iter() {
+            if c == category {
+                return true;
+            }
+        }
+        false
+    }
+
     // ── Market Management ─────────────────────────────────────────────────
 
     pub fn create_market(
@@ -259,6 +749,14 @@ impl PredictionMarketContract {
     ) -> Result<u64, MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
+        Self::require_not_paused(&env)?;
+        if question.len() == 0 || question.len() > MAX_QUESTION_LEN { return Err(MarketError::InvalidQuestion); }
+        if duration_secs < MIN_MARKET_DURATION || duration_secs > MAX_MARKET_DURATION {
+            return Err(MarketError::InvalidDuration);
+        }
+        if !Self::is_category_allowed(env.clone(), category.clone()) {
+            return Err(MarketError::InvalidCategory);
+        }
         Self::check_rate(&env)?;
 
         // OPT: single instance read for count (was already one read)
@@ -298,6 +796,7 @@ impl PredictionMarketContract {
         amount: i128,
     ) -> Result<(), MarketError> {
         user.require_auth();
+        Self::require_not_paused(&env)?;
 
         if amount < MIN_BET {
             return Err(MarketError::BetTooSmall);
@@ -326,6 +825,9 @@ impl PredictionMarketContract {
         let platform_fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
         let referral_fee = total_fee - platform_fee;
         let net          = amount * NET_NUMERATOR / BPS_DENOM;
+        // #795: assert fee splits never lose stroops
+        debug_assert_eq!(platform_fee + referral_fee + net, amount,
+            "fee split rounding: {} + {} + {} != {}", platform_fee, referral_fee, net, amount);
 
         // OPT: one Config read instead of 4 separate instance reads
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
@@ -408,22 +910,396 @@ impl PredictionMarketContract {
         if market.cancelled { return Err(MarketError::MarketCancelled); }
         if env.ledger().timestamp() < market.end_time { return Err(MarketError::MarketNotExpired); }
 
-        let winning_side = if outcome { market.total_yes } else { market.total_no };
-        if winning_side == 0 {
-            let total_pool = market.total_yes + market.total_no;
-            if total_pool > 0 {
-                let mut acc: i128 = env.storage().instance()
-                    .get(&DataKey::AccumulatedFees).unwrap_or(0);
-                acc += total_pool;
-                env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
-            }
+        Self::apply_resolution(&env, &mut market, outcome)?;
+        Ok(())
+    }
+
+    // ── Optimistic Oracle ─────────────────────────────────────────────────
+    // Bonded, permissionless resolution. See docs/ORACLE_AND_BACKEND.md.
+
+    /// Post an outcome for an expired market with a bond, opening the challenge
+    /// window. Callable by anyone. The bond is escrowed in this contract and
+    /// returned on finalization (or forfeited if a challenge succeeds).
+    ///
+    /// First-come: front-running a submission is an accepted risk, since the
+    /// unchallenged path only returns the submitter's own bond. See
+    /// docs/ORACLE_AND_BACKEND.md § "Front-running analysis" (#604).
+    pub fn submit_outcome(
+        env: Env,
+        submitter: Address,
+        market_id: u64,
+        outcome: bool,
+        bond: i128,
+    ) -> Result<(), MarketError> {
+        submitter.require_auth();
+
+        let min_bond = Self::get_submitter_bond(env.clone());
+        if bond < min_bond { return Err(MarketError::OracleBondTooSmall); }
+
+        let market = Self::load_market(&env, market_id)?;
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+        if env.ledger().timestamp() < market.end_time {
+            return Err(MarketError::MarketNotExpired);
+        }
+        // Fail fast: a one-sided market could never finalize, so don't escrow a bond for it
+        Self::ensure_liquidity(&market)?;
+        if env.storage().persistent().has(&DataKey::Submission(market_id)) {
+            return Err(MarketError::SubmissionExists);
         }
 
-        market.resolved = true;
-        market.outcome = outcome;
-        let mkt_key = DataKey::Market(market_id);
-        env.storage().persistent().set(&mkt_key, &market);
-        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        // Escrow the bond before recording anything.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&submitter, &env.current_contract_address(), &bond);
+
+        let now = env.ledger().timestamp();
+        let challenge_window = Self::get_challenge_window(env.clone());
+        let challenge_deadline = now + challenge_window;
+
+        let submission = OracleSubmission {
+            market_id,
+            submitter: submitter.clone(),
+            outcome,
+            bond,
+            state: OracleState::Submitted,
+            submitted_at: now,
+            challenge_deadline,
+            challenger: None,
+            challenger_bond: 0,
+            escalated_at: 0,
+            council_deadline: 0,
+            finalized_at: 0,
+        };
+        Self::store_submission(&env, &submission);
+
+        OracleSubmittedEvent {
+            market_id,
+            submitter,
+            outcome,
+            bond,
+            submitted_at: now,
+            challenge_deadline,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Dispute an open submission by posting a strictly larger bond inside the
+    /// challenge window. The challenger implicitly asserts the opposite outcome.
+    /// Escalates straight to the council — emits both `challenged` and
+    /// `escalated`.
+    pub fn challenge(
+        env: Env,
+        challenger: Address,
+        market_id: u64,
+        bond: i128,
+    ) -> Result<(), MarketError> {
+        challenger.require_auth();
+
+        let mut submission = Self::load_submission(&env, market_id)?;
+        match submission.state {
+            OracleState::Submitted => {}
+            OracleState::Challenged | OracleState::Escalated => {
+                return Err(MarketError::AlreadyChallenged)
+            }
+            OracleState::Finalized => return Err(MarketError::OracleInvalidState),
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= submission.challenge_deadline {
+            return Err(MarketError::OracleWindowClosed);
+        }
+
+        let min_disputer_bond = Self::get_disputer_bond(env.clone());
+        if bond < min_disputer_bond || bond <= submission.bond {
+            return Err(MarketError::OracleBondTooSmall);
+        }
+
+        let market = Self::load_market(&env, market_id)?;
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+
+        // Escrow the disputer bond alongside the submitter's.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&challenger, &env.current_contract_address(), &bond);
+
+        let council_window = Self::get_council_window(env.clone());
+        let council_deadline = now + council_window;
+        submission.state = OracleState::Escalated;
+        submission.challenger = Some(challenger.clone());
+        submission.challenger_bond = bond;
+        submission.escalated_at = now;
+        submission.council_deadline = council_deadline;
+        Self::store_submission(&env, &submission);
+
+        OracleChallengedEvent {
+            market_id,
+            challenger: challenger.clone(),
+            outcome: !submission.outcome,
+            bond,
+            submitter: submission.submitter.clone(),
+            submitter_bond: submission.bond,
+            challenged_at: now,
+        }
+        .publish(&env);
+        OracleEscalatedEvent {
+            market_id,
+            submitter: submission.submitter.clone(),
+            challenger,
+            outcome: submission.outcome,
+            total_bond: submission.bond + bond,
+            escalated_at: now,
+            council_deadline,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Finalize an unchallenged submission once the challenge window has
+    /// elapsed. Callable by anyone. Returns the submitter's bond and resolves
+    /// the market with the submitted outcome.
+    pub fn finalize_outcome(env: Env, market_id: u64) -> Result<(), MarketError> {
+        let mut submission = Self::load_submission(&env, market_id)?;
+        match submission.state {
+            OracleState::Submitted => {}
+            // A disputed submission can only be settled by the council.
+            OracleState::Challenged | OracleState::Escalated => {
+                return Err(MarketError::AlreadyChallenged)
+            }
+            OracleState::Finalized => return Err(MarketError::OracleInvalidState),
+        }
+        let now = env.ledger().timestamp();
+        if now < submission.challenge_deadline {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        let mut market = Self::load_market(&env, market_id)?;
+
+        // Unchallenged: the bond always comes back in full.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        token::Client::new(&env, &cfg.xlm_sac)
+            .transfer(&env.current_contract_address(), &submission.submitter, &submission.bond);
+
+        // A market cancelled or force-resolved out of band while the window was
+        // open still releases the bond — it just does not resolve again.
+        if !market.resolved && !market.cancelled {
+            Self::apply_resolution(&env, &mut market, submission.outcome)?;
+        }
+
+        submission.state = OracleState::Finalized;
+        submission.finalized_at = now;
+        Self::store_submission(&env, &submission);
+
+        OracleFinalizedEvent {
+            market_id,
+            outcome: submission.outcome,
+            challenged: false,
+            submitter: submission.submitter.clone(),
+            challenger: None,
+            submitter_payout: submission.bond,
+            challenger_payout: 0,
+            council_fee: 0,
+            protocol_credit: 0,
+            finalized_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Record a council member's vote on an escalated market. (Issue #527)
+    /// Each member can vote once per market. Duplicate votes are rejected.
+    pub fn vote_on_challenge(
+        env: Env,
+        member: Address,
+        market_id: u64,
+        outcome: bool,
+    ) -> Result<(), MarketError> {
+        member.require_auth();
+        Self::require_admin_or_resolver(&env, &member)?;
+
+        let submission = Self::load_submission(&env, market_id)?;
+        if submission.state != OracleState::Escalated {
+            return Err(MarketError::OracleInvalidState);
+        }
+
+        let vote_key = DataKey::CouncilVote(market_id, member.clone());
+        if env.storage().persistent().has(&vote_key) {
+            return Err(MarketError::AlreadyChallenged);
+        }
+
+        let now = env.ledger().timestamp();
+        let vote = CouncilVoteRecord {
+            member: member.clone(),
+            outcome,
+            voted_at: now,
+        };
+
+        env.storage().persistent().set(&vote_key, &vote);
+        env.storage().persistent().extend_ttl(&vote_key, TTL_BUMP, TTL_HIGH);
+
+        let count_key = DataKey::CouncilVoteCount(market_id);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage().persistent().set(&count_key, &(count + 1));
+        env.storage().persistent().extend_ttl(&count_key, TTL_BUMP, TTL_HIGH);
+
+        VoteCastEvent {
+            market_id,
+            member,
+            outcome,
+            voted_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Council ruling on an escalated market. Requires threshold of votes
+    /// from distinct council members. Callable by admin or any resolver once
+    /// threshold is reached. (Issue #527)
+    ///
+    /// Bond distribution follows the design doc:
+    ///  - submitter correct → own bond back + half the disputer bond
+    ///  - disputer correct  → both bonds, less a 10% council fee on the loser's bond
+    /// Whatever the winner does not take is credited to AccumulatedFees, so the
+    /// escrow always nets to zero.
+    pub fn resolve_challenge(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+        outcome: bool,
+    ) -> Result<(), MarketError> {
+        caller.require_auth();
+        Self::require_admin_or_resolver(&env, &caller)?;
+
+        let mut submission = Self::load_submission(&env, market_id)?;
+        if submission.state != OracleState::Escalated {
+            return Err(MarketError::OracleInvalidState);
+        }
+        let challenger = submission.challenger.clone().ok_or(MarketError::OracleInvalidState)?;
+
+        let now = env.ledger().timestamp();
+        if now < submission.council_deadline {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        let count_key = DataKey::CouncilVoteCount(market_id);
+        let vote_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        let council_size = Self::get_resolvers(env.clone()).len() as u32;
+        let threshold = if council_size > 0 { (council_size / 2) + 1 } else { 1 };
+
+        if vote_count < threshold {
+            return Err(MarketError::NotResolver);
+        }
+
+        let mut market = Self::load_market(&env, market_id)?;
+
+        let submitter_won = outcome == submission.outcome;
+        let loser_bond = if submitter_won { submission.challenger_bond } else { submission.bond };
+        let council_fee = loser_bond * COUNCIL_FEE_BPS / BPS_DENOM;
+        let winner_share = if submitter_won { loser_bond / 2 } else { loser_bond - council_fee };
+        let protocol_credit = loser_bond - winner_share;
+
+        let (submitter_payout, challenger_payout) = if submitter_won {
+            (submission.bond + winner_share, 0)
+        } else {
+            (0, submission.challenger_bond + winner_share)
+        };
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let xlm = token::Client::new(&env, &cfg.xlm_sac);
+        let this = env.current_contract_address();
+        if submitter_payout > 0 { xlm.transfer(&this, &submission.submitter, &submitter_payout); }
+        if challenger_payout > 0 { xlm.transfer(&this, &challenger, &challenger_payout); }
+
+        if protocol_credit > 0 {
+            let mut acc: i128 = env.storage().instance()
+                .get(&DataKey::AccumulatedFees).unwrap_or(0);
+            acc += protocol_credit;
+            env.storage().instance().set(&DataKey::AccumulatedFees, &acc);
+        }
+
+        if !market.resolved && !market.cancelled {
+            Self::apply_resolution(&env, &mut market, outcome)?;
+        }
+
+        submission.state = OracleState::Finalized;
+        submission.finalized_at = now;
+        Self::store_submission(&env, &submission);
+
+        OracleFinalizedEvent {
+            market_id,
+            outcome,
+            challenged: true,
+            submitter: submission.submitter.clone(),
+            challenger: Some(challenger),
+            submitter_payout,
+            challenger_payout,
+            council_fee,
+            protocol_credit,
+            finalized_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn get_oracle_submission(env: Env, market_id: u64) -> Result<OracleSubmission, MarketError> {
+        Self::load_submission(&env, market_id)
+    }
+
+    /// Get the number of council votes cast on an escalated market.
+    pub fn get_council_vote_count(env: Env, market_id: u64) -> u32 {
+        env.storage().persistent()
+            .get(&DataKey::CouncilVoteCount(market_id))
+            .unwrap_or(0)
+    }
+
+    /// Finalize an escalated market past its council deadline without a ruling.
+    /// Callable by anyone. Returns both bonds to their original posters.
+    /// Rationale: timeout is a safety valve when council unavailable; returning
+    /// both bonds is neutral and avoids incentivizing frivolous challenge or stalling.
+    /// (Issue #528)
+    pub fn finalize_challenge_timeout(env: Env, market_id: u64) -> Result<(), MarketError> {
+        let mut submission = Self::load_submission(&env, market_id)?;
+        if submission.state != OracleState::Escalated {
+            return Err(MarketError::OracleInvalidState);
+        }
+
+        let challenger = submission.challenger.clone().ok_or(MarketError::OracleInvalidState)?;
+        let now = env.ledger().timestamp();
+
+        if now < submission.council_deadline {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        let mut market = Self::load_market(&env, market_id)?;
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let xlm = token::Client::new(&env, &cfg.xlm_sac);
+        let this = env.current_contract_address();
+
+        xlm.transfer(&this, &submission.submitter, &submission.bond);
+        xlm.transfer(&this, &challenger, &submission.challenger_bond);
+
+        if !market.resolved && !market.cancelled {
+            Self::apply_resolution(&env, &mut market, submission.outcome)?;
+        }
+
+        submission.state = OracleState::Finalized;
+        submission.finalized_at = now;
+        Self::store_submission(&env, &submission);
+
+        ChallengeTimedOutEvent {
+            market_id,
+            outcome: submission.outcome,
+            submitter: submission.submitter.clone(),
+            submitter_payout: submission.bond,
+            challenger: challenger.clone(),
+            challenger_payout: submission.challenger_bond,
+            finalized_at: now,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -476,64 +1352,85 @@ impl PredictionMarketContract {
         Ok(gross)
     }
 
+    pub fn cancel_unsubmitted_market(env: Env, market_id: u64) -> Result<(), MarketError> {
+        let now = env.ledger().timestamp();
+        let mut market = Self::load_market(&env, market_id)?;
+
+        if market.resolved  { return Err(MarketError::MarketResolved); }
+        if market.cancelled { return Err(MarketError::MarketCancelled); }
+
+        if now < market.end_time {
+            return Err(MarketError::MarketNotExpired);
+        }
+
+        let submission_exists = env.storage().persistent().has(&DataKey::Submission(market_id));
+        if submission_exists {
+            return Err(MarketError::SubmissionExists);
+        }
+
+        if now < market.end_time + CANCELLATION_DEADLINE {
+            return Err(MarketError::ChallengeWindowNotElapsed);
+        }
+
+        market.cancelled = true;
+        let mkt_key = DataKey::Market(market_id);
+        env.storage().persistent().set(&mkt_key, &market);
+        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+
+        let net_pool    = market.total_yes + market.total_no;
+        let fees_in_pool = net_pool * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS);
+        let mut acc_fees: i128 = env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0);
+        acc_fees = if fees_in_pool < acc_fees { acc_fees - fees_in_pool } else { 0 };
+        env.storage().instance().set(&DataKey::AccumulatedFees, &acc_fees);
+
+        MarketCancelledEvent {
+            market_id,
+            cancelled_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     // ── Claim ─────────────────────────────────────────────────────────────
     // OPT: one Config read replaces 3 separate reads (xlm_sac, leaderboard, token)
 
+    /// Standard self-service claim: the winning/participating user submits their
+    /// own transaction and pays the Stellar fee.
     pub fn claim(env: Env, user: Address, market_id: u64) -> Result<(), MarketError> {
         user.require_auth();
+        Self::execute_claim(&env, &user, market_id)
+    }
 
-        let market = Self::load_market(&env, market_id)?;
-        if market.cancelled  { return Err(MarketError::MarketCancelled); }
-        if !market.resolved  { return Err(MarketError::MarketNotResolved); }
+    // ── Claim For (#787) ──────────────────────────────────────────────────
+    //
+    // `claim_for` lets any `sponsor` trigger a claim on behalf of `user`.
+    // The sponsor pays the transaction fee (XLM stroop fee), but the XLM
+    // payout and all rewards are still routed to `user`.
+    //
+    // Authorization model:
+    //   * The sponsor signs and pays the Stellar fee — `sponsor.require_auth()`.
+    //   * No `user.require_auth()` is needed: the user benefits unconditionally
+    //     and cannot be harmed (funds go to their address, not the sponsor's).
+    //   * The re-entrancy guard (`entry.claimed = true` before any external call)
+    //     is identical to `claim`, making sponsorship safe.
+    //
+    // Design notes:
+    //   * Shares all claim logic with `claim` via `execute_claim` to avoid
+    //     duplication and keep future changes in one place.
+    //   * O(1) time and space: single persistent bet read + write, one Config
+    //     read, one XLM transfer, one cross-contract leaderboard call.
+    //   * The sponsor can pass any valid `user` address; the contract verifies
+    //     the user has an unclaimed bet, preventing wasted gas on bad calls.
 
-        let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env.storage().persistent().get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
-
-        if entry.claimed { return Err(MarketError::AlreadyClaimed); }
-
-        let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
-        let winning_side = if market.outcome { market.total_yes } else { market.total_no };
-
-        // SECURITY: mark claimed BEFORE any external calls.
-        entry.claimed = true;
-        env.storage().persistent().set(&bet_key, &entry);
-        env.storage().persistent().extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
-
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
-        let this = env.current_contract_address();
-
-        // XLM payout: only when the winning side had bettors.
-        // If winning_side == 0, the pool was swept to AccumulatedFees at resolve
-        // time so the admin/fee-recipient can withdraw it via withdraw_fees().
-        if is_winner && winning_side > 0 {
-            let payout = (entry.net * total_pool) / winning_side;
-            token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
-        }
-
-        // All participants earn IPRED tokens + leaderboard points regardless.
-        // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
-        let real_win = is_winner && winning_side > 0;
-        let (points, tokens): (u64, i128) = if real_win {
-            (WIN_POINTS, WIN_TOKENS)
-        } else {
-            (LOSE_POINTS, LOSE_TOKENS)
-        };
-
-        let _: Val = env.invoke_contract(
-            &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
-            vec![&env,
-                this.clone().into_val(&env),
-                user.clone().into_val(&env),
-                points.into_val(&env),
-                tokens.into_val(&env),
-                real_win.into_val(&env),
-            ],
-        );
-
-        Ok(())
+    pub fn claim_for(
+        env: Env,
+        sponsor: Address,
+        user: Address,
+        market_id: u64,
+    ) -> Result<(), MarketError> {
+        sponsor.require_auth();
+        Self::execute_claim(&env, &user, market_id)
     }
 
     // ── Withdraw Fees ─────────────────────────────────────────────────────
@@ -545,11 +1442,12 @@ impl PredictionMarketContract {
         let fees: i128 = env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0);
         if fees == 0 { return Err(MarketError::NoFeesToWithdraw); }
 
+        env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
+
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         token::Client::new(&env, &cfg.xlm_sac)
             .transfer(&env.current_contract_address(), &recipient, &fees);
 
-        env.storage().instance().set(&DataKey::AccumulatedFees, &0_i128);
         Ok(fees)
     }
 
@@ -571,6 +1469,7 @@ impl PredictionMarketContract {
         env.storage().instance().get(&DataKey::MarketCount).unwrap_or(0)
     }
 
+    /// Unbounded bettor list. Only safe for small markets; prefer `get_market_bettors_page`. (#786)
     pub fn get_market_bettors(env: Env, market_id: u64) -> Result<Vec<Address>, MarketError> {
         Self::load_market(&env, market_id)?;
         let count: u32 = env.storage().persistent().get(&DataKey::BettorCount(market_id)).unwrap_or(0);
@@ -583,8 +1482,34 @@ impl PredictionMarketContract {
         Ok(result)
     }
 
+    /// Bounded bettor page: up to `limit` (capped at MAX_BETTOR_PAGE) bettors starting at index `start`. (#786)
+    pub fn get_market_bettors_page(
+        env: Env,
+        market_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Result<Vec<Address>, MarketError> {
+        Self::load_market(&env, market_id)?;
+        let count: u32 = env.storage().persistent().get(&DataKey::BettorCount(market_id)).unwrap_or(0);
+        let end = count.min(start.saturating_add(limit.min(MAX_BETTOR_PAGE)));
+        let mut result: Vec<Address> = Vec::new(&env);
+        for i in start..end {
+            if let Some(addr) = env.storage().persistent().get::<DataKey, Address>(&DataKey::BettorAt(market_id, i)) {
+                result.push_back(addr);
+            }
+        }
+        Ok(result)
+    }
+
     pub fn get_accumulated_fees(env: Env) -> i128 {
         env.storage().instance().get(&DataKey::AccumulatedFees).unwrap_or(0)
+    }
+
+    /// Read the optimistic-oracle submission for a market, if one exists.
+    /// Returns `None` while the market is still in the `Open` (no submission)
+    /// state. Used by the off-chain indexer/aggregator to track lifecycle.
+    pub fn get_submission(env: Env, market_id: u64) -> Option<OracleSubmission> {
+        env.storage().persistent().get(&DataKey::Submission(market_id))
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
@@ -601,14 +1526,178 @@ impl PredictionMarketContract {
             .unwrap_or(0)
     }
 
+    /// Returns a paged list of markets matching the given status.
+    /// `start_id`: 1-based market id to begin the search from (0 defaults to 1).
+    /// `limit`: maximum number of matching markets to return (capped at 50 to bound gas).
+    pub fn get_markets_by_status(
+        env: Env,
+        status: MarketStatus,
+        start_id: u64,
+        limit: u32,
+    ) -> Vec<Market> {
+        let total = Self::get_market_count(env.clone());
+        let mut result = Vec::new(&env);
+        let cap = if limit == 0 { 20 } else { limit.min(50) };
+        let now = env.ledger().timestamp();
+        let start = if start_id == 0 { 1 } else { start_id };
+
+        for id in start..=total {
+            if let Ok(m) = Self::load_market(&env, id) {
+                let matches = match status {
+                    MarketStatus::Cancelled => m.cancelled,
+                    MarketStatus::Resolved => m.resolved && !m.cancelled,
+                    MarketStatus::Expired => !m.resolved && !m.cancelled && now >= m.end_time,
+                    MarketStatus::Open => !m.resolved && !m.cancelled && now < m.end_time,
+                };
+                if matches {
+                    result.push_back(m);
+                    if result.len() >= cap {
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Convenience paged getter for open markets (not resolved, not cancelled, not expired).
+    pub fn get_open_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Open, start_id, limit)
+    }
+
+    /// Convenience paged getter for resolved markets.
+    pub fn get_resolved_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Resolved, start_id, limit)
+    }
+
+    /// Convenience paged getter for cancelled markets.
+    pub fn get_cancelled_markets(env: Env, start_id: u64, limit: u32) -> Vec<Market> {
+        Self::get_markets_by_status(env, MarketStatus::Cancelled, start_id, limit)
+    }
+
     // ── Internal Helpers ──────────────────────────────────────────────────
+
+    /// Shared claim logic used by both `claim` (self-service) and `claim_for`
+    /// (sponsored).
+    ///
+    /// All XLM payouts and leaderboard/token rewards are routed to `user`
+    /// regardless of who triggered the transaction.
+    ///
+    /// Security: `entry.claimed` is set to `true` and persisted **before** any
+    /// external contract call, eliminating re-entrancy risk.
+    ///
+    /// Complexity: O(1) time, O(1) space.
+    fn execute_claim(env: &Env, user: &Address, market_id: u64) -> Result<(), MarketError> {
+        let market = Self::load_market(env, market_id)?;
+        if market.cancelled  { return Err(MarketError::MarketCancelled); }
+        if !market.resolved  { return Err(MarketError::MarketNotResolved); }
+
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        let mut entry: BetEntry = env.storage().persistent().get(&bet_key)
+            .ok_or(MarketError::NoBetFound)?;
+
+        if entry.claimed { return Err(MarketError::AlreadyClaimed); }
+
+        let is_winner = entry.is_yes == market.outcome;
+        let total_pool = market.total_yes + market.total_no;
+        let winning_side = if market.outcome { market.total_yes } else { market.total_no };
+
+        // SECURITY: mark claimed BEFORE any external calls (checks-effects-interactions).
+        entry.claimed = true;
+        env.storage().persistent().set(&bet_key, &entry);
+        env.storage().persistent().extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let this = env.current_contract_address();
+
+        // XLM payout: only when the winning side had bettors.
+        // If winning_side == 0, the pool was swept to AccumulatedFees at resolve
+        // time so the admin/fee-recipient can withdraw it via withdraw_fees().
+        if is_winner && winning_side > 0 {
+            let payout = (entry.net * total_pool) / winning_side;
+            token::Client::new(env, &cfg.xlm_sac).transfer(&this, user, &payout);
+        }
+
+        // All participants earn IPRED tokens + leaderboard points regardless of outcome.
+        // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
+        let real_win = is_winner && winning_side > 0;
+        let (points, tokens): (u64, i128) = if real_win {
+            (WIN_POINTS, WIN_TOKENS)
+        } else {
+            (LOSE_POINTS, LOSE_TOKENS)
+        };
+
+        let _: Val = env.invoke_contract(
+            &cfg.leaderboard,
+            &Symbol::new(env, "reward"),
+            vec![env,
+                this.clone().into_val(env),
+                user.clone().into_val(env),
+                points.into_val(env),
+                tokens.into_val(env),
+                real_win.into_val(env),
+            ],
+        );
+
+        Ok(())
+    }
 
     #[inline]
     fn load_market(env: &Env, market_id: u64) -> Result<Market, MarketError> {
         env.storage().persistent().get(&DataKey::Market(market_id)).ok_or(MarketError::MarketNotFound)
     }
 
+    /// Mark a market resolved and sweep the pool when the winning side is empty.
+    /// Shared by `resolve_market` and the optimistic oracle finalizers.
+    fn apply_resolution(env: &Env, market: &mut Market, outcome: bool) -> Result<(), MarketError> {
+        Self::ensure_liquidity(market)?;
+
+        market.resolved = true;
+        market.outcome = outcome;
+        let mkt_key = DataKey::Market(market.id);
+        env.storage().persistent().set(&mkt_key, &*market);
+        env.storage().persistent().extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Both sides must hold at least MIN_SIDE_LIQUIDITY net stake. A one-sided
+    /// market has no winners, so it can only be cancelled (refunds via cancel_refund).
+    fn ensure_liquidity(market: &Market) -> Result<(), MarketError> {
+        if market.total_yes < MIN_SIDE_LIQUIDITY || market.total_no < MIN_SIDE_LIQUIDITY {
+            return Err(MarketError::InsufficientLiquidity);
+        }
+        Ok(())
+    }
+
     #[inline]
+    fn load_submission(env: &Env, market_id: u64) -> Result<OracleSubmission, MarketError> {
+        env.storage().persistent()
+            .get(&DataKey::Submission(market_id))
+            .ok_or(MarketError::SubmissionNotFound)
+    }
+
+    #[inline]
+    fn store_submission(env: &Env, submission: &OracleSubmission) {
+        // Persist the oracle submission and extend its TTL. Called at every state
+        // transition (submit, challenge, resolve, finalize) to ensure the entry
+        // remains alive throughout the dispute window. See Issue #533 for TTL strategy.
+        let key = DataKey::Submission(submission.market_id);
+        env.storage().persistent().set(&key, submission);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+    }
+
+    #[inline]
+    fn stored_schema_version(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::SchemaVersion).unwrap_or(1)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), MarketError> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Err(MarketError::ContractPaused);
+        }
+        Ok(())
+    }
+
     fn require_admin(env: &Env, caller: &Address) -> Result<(), MarketError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(MarketError::NotInitialized)?;
         if *caller != admin { return Err(MarketError::NotAdmin); }
@@ -655,4 +1744,10 @@ impl PredictionMarketContract {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod test;
+
+#[cfg(test)]
+mod invariant;

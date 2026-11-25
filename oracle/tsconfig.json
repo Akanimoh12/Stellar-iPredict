@@ -13,6 +13,6 @@
     "resolveJsonModule": true,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "test/council-membership.test.ts", "test/bond-reconciliation.test.ts", "test/normalize.test.ts"],
   "exclude": ["node_modules", "dist", "test"]
 }

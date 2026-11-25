@@ -15,6 +15,9 @@ This document is the contributor-facing reference for the core database tables u
 - `events` — raw on-chain event audit log used for replay and backfills
 - `oracle_submissions` — oracle workflow submissions and status tracking
 - `council_votes` — Phase 1.5 council member outcome submissions per market
+- `bet_anomaly_alerts` — review-only flags and human dispositions for
+  concentrated late betting patterns (see
+  [`docs/BET-ANOMALY-DETECTION.md`](../docs/BET-ANOMALY-DETECTION.md))
 
 ## Table reference
 
@@ -61,8 +64,43 @@ Stores each bettor’s position for a market. The table is keyed by `(market_id,
 Primary key:
 - `(market_id, bettor)`
 
+Constraints:
+- `market_id` references `markets.id` and is non-null as part of the primary key
+- `net_amount` and `gross_amount` are nonnegative, and `net_amount` cannot exceed `gross_amount`
+
 Index:
-- `idx_bets_bettor` on `bettor`
+- `idx_bets_bettor_created_at` on `(bettor, created_at DESC)` for bettor history
+- `idx_bets_market_created_at` on `(market_id, created_at DESC)` for market bet pages
+- `idx_bets_claimed_created_at` on `(claimed, created_at DESC)` for claimed-status lookups
+
+The query plans for all three patterns are exercised by the Postgres migration
+regression suite after loading and analyzing representative bet data.
+
+### Migration naming
+
+New migrations use one format: `NNNN_lowercase_description.sql`, with a
+matching `NNNN_lowercase_description.down.sql` rollback and the next unused
+four-digit number in sequence. The migration runner and CI reject malformed
+names, numbering gaps, and new prefix collisions. Existing prefix collisions
+are explicitly frozen in `migration-names.ts`: applied migrations are tracked
+by filename, so renaming a historical file could replay its DDL on an existing
+deployment. Do not rename or renumber an applied migration; add the next
+sequential migration instead.
+
+`0029_markets_sort_indexes.sql` is retained for checksum and rollback
+compatibility with deployments that already applied it. Its duplicate index
+DDL is skipped on fresh installs because `0028_markets_sort_indexes.sql`
+already creates those idempotent indexes.
+
+### `bet_anomaly_alerts`
+
+Stores review-only flags for concentrated late betting. The primary key
+`(market_id, window_start)` deduplicates alerts to one per market per UTC hour.
+`review_outcome` is null until a human review is recorded and may be
+`confirmed`, `false_positive`, or `inconclusive`. These records never change
+bet or market state. See
+[`docs/BET-ANOMALY-DETECTION.md`](../docs/BET-ANOMALY-DETECTION.md) for
+detection criteria and false-positive measurement.
 
 ### `leaderboard`
 
@@ -102,6 +140,74 @@ Indexes:
 - `idx_events_ledger` on `ledger_seq DESC`
 - `idx_events_tx_hash_event_index` unique on `(tx_hash, event_index)`
 
+## Event archival and retention policy
+
+The `events` table is retained only for the replay window the indexer needs. The default hot retention is `30 days` and older rows are moved to `events_archive` in small batches so regular writes are not stalled by a huge delete.
+
+The current policy uses bounded archival rather than table partitioning:
+`enforce_data_retention()` archives events older than 30 days, then purges
+archive rows older than 400 days. Audit-class oracle records are not part of
+this purge and remain subject to manual legal review. Partitioning can be
+revisited if measured volume or purge duration exceeds the database SLO.
+
+- Hot rows stay in `events` when `created_at >= NOW() - INTERVAL '30 days'`
+- Older rows are archived using `archive_old_events(retention_days => 30, batch_size => 10000)`
+- The archive table keeps the same event payload and ledger metadata as the hot table for forensic recovery
+- Replay and dedupe remain valid for the retained window because rows kept in `events` still carry the `(tx_hash, event_index)` uniqueness guard
+
+Example archive maintenance job:
+
+```sql
+SELECT archive_old_events(30, 10000);
+```
+
+To recover a historical range after an outage or re-index request:
+
+```sql
+INSERT INTO events (
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+)
+SELECT
+  ledger_seq,
+  tx_hash,
+  event_index,
+  event_type,
+  market_id,
+  actor,
+  payload,
+  created_at
+FROM events_archive
+WHERE created_at BETWEEN :start_ts AND :end_ts
+ON CONFLICT (tx_hash, event_index) DO NOTHING;
+```
+
+This restores only the required date range and keeps the hot table free from stale data.
+
+### Full retention policy
+
+`events` archival is one part of a platform-wide policy covering every
+unbounded table — `dead_letter_events`, `idempotency_keys`, stale
+`oracle_submissions`, and the audit tables. See
+[`docs/DATA-RETENTION.md`](../../docs/DATA-RETENTION.md). Migration
+`0018_data_retention.sql` adds the `data_retention_policies` registry and
+`enforce_data_retention()`, which applies every **operational** policy in
+bounded batches:
+
+```sql
+SELECT * FROM enforce_data_retention();
+```
+
+Audit-class data (finalized `oracle_submissions`, `council_votes`,
+`oracle_disputes`) is retained for 7 years and is never removed by this
+function — deletion there is a manual, reviewed operation.
+
 ### `oracle_submissions`
 
 Tracks oracle submissions for dispute and resolution workflows.
@@ -109,20 +215,87 @@ Tracks oracle submissions for dispute and resolution workflows.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `SERIAL` | Auto-incrementing primary key |
-| `market_id` | `INTEGER` | Market identifier |
-| `submitter` | `VARCHAR(255)` | Wallet address of the submitter |
-| `outcome` | `VARCHAR(255)` | Proposed outcome |
+| `market_id` | `BIGINT` | Market identifier; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
+| `submitter` | `CHAR(56)` | Wallet address of the submitter; `CHECK` enforces the Stellar public-key shape (#408) |
+| `outcome` | `VARCHAR(255)` | Proposed outcome; `CHECK (outcome IN ('YES','NO'))` (#650) |
 | `bond_amount` | `NUMERIC` | Bond attached to the submission |
-| `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
+| `submitted_at` | `TIMESTAMP WITH TIME ZONE NOT NULL` | Submission timestamp |
 | `status` | `oracle_submission_status` | Lifecycle state: `submitted`, `challenged`, `finalized`, or `rejected` |
 | `decision` | `VARCHAR(255)` | Finalized decision (`yes`/`no`) |
 | `tx_hash` | `CHAR(64)` | Finalization transaction hash |
-| `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp |
+| `finalized_at` | `TIMESTAMP WITH TIME ZONE` | Finalization timestamp; `NULL` until the row is actually finalized (#409) — never trust it as populated without also checking `status = 'finalized'` |
 | `council_votes` | `JSONB` | Council vote records used to resolve the market |
+
+`status` follows the optimistic-oracle lifecycle: `submitted` is the initial
+claim, `challenged` means a larger bond disputed it, `finalized` means the
+claim was accepted, and `rejected` means it was ruled incorrect. The indexer
+writes submissions and challenge/finalization transitions; `updated_at` is
+maintained by the shared database trigger.
+
+`market_id` was widened from `INTEGER` to `BIGINT` in migration `0021` so it
+can carry a foreign key to `markets.id` (also `BIGINT`) — see below.
+`bond_amount` is constrained to nonnegative values.
+
+### `oracle_disputes`
+
+Stores the bond and escalation details for challenged submissions.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `SERIAL` | Primary key |
+| `market_id` | `BIGINT` | Market under dispute; unique; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
+| `submitter` | `CHAR(56)` | Original oracle submitter; `CHECK` enforces the Stellar public-key shape (#408) |
+| `challenger` | `CHAR(56)` | Wallet that challenged the submission; same `CHECK` (#408) |
+| `outcome` | `VARCHAR(255)` | Disputed outcome; `CHECK (outcome IN ('YES','NO'))` (#408) |
+| `submitter_bond` | `NUMERIC` | Positive original bond |
+| `challenger_bond` | `NUMERIC` | Positive bond strictly greater than `submitter_bond` |
+| `total_bond` | `NUMERIC` | Combined escrowed bond |
+| `status` | `oracle_dispute_status` | `challenged` or `escalated` |
+| `challenged_at` | `TIMESTAMPTZ` | When the challenge was recorded |
+| `escalated_at` | `TIMESTAMPTZ` | When council escalation was recorded |
+| `council_deadline` | `TIMESTAMPTZ` | Council decision deadline |
+| `created_at` | `TIMESTAMPTZ` | Row creation time |
+| `updated_at` | `TIMESTAMPTZ` | Last update time, set by trigger |
+
+Bond amounts are constrained to be positive, with the challenger bond strictly
+greater than the submitter bond. `total_bond` is generated from the two bond
+columns.
+
+### Oracle relationships and lifecycle
+
+```mermaid
+erDiagram
+    MARKETS ||--o| ORACLE_SUBMISSIONS : receives
+    MARKETS ||--o| ORACLE_DISPUTES : may_have
+    MARKETS ||--o{ COUNCIL_VOTES : receives
+    ORACLE_SUBMISSIONS ||--o| ORACLE_DISPUTES : escalates_to
+    MARKETS { BIGINT id PK }
+    ORACLE_SUBMISSIONS { SERIAL id PK; BIGINT market_id FK; oracle_submission_status status }
+    ORACLE_DISPUTES { SERIAL id PK; BIGINT market_id FK; oracle_dispute_status status }
+    COUNCIL_VOTES { BIGINT market_id FK; CHAR member PK }
+```
+
+The lifecycle is `submitted → challenged → finalized` or `rejected`; an
+unchallenged submission may finalize directly. The oracle/indexer records the
+on-chain events, while the council/resolver is responsible for the final
+decision. See [`docs/ORACLE_AND_BACKEND.md`](../docs/ORACLE_AND_BACKEND.md) for
+the design rationale and contract API.
 
 Indexes:
 - `idx_oracle_submissions_market_id` unique on `market_id`
 - `idx_oracle_submissions_status` on `status`
+
+**Foreign keys (#407):** `oracle_submissions.market_id`,
+`oracle_disputes.market_id`, and `council_votes.market_id` all reference
+`markets(id)` `ON DELETE RESTRICT` (migration `0021`). `RESTRICT` rather than
+`CASCADE` or `SET NULL`: this app never deletes a `markets` row in normal
+operation, and a resolved or cancelled market still needs its oracle audit
+trail retained (see "Full retention policy" above) — so an attempt to delete
+a market with oracle history fails loudly instead of silently destroying or
+orphaning that trail. Orphan rows (referencing a `market_id` with no matching
+`markets` row) are deleted, with counts and a sample of the affected
+`market_id`s logged via `RAISE NOTICE`, in the same migration before the
+constraint is added.
 
 ### `council_votes`
 
@@ -133,7 +306,7 @@ is reached.
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `market_id` | `BIGINT` | Market identifier |
+| `market_id` | `BIGINT` | Market identifier; `FOREIGN KEY REFERENCES markets(id) ON DELETE RESTRICT` (#407) |
 | `member` | `CHAR(56)` | Council member wallet address |
 | `outcome` | `BOOLEAN` | The member's submitted outcome |
 | `submitted_at` | `TIMESTAMP WITH TIME ZONE` | Submission timestamp |
@@ -229,11 +402,92 @@ migrations/
   0008_council_votes.sql
 ```
 
-Apply with the migration runner (tracked as its own issue) or manually:
+Apply with the migration runner:
+
+```bash
+cd db
+npm run migrate
+```
+
+or manually with `psql`:
 
 ```bash
 psql "$DATABASE_URL" -f db/migrations/0001_create_markets.sql
 ```
+
+### Migration checksums (#406)
+
+`schema_migrations` records a SHA-256 checksum of each migration file's raw
+bytes alongside its filename. Every run recomputes the checksum for every
+file on disk and compares it against the stored value for files already
+marked applied:
+
+- **Unmodified migration** — checksum matches the stored value. Skipped, no
+  output beyond the normal "already applied" line.
+- **Edited-after-apply migration** — checksum differs from the stored value.
+  The run **fails immediately**, naming the file:
+
+  ```
+  Migration checksum mismatch for 0006_oracle_submissions.sql: its contents
+  have changed since it was applied, so this file no longer describes the
+  deployed schema. If the edit was intentional (e.g. a comment-only change
+  with no effect on already-migrated databases), rerun with
+  --allow-checksum-update to accept the new checksum. Otherwise, restore the
+  file's original contents.
+  ```
+
+  This is what catches an environment silently drifting from what its
+  migration files describe — see the original problem this closes.
+- **Pre-existing row with no checksum** — a deployment that applied
+  migrations before this feature shipped has `checksum = NULL` for every
+  existing row. The runner **trusts it once and backfills the checksum**
+  (rather than failing every environment on the first run after upgrading);
+  drift is caught for that file starting from the next run. This choice is
+  intentional: failing on a NULL checksum would make adopting this feature a
+  breaking change for every existing deployment, for edits that happened
+  before the check existed to catch them anyway.
+
+**Escape hatch:** when an edit to an already-applied migration is
+intentional, rerun with the `--allow-checksum-update` flag:
+
+```bash
+cd db
+npm run migrate -- --allow-checksum-update
+```
+
+This must be passed explicitly — there is no environment variable or
+config-file equivalent, so accepting a changed migration is always a
+deliberate, visible choice (it prints a warning naming the file and records
+the new checksum) rather than something that can be silently defaulted on.
+
+### Schema drift check
+
+`test/schema-drift.test.ts` applies every up-migration in order against a fresh
+scratch schema, dumps the result with `pg_dump --schema-only`, normalises it for
+ordering, and compares it to the checked-in snapshot
+[`test/schema_drift.snapshot.sql`](./test/schema_drift.snapshot.sql). A mismatch
+fails the suite with a table/column-level diff, so a migration with invalid SQL
+or an unintended schema change is caught instead of shipping silently.
+
+The suite is gated on a reachable Postgres like the backend integration tests:
+when no database is running it is skipped, keeping `npm test` passable on a
+machine without `infra/docker-compose.dev.yml` started.
+
+**Regenerating the snapshot (intentionally):** after adding or editing a
+migration, regenerate the snapshot so the drift check tracks the new schema:
+
+```bash
+cd db
+npm run schema:dump
+```
+
+The command applies the current migration set, dumps the scratch schema, and
+overwrites `test/schema_drift.snapshot.sql`. Commit the regenerated snapshot in
+the same PR as the migration — the drift test fails until it is regenerated.
+
+Connection uses `TEST_DATABASE_URL` → `DATABASE_URL`, defaulting to
+`postgres://ipredict:ipredict@localhost:5432/ipredict_test` (same default as the
+backend integration tests).
 
 ## Local Seed Data
 
@@ -254,7 +508,112 @@ The seed is idempotent:
 - Records are inserted with `ON CONFLICT ... DO UPDATE`
 - Safe to run multiple times
 
+## Slow Query Log Analysis (#599)
+
+Once slow-query logging is enabled (via `DB_SLOW_QUERY_THRESHOLD_MS`, default 200ms), raw logs alone are insufficient to prioritize database optimizations. Without aggregation, a query appearing thousands of times looks identical to a one-off outlier. The highest-value optimization target is not the single slowest query, but the query shape consuming the **highest cumulative execution time**.
+
+The repository provides a dedicated analyzer tool ([`scripts/analyze-slow-queries.ts`](../scripts/analyze-slow-queries.ts)) that normalizes SQL statements into query shapes, aggregates execution durations, and ranks them by cumulative time consumed.
+
+### Running Against Production Logs
+
+The script processes both application JSON logs (emitted by `logSlowQuery`) and PostgreSQL engine logs (`log_min_duration_statement`).
+
+```bash
+# 1. Piped from live Docker container logs
+docker compose logs backend | npx tsx scripts/analyze-slow-queries.ts
+
+# 2. Analyzed from a production log file (e.g. Fluent-bit output)
+npx tsx scripts/analyze-slow-queries.ts --file /var/log/ipredict/containers.log
+
+# 3. Output top 5 targets in machine-readable JSON format
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --top 5 --json
+
+# 4. Export aggregated rankings to CSV
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --csv > slow_queries.csv
+
+# 5. Filter for shapes with at least 5 executions taking >= 250ms
+npx tsx scripts/analyze-slow-queries.ts -f backend.log --min-duration 250 --min-calls 5
+```
+
+Or run via npm:
+
+```bash
+npm run analyze:slow-queries -- -f /path/to/logfile.log --top 10
+```
+
+### Report Metrics & Optimization Target Identification
+
+The report calculates:
+- **Calls ($N$):** Total executions observed for this query shape.
+- **Total Time:** Cumulative time consumed ($\sum t$). **This is the primary ranking metric.**
+- **Mean Duration:** Average latency per execution ($\frac{\sum t}{N}$).
+- **Min / Max:** Extreme observed execution times.
+- **Percentiles (p50, p90, p95, p99):** Linear interpolation over up to 4,096 sampled durations per shape. Percentiles are exact up to that limit and estimated above it; counts, total, mean, min, and max use every observation.
+- **% of DB Time:** Proportion of all slow query execution time spent on this shape.
+- **[HIGH IMPACT - TOP 80% CUMULATIVE TIME]:** Automatically flagged shapes that account for 80% of cumulative database workload (Pareto principle).
+
+#### Diagnosing Actionable Targets:
+- **High Call Count + Moderate Latency:** Classic N+1 pattern or un-cached hot path. Resolve with Redis cache-aside or batched `WHERE id IN (?)` queries.
+- **Low Call Count + High Max/p99:** Missing partial index, missing composite sort index, or sequential table scan. Inspect with `EXPLAIN (ANALYZE, BUFFERS)`.
+
+---
+
+### In-Engine Alternative: `pg_stat_statements`
+
+PostgreSQL provides a native extension, `pg_stat_statements`, that tracks query statistics directly within the database engine.
+
+#### Comparison: When to Use Which
+| Feature | `scripts/analyze-slow-queries.ts` | `pg_stat_statements` |
+|---|---|---|
+| **Data Source** | Application JSON logs & engine log files | In-memory PostgreSQL engine shared memory |
+| **Server Restart Required?** | **No** (works out-of-the-box on any logs) | **Yes** (requires `shared_preload_libraries`) |
+| **Historical Forensics** | Excellent (analyzes past files/incident archives) | Volatile (reset on restart or manual clear) |
+| **Overhead** | Zero DB overhead (runs client-side or offline) | Very low (~1-2% CPU overhead in PostgreSQL) |
+| **Threshold Filtering** | Configurable via `--min-duration` and `--min-calls` | Tracks all queries executed by server |
+
+#### Enabling `pg_stat_statements` in PostgreSQL
+
+1. **Configure `postgresql.conf` or Docker command:**
+   `pg_stat_statements` must be preloaded at database server startup.
+
+   In `infra/docker-compose.production.yml` (under `postgres` service):
+   ```yaml
+   command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
+   ```
+
+2. **Restart the PostgreSQL server:**
+   ```bash
+   docker compose restart postgres
+   ```
+
+3. **Create the extension in the database:**
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+   ```
+
+4. **Query the Top Workload Targets:**
+   ```sql
+   SELECT
+     query,
+     calls,
+     round(total_exec_time::numeric, 2) AS total_time_ms,
+     round(mean_exec_time::numeric, 2) AS mean_time_ms,
+     round(min_exec_time::numeric, 2) AS min_time_ms,
+     round(max_exec_time::numeric, 2) AS max_time_ms,
+     round((total_exec_time / sum(total_exec_time) OVER () * 100)::numeric, 1) AS percent_time
+   FROM pg_stat_statements
+   WHERE query NOT ILIKE '%pg_stat_statements%'
+   ORDER BY total_exec_time DESC
+   LIMIT 10;
+   ```
+
+---
+
 ## Contributing
 
 Pick an open issue labelled `area:db`, branch off `implementation-drips`,
 PR back to `implementation-drips`.
+
+## See also
+
+- [Troubleshooting](../docs/TROUBLESHOOTING.md): migration and connection failures organised by error message.

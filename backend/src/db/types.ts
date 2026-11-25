@@ -1,3 +1,5 @@
+import type { Bet, Market } from "@ipredict/shared";
+
 /**
  * Shared TypeScript interfaces for database row shapes.
  * These types mirror the PostgreSQL schema and are used by both
@@ -13,22 +15,7 @@
  * Represents a row from the markets table.
  * Mirrors the schema defined in docs/ORACLE_AND_BACKEND.md
  */
-export interface MarketRow {
-  id: number;
-  question: string;
-  image_url: string | null;
-  category: string;
-  end_time: string; // Unix timestamp as string (BIGINT from DB)
-  total_yes: string; // NUMERIC(30,7) as string
-  total_no: string; // NUMERIC(30,7) as string
-  resolved: boolean;
-  outcome: boolean | null;
-  cancelled: boolean;
-  creator: string; // Stellar address (CHAR(56))
-  bet_count: number;
-  created_at: Date;
-  updated_at: Date;
-}
+export type MarketRow = Market;
 
 // ── Bet Row ────────────────────────────────────────────────────────────────
 
@@ -36,15 +23,7 @@ export interface MarketRow {
  * Represents a row from the bets table.
  * Mirrors the schema defined in docs/ORACLE_AND_BACKEND.md
  */
-export interface BetRow {
-  market_id: string; // BIGINT as string
-  bettor: string; // Stellar address (CHAR(56))
-  net_amount: string; // NUMERIC(30,7) as string
-  gross_amount: string; // NUMERIC(30,7) as string
-  is_yes: boolean;
-  claimed: boolean;
-  created_at: Date;
-}
+export type BetRow = Bet;
 
 // ── Leaderboard Row ─────────────────────────────────────────────────────────
 
@@ -76,4 +55,26 @@ export interface EventRow {
   actor: string | null; // CHAR(56), nullable
   payload: unknown; // JSONB
   created_at: Date;
+}
+
+// ── Oracle Submission Row ───────────────────────────────────────────────────
+
+export type OracleSubmissionStatus =
+  | "submitted"
+  | "challenged"
+  | "finalized"
+  | "rejected";
+
+/**
+ * Represents a row from the oracle_submissions table.
+ * Mirrors the schema defined in db/migrations/0006_oracle_submissions.sql
+ */
+export interface OracleSubmissionRow {
+  id: number;
+  market_id: string; // BIGINT (issue #407), always read back as ::text
+  submitter: string;
+  outcome: string;
+  bond_amount: string; // NUMERIC as string
+  submitted_at: Date;
+  status: OracleSubmissionStatus;
 }

@@ -31,6 +31,12 @@ interface WalletContextValue {
   signTransaction: (xdr: string) => Promise<string>;
 }
 
+interface LazyWalletKit {
+  selectWallet: (type: WalletType) => Promise<void>;
+  connectKit: () => Promise<{ publicKey: string }>;
+  signWithKit: (xdr: string) => Promise<string>;
+}
+
 const WalletContext = createContext<WalletContextValue>({
   publicKey: null,
   walletType: null,
@@ -51,12 +57,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<AppError | null>(null);
 
   // Dynamic import ref to avoid SSR issues with wallet kit
-  const kitRef = useRef<typeof import("@/wallet/kit") | null>(null);
+  const kitRef = useRef<LazyWalletKit | null>(null);
 
   // Lazy-load the wallet kit module (client-only)
   const getKit = useCallback(async () => {
     if (!kitRef.current) {
-      kitRef.current = await import("@/wallet/kit");
+      const kitModule: unknown = await import("@/wallet/kit");
+      if (
+        typeof kitModule === "object" &&
+        kitModule !== null &&
+        "default" in kitModule
+      ) {
+        const defaultExport = kitModule.default;
+        if (typeof defaultExport === "object" && defaultExport !== null) {
+          kitRef.current = defaultExport as LazyWalletKit;
+        }
+      }
+      if (!kitRef.current) {
+        kitRef.current = kitModule as LazyWalletKit;
+      }
     }
     return kitRef.current;
   }, []);
@@ -72,7 +91,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       (async () => {
         try {
           const kit = await getKit();
-          kit.selectWallet(savedType);
+          await kit.selectWallet(savedType);
           const { publicKey: pk } = await kit.connectKit();
           setPublicKey(pk);
           setWalletType(savedType);
@@ -95,7 +114,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const kit = await getKit();
-        kit.selectWallet(type);
+        await kit.selectWallet(type);
         const { publicKey: pk } = await kit.connectKit();
 
         setPublicKey(pk);

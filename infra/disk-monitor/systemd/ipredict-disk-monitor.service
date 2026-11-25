@@ -1,0 +1,34 @@
+[Unit]
+Description=iPredict disk-space and database-growth monitor
+Documentation=file:///opt/ipredict/infra/README.md
+# Optional: fan out a failed run (exit 2) to your on-call unit, e.g.
+#   OnFailure=notify-oncall@%n.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Repository checkout location — adjust if you deploy it elsewhere.
+ExecStart=/usr/bin/python3 /opt/ipredict/infra/disk-monitor/check-disk.py --fail-on critical
+# Optional per-host configuration (webhook, email, database URL):
+#   /etc/ipredict/disk-monitor.env
+EnvironmentFile=-/etc/ipredict/disk-monitor.env
+StateDirectory=ipredict-disk-monitor
+Environment=DISK_MONITOR_STATE_FILE=/var/lib/ipredict-disk-monitor/state.json
+# Exit 2 (<=3 days, full, check failed, watchdog gap) fails the unit so
+# systemd's OnFailure= / mail-on-failure picks it up. 14d/7d warnings exit 0
+# and are delivered through the alert channels instead.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — the monitor only needs to read the repo and write its state dir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ipredict-disk-monitor
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

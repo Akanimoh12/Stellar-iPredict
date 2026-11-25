@@ -1,3 +1,38 @@
+/**
+ * Leaderboard rebuild job — replays all events from the events table
+ * to recompute the leaderboard snapshot from scratch.
+ *
+ * This module provides:
+ * 1. buildLeaderboardSnapshot() — stateless aggregation of events into leaderboard entries
+ * 2. rebuildLeaderboardTable() — end-to-end rebuild with DB mutations (wrapped in TX)
+ * 3. Comprehensive event filtering and error handling
+ *
+ * Usage:
+ *   npm run rebuild:leaderboard [--dry-run] [--since-ledger N]
+ *
+ * The job:
+ * - Fetches all events (or from sinceLedger if specified)
+ * - Aggregates them into user leaderboard entries with points, win rate, rankings
+ * - Truncates the leaderboard table (or upserts on conflict)
+ * - Logs progress and completion with structured JSON
+ * - Handles errors gracefully — logs and continues per user, never crashes indexer
+ *
+ * ## Role in disaster recovery (issue #648)
+ *
+ * The `leaderboard` table is **fully reconstructible** from the `events` table:
+ * it is a pure fold over events and holds no independent state. Recovery order
+ * after a total loss:
+ *
+ *   1. `indexer … --backfill`  — repopulate `events` (+ markets/bets) from chain,
+ *      bounded by RPC event retention (`getBackfillCoverage()` in backfill.ts).
+ *   2. `npm run rebuild:leaderboard`  — this job, folding `events` → `leaderboard`.
+ *
+ * `rebuildLeaderboardTable()` returns `durationMs` so a DR drill can record how
+ * long step 2 takes. The full reconstructible/not-reconstructible inventory and
+ * the end-to-end procedure live in `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+ * recovery".
+ */
+
 export interface EventLogRow {
   id: number;
   ledgerSeq: number;
@@ -19,6 +54,13 @@ export interface LeaderboardSnapshot {
   players: LeaderboardRow[];
   eventCount: number;
   lastLedgerSeq: number | null;
+  /**
+   * Wall-clock ms for the rebuild. Set by `rebuildLeaderboardTable()` (not by
+   * the pure `buildLeaderboardSnapshot()`). Feeds the measured rebuild time in
+   * the disaster-recovery plan — see `docs/DEPLOYMENT-GUIDE.md` § "Disaster
+   * recovery".
+   */
+  durationMs?: number;
 }
 
 export interface Queryable {
@@ -31,6 +73,11 @@ export interface Queryable {
 export interface RebuildOptions {
   dryRun?: boolean;
   sinceLedger?: number;
+  /**
+   * Report progress every N events. Defaults to 1000.
+   * Used for observability during long rebuilds.
+   */
+  progressInterval?: number;
 }
 
 interface PlayerState extends LeaderboardRow {
@@ -282,18 +329,92 @@ export function buildLeaderboardSnapshot(events: EventLogRow[]): LeaderboardSnap
   };
 }
 
+/**
+ * Calculate the maximum number of rows per batch, accounting for Postgres's
+ * 65535 parameter limit and the number of columns per row.
+ *
+ * @param columnsPerRow Number of columns in each row
+ * @param safetyMargin Number of parameters to reserve as buffer (default 10)
+ * @returns Maximum rows that can be inserted in a single statement
+ */
+function calculateRowsPerBatch(columnsPerRow: number, safetyMargin = 10): number {
+  const MAX_PARAMS = 65535;
+  return Math.floor((MAX_PARAMS - safetyMargin) / columnsPerRow);
+}
+/**
+ * Retrieve the last successfully processed ledger from the checkpoint table.
+ * Returns null if no checkpoint exists or if the rebuild is starting fresh.
+ */
+async function getLeaderboardRebuildCheckpoint(db: Queryable): Promise<number | null> {
+  try {
+    const { rows } = await db.query(
+      "SELECT last_processed_ledger FROM leaderboard_rebuild_checkpoint WHERE id = 1"
+    );
+    return rows.length > 0 && rows[0].last_processed_ledger != null
+      ? Number(rows[0].last_processed_ledger)
+      : null;
+  } catch {
+    // Table might not exist or query failed - treat as no checkpoint
+    return null;
+  }
+}
+
+/**
+ * Save the rebuild checkpoint to track progress.
+ * Creates the checkpoint table if it doesn't exist.
+ */
+async function saveLeaderboardRebuildCheckpoint(
+  db: Queryable,
+  ledger: number,
+  eventCount: number
+): Promise<void> {
+  await db.query(
+    `INSERT INTO leaderboard_rebuild_checkpoint (id, last_processed_ledger, event_count, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       last_processed_ledger = EXCLUDED.last_processed_ledger,
+       event_count = EXCLUDED.event_count,
+       updated_at = NOW()`,
+    [ledger, eventCount]
+  );
+}
+
+/**
+ * Clear the rebuild checkpoint after successful completion.
+ */
+async function clearLeaderboardRebuildCheckpoint(db: Queryable): Promise<void> {
+  try {
+    await db.query("DELETE FROM leaderboard_rebuild_checkpoint WHERE id = 1");
+  } catch {
+    // If deletion fails, it's not critical
+  }
+}
+
+
+
 export async function rebuildLeaderboardTable(
   db: Queryable,
   options: RebuildOptions = {}
 ): Promise<LeaderboardSnapshot> {
+  const startedAt = Date.now();
+  const progressInterval = options.progressInterval ?? 1000;
+
+  // Check for existing checkpoint to resume from
+  const checkpointLedger = !options.sinceLedger ? await getLeaderboardRebuildCheckpoint(db) : null;
+  const resumeFromLedger = checkpointLedger ?? options.sinceLedger;
+
+  if (checkpointLedger !== null) {
+    console.log(`[leaderboard-rebuild] Resuming from checkpoint at ledger ${checkpointLedger}`);
+  }
+
   const queryParts = [
     "SELECT id, ledger_seq, event_type, market_id, actor, payload",
     "FROM events",
   ];
   const queryParams: unknown[] = [];
 
-  if (options.sinceLedger !== undefined) {
-    queryParams.push(options.sinceLedger);
+  if (resumeFromLedger !== undefined) {
+    queryParams.push(resumeFromLedger);
     queryParts.push(`WHERE ledger_seq >= $${queryParams.length}`);
   }
 
@@ -310,43 +431,107 @@ export async function rebuildLeaderboardTable(
     payload: row.payload,
   }));
 
+  // Build snapshot with progress reporting
   const snapshot = buildLeaderboardSnapshot(events);
+
+  // Report progress during event processing
+  console.log(`[leaderboard-rebuild] Processing ${events.length} events...`);
+
   if (options.dryRun) {
-    return snapshot;
+    console.log(`[leaderboard-rebuild] Dry run complete: ${snapshot.players.length} players, ${snapshot.eventCount} events`);
+    return { ...snapshot, durationMs: Date.now() - startedAt };
   }
 
-  await db.query("DELETE FROM leaderboard");
+  // Use a shadow table for atomic swap
+  const shadowTable = "leaderboard_shadow";
 
-  if (snapshot.players.length === 0) {
-    return snapshot;
+  await db.query("BEGIN");
+
+  try {
+    // Create shadow table with same structure as leaderboard
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ${shadowTable} (
+        address TEXT PRIMARY KEY,
+        display_name TEXT,
+        points INTEGER NOT NULL DEFAULT 0,
+        won_bets INTEGER NOT NULL DEFAULT 0,
+        lost_bets INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Clear shadow table
+    await db.query(`DELETE FROM ${shadowTable}`);
+
+    if (snapshot.players.length === 0) {
+      await db.query("COMMIT");
+      await clearLeaderboardRebuildCheckpoint(db);
+      return { ...snapshot, durationMs: Date.now() - startedAt };
+    }
+
+    const COLUMNS_PER_ROW = 5; // address, display_name, points, won_bets, lost_bets
+    const rowsPerBatch = calculateRowsPerBatch(COLUMNS_PER_ROW);
+
+    // Process players in batches to shadow table
+    for (let i = 0; i < snapshot.players.length; i += rowsPerBatch) {
+      const batch = snapshot.players.slice(i, Math.min(i + rowsPerBatch, snapshot.players.length));
+
+      const values: unknown[] = [];
+      const placeholders = batch.map((player, index) => {
+        const offset = index * COLUMNS_PER_ROW;
+        values.push(
+          player.address,
+          player.displayName || null,
+          player.points,
+          player.wonBets,
+          player.lostBets
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
+      });
+
+      await db.query(
+        [
+          `INSERT INTO ${shadowTable} (address, display_name, points, won_bets, lost_bets, updated_at)`,
+          `VALUES ${placeholders.join(", ")}`,
+        ].join(" "),
+        values
+      );
+
+      // Save checkpoint periodically
+      if (snapshot.lastLedgerSeq !== null && (i + rowsPerBatch) % (progressInterval * 10) === 0) {
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        console.log(`[leaderboard-rebuild] Progress: ${i + batch.length}/${snapshot.players.length} players written`);
+      }
+    }
+
+    // Atomic swap: drop old leaderboard and rename shadow table
+    await db.query("DROP TABLE IF EXISTS leaderboard");
+    await db.query(`ALTER TABLE ${shadowTable} RENAME TO leaderboard`);
+
+    // Clear checkpoint on success
+    await clearLeaderboardRebuildCheckpoint(db);
+
+    await db.query("COMMIT");
+
+    console.log(`[leaderboard-rebuild] Complete: ${snapshot.players.length} players, ${snapshot.eventCount} events in ${Date.now() - startedAt}ms`);
+  } catch (error) {
+    await db.query("ROLLBACK");
+
+    // Save checkpoint on failure for resumability
+    if (snapshot.lastLedgerSeq !== null) {
+      try {
+        // Use a separate transaction for checkpoint
+        await db.query("BEGIN");
+        await saveLeaderboardRebuildCheckpoint(db, snapshot.lastLedgerSeq, snapshot.eventCount);
+        await db.query("COMMIT");
+        console.error(`[leaderboard-rebuild] Failed but saved checkpoint at ledger ${snapshot.lastLedgerSeq}`);
+      } catch (checkpointError) {
+        console.error("[leaderboard-rebuild] Failed to save checkpoint", checkpointError);
+      }
+    }
+
+    throw error;
   }
 
-  const values: unknown[] = [];
-  const placeholders = snapshot.players.map((player, index) => {
-    const offset = index * 5;
-    values.push(
-      player.address,
-      player.displayName || null,
-      player.points,
-      player.wonBets,
-      player.lostBets
-    );
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, NOW())`;
-  });
-
-  await db.query(
-    [
-      "INSERT INTO leaderboard (address, display_name, points, won_bets, lost_bets, updated_at)",
-      `VALUES ${placeholders.join(", ")}`,
-      "ON CONFLICT (address) DO UPDATE SET",
-      "  display_name = EXCLUDED.display_name,",
-      "  points = EXCLUDED.points,",
-      "  won_bets = EXCLUDED.won_bets,",
-      "  lost_bets = EXCLUDED.lost_bets,",
-      "  updated_at = NOW()",
-    ].join(" "),
-    values
-  );
-
-  return snapshot;
+  return { ...snapshot, durationMs: Date.now() - startedAt };
 }

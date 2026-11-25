@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    vec, Env, Event,
+};
 
 fn setup() -> (Env, LeaderboardContractClient<'static>, Address, Address, Address) {
     let env = Env::default();
@@ -299,4 +302,112 @@ fn test_reward_updates_points_and_winloss() {
     assert_eq!(s.won_bets, 1);
     assert_eq!(s.lost_bets, 1);
     assert_eq!(s.total_bets, 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  #775 — Leaderboard points change events
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_add_pts_emits_points_added_event() {
+    let (env, client, _admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+
+    client.add_pts(&market, &user, &50_u64, &true);
+
+    let event = PointsAddedEvent {
+        user: user.clone(),
+        points: 50_u64,
+        total_points: 50_u64,
+        is_winner: true,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                event.topics(&env),
+                event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_reward_emits_reward_event() {
+    let (env, client, _admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+
+    client.reward(&market, &user, &30_u64, &0_i128, &true);
+
+    let event = RewardEvent {
+        user: user.clone(),
+        points: 30_u64,
+        tokens: 0_i128,
+        total_points: 30_u64,
+        is_winner: true,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                event.topics(&env),
+                event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_add_bonus_pts_emits_bonus_points_added_event() {
+    let (env, client, _admin, _market, referral) = setup();
+    let user = Address::generate(&env);
+
+    client.add_bonus_pts(&referral, &user, &25_u64);
+
+    let event = BonusPointsAddedEvent {
+        user: user.clone(),
+        points: 25_u64,
+        total_points: 25_u64,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                event.topics(&env),
+                event.data(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_reward_bonus_emits_reward_bonus_event() {
+    let (env, client, _admin, _market, referral) = setup();
+    let user = Address::generate(&env);
+
+    client.reward_bonus(&referral, &user, &15_u64, &0_i128);
+
+    let event = RewardBonusEvent {
+        user: user.clone(),
+        points: 15_u64,
+        tokens: 0_i128,
+        total_points: 15_u64,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                event.topics(&env),
+                event.data(&env),
+            ),
+        ],
+    );
 }

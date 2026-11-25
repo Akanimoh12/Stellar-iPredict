@@ -1,5 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { getOrSet, withSingleFlight } from "../cache/cacheAside.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  getOrSet,
+  jitteredTtl,
+  TTL_JITTER_RATIO,
+  withSingleFlight,
+} from "../cache/cacheAside.js";
 
 // ---------------------------------------------------------------------------
 // Fake Redis — in-memory store with the ioredis surface used by getOrSet
@@ -25,14 +30,67 @@ function createFakeRedis() {
 }
 
 // ---------------------------------------------------------------------------
+// jitteredTtl
+// ---------------------------------------------------------------------------
+
+describe("jitteredTtl", () => {
+  it("never shortens the configured TTL", () => {
+    for (const r of [0, 0.25, 0.5, 0.999]) {
+      expect(jitteredTtl(30, () => r)).toBeGreaterThanOrEqual(30);
+    }
+  });
+
+  it("adds at most TTL_JITTER_RATIO of the TTL", () => {
+    const ttl = 100;
+    const max = ttl + ttl * TTL_JITTER_RATIO;
+
+    expect(jitteredTtl(ttl, () => 0)).toBe(ttl);
+    expect(jitteredTtl(ttl, () => 0.999)).toBeLessThan(max);
+    expect(jitteredTtl(ttl, () => 0.999)).toBe(ttl + 9);
+  });
+
+  it("returns whole seconds, as SETEX requires", () => {
+    for (const r of [0.1, 0.33, 0.77]) {
+      expect(Number.isInteger(jitteredTtl(15, () => r))).toBe(true);
+    }
+  });
+
+  it("spreads keys written together across different expiry times", () => {
+    // Deterministic stand-in for a burst of writes with varied randomness.
+    const rolls = [0.05, 0.4, 0.9, 0.6, 0.2];
+    const ttls = new Set(
+      rolls.map((r) => jitteredTtl(300, () => r))
+    );
+
+    expect(ttls.size).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getOrSet
 // ---------------------------------------------------------------------------
 
 describe("getOrSet", () => {
   let redis: ReturnType<typeof createFakeRedis>;
+  let randomSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     redis = createFakeRedis();
+    // Pin jitter to zero so the exact-TTL assertions below stay deterministic.
+    // Jitter behaviour itself is covered by the `jitteredTtl` block above.
+    randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+
+  afterEach(() => {
+    randomSpy.mockRestore();
+  });
+
+  it("stores with jitter applied to the configured TTL", async () => {
+    randomSpy.mockReturnValue(0.999);
+
+    await getOrSet(redis as any, "jittered", 100, async () => "val");
+
+    expect(redis.setex).toHaveBeenCalledWith("jittered", 109, JSON.stringify("val"));
   });
 
   it("returns the cached value on a hit without calling the loader", async () => {

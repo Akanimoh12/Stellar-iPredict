@@ -2,9 +2,9 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Events},
     token::{Client as TokenClient, StellarAssetClient},
-    Env, String,
+    vec, Env, Event, String,
 };
 
 // Import sibling contracts for inter-contract testing
@@ -90,6 +90,20 @@ fn test_register_with_referrer() {
         &user,
         &String::from_str(&t.env, "CryptoKing"),
         &Some(referrer.clone()),
+    );
+
+    let event = ReferralRegisteredEvent {
+        user: user.clone(),
+        display_name: String::from_str(&t.env, "CryptoKing"),
+        referrer: Some(referrer.clone()),
+    };
+    assert_eq!(
+        t.env.events().all().filter_by_contract(&t.referral_id),
+        vec![&t.env, (
+            t.referral_id.clone(),
+            event.topics(&t.env),
+            event.data(&t.env),
+        )],
     );
 
     assert!(t.client.is_registered(&user));
@@ -233,6 +247,20 @@ fn test_credit_with_referrer() {
     let result = t.client.credit(&t.market, &user, &referral_fee);
     assert!(result);
 
+    let event = ReferralCreditedEvent {
+        user: user.clone(),
+        referrer: Some(referrer.clone()),
+        amount: referral_fee,
+    };
+    assert_eq!(
+        t.env.events().all().filter_by_contract(&t.referral_id),
+        vec![&t.env, (
+            t.referral_id.clone(),
+            event.topics(&t.env),
+            event.data(&t.env),
+        )],
+    );
+
     // Referrer received the XLM
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
     assert_eq!(xlm_client.balance(&referrer), referral_fee);
@@ -270,6 +298,20 @@ fn test_credit_no_referrer() {
 
     let result = t.client.credit(&t.market, &user, &5_000_000);
     assert!(!result);
+
+    let event = ReferralCreditedEvent {
+        user: user.clone(),
+        referrer: None,
+        amount: 5_000_000,
+    };
+    assert_eq!(
+        t.env.events().all().filter_by_contract(&t.referral_id),
+        vec![&t.env, (
+            t.referral_id.clone(),
+            event.topics(&t.env),
+            event.data(&t.env),
+        )],
+    );
 
     // Fee returned to caller (market contract)
     assert_eq!(xlm_client.balance(&t.market), market_bal_before + 5_000_000);

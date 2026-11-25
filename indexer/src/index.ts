@@ -1,10 +1,20 @@
 
+import { loadSecrets, reportStartupFailure, summariseSecretsLoad } from "@ipredict/shared";
+import { config, initConfig } from "./config/index.js";
+import { runBackfill } from "./backfill.js";
 import { persistDeadLetterEvent } from "./deadLetter.js";
 import { recomputeMarketTotalsFromBets } from "./recomputeTotals.js";
 import { recomputeMarketBetCountsFromBets } from "./recomputeBetCounts.js";
 import type { Closable, Queryable } from "./db.js";
 
 import type { Logger } from "./log.js";
+import { MetricsServer } from "./metrics-server.js";
+import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
+import {
+  recordIndexerCursorAdvance,
+  recordIndexerPosition,
+  refreshDeadLetterQueueDepthFromDb,
+} from "./metrics.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5_000);
 const START_LEDGER = Number(process.env.START_LEDGER ?? 0);
@@ -25,6 +35,14 @@ export interface IndexerRuntime {
   recomputeTotals?: boolean;
   recomputeBetCounts?: boolean;
   logger?: Logger;
+  /**
+   * Optional atomic batch processor: processes all events in a batch and saves the
+   * checkpoint ledger within a single database transaction.
+   */
+  processBatchAtomically?(
+    events: RawEvent[],
+    checkpointLedger: number,
+  ): Promise<void>;
 }
 
 export interface RawEvent { ledger: number; txHash: string; [key: string]: unknown }
@@ -34,14 +52,21 @@ export class Indexer {
   private stopping = false;
   private processing = false;
   private lastLedger = 0;
+  private metricsServer: MetricsServer | null = null;
 
-  constructor(private readonly runtime: IndexerRuntime) {}
+  constructor(private readonly runtime: IndexerRuntime, metricsServer?: MetricsServer) {
+    this.metricsServer = metricsServer || null;
+  }
 
   requestShutdown(): void {
     this.stopping = true;
   }
 
   async start(): Promise<void> {
+    if (this.metricsServer) {
+      await this.metricsServer.start();
+    }
+
     this.lastLedger = await this.runtime.getCheckpoint();
     if (this.lastLedger <= 0) {
       this.lastLedger = START_LEDGER;
@@ -59,25 +84,43 @@ export class Indexer {
 
   async indexOnce(): Promise<number> {
     const response = await this.runtime.fetchEvents(this.lastLedger);
-    for (const event of response.events) {
-      if (this.stopping) break;
-      this.processing = true;
-      try {
-        const decoded = this.runtime.decodeEvent(event);
-        await this.runtime.writeEventToDb(decoded);
-      } catch (error) {
-        await persistDeadLetterEvent(this.runtime.db, {
-          ledger: event.ledger,
-          txHash: event.txHash,
-          rawEvent: event,
-          error,
-        });
-      } finally {
-        this.processing = false;
+    const cursorBeforePoll = this.lastLedger;
+    recordIndexerPosition(response.latestLedger, cursorBeforePoll);
+    if (typeof this.runtime.processBatchAtomically === "function") {
+      // Atomic commit: cursor advances in the same transaction as event effects
+      await this.runtime.processBatchAtomically(response.events, response.latestLedger);
+      this.lastLedger = response.latestLedger;
+    } else {
+      // Deliberate ordering for at-least-once processing:
+      // Process event effects FIRST, then advance cursor SECOND.
+      // If a crash happens mid-batch, events are reprocessed on recovery
+      // rather than permanently skipped (idempotent handlers guarantee no duplicates).
+      for (const event of response.events) {
+        if (this.stopping) break;
+        this.processing = true;
+        try {
+          const decoded = this.runtime.decodeEvent(event);
+          await this.runtime.writeEventToDb(decoded);
+        } catch (error) {
+          await persistDeadLetterEvent(this.runtime.db, {
+            ledger: event.ledger,
+            txHash: event.txHash,
+            rawEvent: event,
+            error,
+          });
+        } finally {
+          this.processing = false;
+        }
       }
+      this.lastLedger = response.latestLedger;
+      await this.runtime.saveCheckpoint(this.lastLedger);
     }
-    this.lastLedger = response.latestLedger;
-    await this.runtime.saveCheckpoint(this.lastLedger);
+
+    // Keep the cursor timestamp accurate after a successful durable commit.
+    // The chain-tip/lag observation is refreshed at the beginning of the next
+    // poll, while the timestamp only changes when the cursor advances.
+    recordIndexerCursorAdvance(this.lastLedger);
+
     if (this.runtime.recomputeTotals) await recomputeMarketTotalsFromBets(this.runtime.db);
     if (this.runtime.recomputeBetCounts) await recomputeMarketBetCountsFromBets(this.runtime.db);
     return this.lastLedger;
@@ -86,6 +129,9 @@ export class Indexer {
   async flushAndClose(): Promise<void> {
     while (this.processing) await this.runtime.sleep(10);
     await this.runtime.saveCheckpoint(this.lastLedger);
+    if (this.metricsServer) {
+      await this.metricsServer.stop();
+    }
     await this.runtime.redis?.end();
     await this.runtime.db.end();
   }
@@ -102,112 +148,228 @@ export function installShutdownHandlers(indexer: Indexer): void {
   process.once("SIGTERM", handler);
 }
 
-
-import { handleMarketCancelledEvent } from "./handlers/market_cancelled.js";
-import { handleMarketCreatedEvent } from "./handlers/market_created.js";
-import { handleMarketResolvedEvent } from "./handlers/market_resolved.js";
-import { handleReferralRewardEvent } from "./handlers/referral_reward.js";
-import type { DbClient, DecodedContractEvent, RedisClient } from "./types.js";
-
-export async function writeEventToDb(event: DecodedContractEvent, db: DbClient, redis: RedisClient): Promise<void> {
-  const [domain, action] = event.topics;
-
-  if (domain === "mkt" && action === "created") {
-    await handleMarketCreatedEvent(event, db, redis);
-  } else if (domain === "market_resolved" || (domain === "mkt" && action === "resolved")) {
-    await handleMarketResolvedEvent(event, db, redis);
-  } else if (domain === "mkt" && action === "cancelled") {
-    await handleMarketCancelledEvent(event, db, redis);
-  } else if (domain === "referral" && action === "reward") {
-    await handleReferralRewardEvent(event, db, redis);
-  }
+export function installGracefulShutdown(indexer: Indexer): void {
+  installShutdownHandlers(indexer);
 }
 
-import { Pool } from "pg";
-import { rebuildLeaderboardTable } from "./leaderboard-rebuild.js";
-import { createLogger, logIterationSummary, parseLogLevel } from "./log.js";
+/**
+ * Live polling loop: fetches new contract events from the configured Soroban
+ * RPC endpoint and writes them to Postgres, checkpointing each processed
+ * ledger as it goes.
+ *
+ * Imports are resolved lazily so that merely importing this module (as the
+ * tests do) never validates environment variables or opens connections.
+ *
+ * Under test (NODE_ENV === "test") the loop performs a single pass and
+ * returns, so unit tests can exercise it without an infinite timer.
+ */
+export async function startLivePolling(fromLedger: number, signal?: AbortSignal): Promise<void> {
+  const [
+    { config },
+    { processEventsInChunks, EVENTS_PROCESSING_CHUNK_SIZE },
+    stellar,
+    { pool: dbPool, processLedgerBatchWithCheckpoint },
+    { writeEventsToDb },
+    { AdaptivePollController, recordBackpressureState },
+    { withRetry },
+  ] = await Promise.all([
+    import("./config/index.js"),
+    import("./backfill.js"),
+    import("@stellar/stellar-sdk"),
+    import("./db.js"),
+    import("./event-router.js"),
+    import("./poll-loop.js"),
+    import("./rpc/retry.js"),
+  ]);
+  const { rpc, scValToNative } = stellar;
+  // Live indexing has historically run without a Redis dependency. Keep cache
+  // invalidation best-effort here while routing all database writes through
+  // the canonical handlers.
+  const redis: RedisClient = { del: async () => 0 };
 
-function parseSinceLedger(argv: string[]): number | undefined {
-  const exact = argv.find((arg) => arg.startsWith("--since-ledger="));
-  if (exact) {
-    const value = Number(exact.split("=", 2)[1]);
-    return Number.isFinite(value) && value >= 0 ? value : undefined;
-  }
-
-  const index = argv.indexOf("--since-ledger");
-  if (index >= 0 && argv[index + 1]) {
-    const value = Number(argv[index + 1]);
-    return Number.isFinite(value) && value >= 0 ? value : undefined;
-  }
-
-  return undefined;
-}
-
-async function main(): Promise<void> {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error("DATABASE_URL is required to rebuild the leaderboard");
-  }
-
-  const dryRun = process.argv.includes("--dry-run");
-  const sinceLedger = parseSinceLedger(process.argv.slice(2));
-  const logger = createLogger({
-    level: parseLogLevel(process.env.LOG_LEVEL),
-    bindings: { component: "indexer", job: "leaderboard-rebuild" },
+  console.log(`[ipredict-indexer] Starting live polling loop from ledger ${fromLedger}...`);
+  let currentLedger = fromLedger;
+  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  // Issue #636: slow DB iterations shrink the page and lengthen the wait.
+  // The durable checkpoint is still the only cursor source, so no event is
+  // skipped when the rate changes.
+  const backpressure = new AdaptivePollController({
+    basePollIntervalMs: config.POLL_INTERVAL_MS,
+    maxEventsPerPage: config.EVENTS_PER_PAGE,
+    minPollIntervalMs: config.BACKPRESSURE_MIN_POLL_INTERVAL_MS,
+    maxPollIntervalMs: config.BACKPRESSURE_MAX_POLL_INTERVAL_MS,
+    minEventsPerPage: config.BACKPRESSURE_MIN_EVENTS_PER_PAGE,
+    pressureRatio: config.BACKPRESSURE_PRESSURE_RATIO,
+    recoveryRatio: config.BACKPRESSURE_RECOVERY_RATIO,
+    sustainedSamples: config.BACKPRESSURE_SUSTAINED_SAMPLES,
+    recoverySamples: config.BACKPRESSURE_RECOVERY_SAMPLES,
   });
-  const pool = new Pool({ connectionString });
-  const client = await pool.connect();
-  const startedAt = Date.now();
+  let decision = backpressure.current();
 
-  try {
-    await client.query("BEGIN");
-    logger.info("indexer run started", {
-      dryRun,
-      sinceLedger: sinceLedger ?? null,
-      logLevel: logger.level,
-    });
-    const snapshot = await rebuildLeaderboardTable(client, {
-      dryRun,
-      sinceLedger,
-    });
+  while (!signal?.aborted) {
+    const iterationStartedAt = Date.now();
+    let eventsWritten = 0;
+    let observedLag: number | undefined;
+    try {
+      // Issue #637: every RPC call shares one circuit breaker. While it is
+      // open these calls reject immediately instead of spending the retry
+      // budget against a node that is already known to be down.
+      const latest = await withRetry(() => server.getLatestLedger());
+      observedLag = Math.max(0, latest.sequence - currentLedger);
+      if (latest.sequence > currentLedger) {
+        console.log(`[live-poll] Fetching events from ${currentLedger + 1} to ${latest.sequence}`);
+        const response = await withRetry(() =>
+          server.getEvents({
+            filters: [{ type: "contract" as const, contractIds: [config.MARKET_CONTRACT_ID] }],
+            startLedger: currentLedger + 1,
+            limit: decision.eventsPerPage,
+          }),
+        );
 
-    if (dryRun) {
-      await client.query("ROLLBACK");
-    } else {
-      await client.query("COMMIT");
+        const decodedEvents: DecodedContractEvent[] = [];
+        await processEventsInChunks(response.events || [], EVENTS_PROCESSING_CHUNK_SIZE, async (event, eventIndex) => {
+          const topics = event.topic.map((t: any) => scValToNative(t));
+          const data = scValToNative(event.value);
+          decodedEvents.push({
+            ledger: event.ledger,
+            txHash: event.txHash,
+            eventIndex: Number((event as any).eventIndex ?? eventIndex),
+            topics,
+            data,
+          });
+        });
+
+        // Event effects and the page checkpoint commit together. The router
+        // preserves event order and batches only adjacent compatible bets from
+        // the same ledger, so a failed batch cannot advance the cursor.
+        await processLedgerBatchWithCheckpoint(
+          dbPool,
+          decodedEvents,
+          response.latestLedger,
+          (events, client) =>
+            writeEventsToDb(events, client as DbClient, redis),
+        );
+        currentLedger = response.latestLedger;
+        eventsWritten = decodedEvents.length;
+      }
+      decision = backpressure.observe({
+        durationMs: Date.now() - iterationStartedAt,
+        eventsWritten,
+        lagLedgers: observedLag,
+      });
+    } catch (err) {
+      decision = backpressure.observe({
+        durationMs: Date.now() - iterationStartedAt,
+        failed: true,
+      });
+      console.error("[live-poll] Error in polling loop:", err);
     }
 
-    logIterationSummary(logger, {
-      eventsProcessed: snapshot.eventCount,
-      lagLedgers:
-        sinceLedger !== undefined && snapshot.lastLedgerSeq !== null
-          ? Math.max(snapshot.lastLedgerSeq - sinceLedger, 0)
-          : 0,
-      durationMs: Date.now() - startedAt,
-      lastLedgerSeq: snapshot.lastLedgerSeq,
-      checkpointLedger: sinceLedger,
+    recordBackpressureState(decision);
+    if (decision.shouldAlert) {
+      console.warn("[live-poll] sustained backpressure detected", {
+        pollIntervalMs: decision.pollIntervalMs,
+        eventsPerPage: decision.eventsPerPage,
+        consecutivePressureSamples: decision.consecutivePressureSamples,
+      });
+    }
+
+    if (process.env.NODE_ENV === "test") {
+      break;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, decision.pollIntervalMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    logger.error("indexer run failed", {
-      dryRun,
-      sinceLedger: sinceLedger ?? null,
-      error,
-    });
-    process.exitCode = 1;
-    return;
-  } finally {
-    client.release();
-    await pool.end();
   }
 }
 
-main().catch((error: unknown) => {
-  const logger = createLogger({
-    level: parseLogLevel(process.env.LOG_LEVEL),
-    bindings: { component: "indexer", job: "leaderboard-rebuild" },
-  });
-  logger.error("indexer fatal", { error });
-  process.exitCode = 1;
-});
+/**
+ * The single schema-validated event boundary lives in `event-router.ts`
+ * (issue #499). This module previously carried a drifted copy of the router
+ * that silently dropped unrecognized events — re-export the canonical one so
+ * every entry point validates payloads and dead-letters malformed events
+ * identically.
+ */
+export { writeEventToDb, writeEventsToDb } from "./event-router.js";
 
+/**
+ * Main entry point for the indexer service.
+ *
+ * Starts the metrics/health server (not under test, so unit tests can call
+ * main() without binding a port), then either replays history and continues
+ * live (--backfill) or starts live polling from the configured start ledger.
+ */
+export async function main(): Promise<void> {
+  // Resolve the secrets source before anything reads process.env. See
+  // docs/SECRETS.md; the summary is counts only, never names or values.
+  const secrets = await loadSecrets();
+  console.info(`[ipredict-indexer] secrets: ${summariseSecretsLoad(secrets)}`);
+
+  // Validate configuration once, explicitly, before anything reads `config`.
+  // A ConfigError propagates to the catch below, which reports it and exits.
+  initConfig();
+
+  const [{ pool }, { acquireIndexerLock }] = await Promise.all([
+    import("./db.js"),
+    import("./lock.js"),
+  ]);
+  const shutdown = new AbortController();
+  let lockLost: Error | undefined;
+  const lock = await acquireIndexerLock(pool, undefined, {
+    onLost: (error) => {
+      lockLost = error;
+      shutdown.abort(error);
+    },
+  });
+  const metricsServer = new MetricsServer();
+
+  try {
+    await refreshDeadLetterQueueDepthFromDb(pool, {
+      warn: (message, meta) => console.warn(`[ipredict-indexer] ${message}`, meta),
+    });
+    await metricsServer.start();
+    const isBackfill = process.argv.includes("--backfill");
+
+    if (isBackfill) {
+      console.log("[ipredict-indexer] Backfill mode enabled via CLI flag.");
+      const lastLedger = await runBackfill(shutdown.signal);
+      if (!shutdown.signal.aborted) {
+        await startLivePolling(lastLedger, shutdown.signal);
+      }
+    } else {
+      console.log("[ipredict-indexer] Live polling mode enabled (no backfill).");
+      await startLivePolling(config.START_LEDGER, shutdown.signal);
+    }
+
+    if (lockLost) throw lockLost;
+  } finally {
+    shutdown.abort();
+    try {
+      await lock.release();
+    } finally {
+      try {
+        await metricsServer.stop();
+      } finally {
+        await pool.end();
+      }
+    }
+  }
+}
+
+// Only invoke main when run directly, not when imported in tests.
+if (process.env.NODE_ENV !== "test") {
+  main().catch((err) => {
+    reportStartupFailure("ipredict-indexer", err);
+    process.exit(1);
+  });
+}

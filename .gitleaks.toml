@@ -1,0 +1,18 @@
+title = "iPredict secret scanning rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "stellar-secret-key"
+description = "Stellar Ed25519 secret key"
+regex = '''(?i)\bS[A-Z2-7]{55}\b'''
+tags = ["stellar", "secret-key"]
+
+# Examples and test fixtures may illustrate configuration without making the
+# scanner noisy. Never place an operational secret in these directories.
+[[allowlists]]
+description = "Documentation and test fixture paths"
+paths = [
+  '''(?i)(^|/)(test|tests|fixture|fixtures|example|examples)(/|$)''',
+]

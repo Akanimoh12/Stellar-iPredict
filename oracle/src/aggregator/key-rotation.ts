@@ -1,3 +1,58 @@
+import { readFile } from "node:fs/promises";
+
+export interface ResolverKeyProvider {
+  getKey(): Promise<string>;
+  readonly source: string;
+}
+
+export class EnvironmentResolverKeyProvider implements ResolverKeyProvider {
+  readonly source = "environment";
+
+  constructor(
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly variable = "RESOLVER_KEY",
+  ) {}
+
+  async getKey(): Promise<string> {
+    const key = this.env[this.variable]?.trim();
+    if (!key) {
+      throw new Error(`Resolver signing key is unavailable from ${this.source}`);
+    }
+    return key;
+  }
+}
+
+/**
+ * Reads a secret injected as a file by Vault Agent, Kubernetes Secrets,
+ * Docker Secrets, or another external secret manager. The file contents are
+ * never included in an error or log message.
+ */
+export class MountedSecretResolverKeyProvider implements ResolverKeyProvider {
+  readonly source = "mounted-secret";
+
+  constructor(private readonly path: string) {
+    if (!path.trim()) throw new Error("Resolver key secret file path is required");
+  }
+
+  async getKey(): Promise<string> {
+    try {
+      const key = (await readFile(this.path, "utf8")).trim();
+      if (!key) throw new Error("empty secret");
+      return key;
+    } catch {
+      throw new Error(`Resolver signing key could not be loaded from ${this.source}`);
+    }
+  }
+}
+
+export function createResolverKeyProvider(
+  env: NodeJS.ProcessEnv = process.env,
+): ResolverKeyProvider {
+  const file = env.RESOLVER_KEY_FILE?.trim();
+  if (file) return new MountedSecretResolverKeyProvider(file);
+  return new EnvironmentResolverKeyProvider(env);
+}
+
 /**
  * Manages resolver key rotation without downtime.
  *
@@ -78,5 +133,92 @@ export class ResolverKeyManager {
       throw new Error("Cannot revoke the active key — rotate first");
     }
     return this.pendingKeys.delete(normalized);
+  }
+}
+
+export interface ResolverRotationHooks {
+  /** Register the incoming resolver on-chain before it is used. */
+  registerIncomingKey(key: string): Promise<void>;
+  /** Perform a real signed verification operation with the incoming key. */
+  verifyIncomingKey(key: string): Promise<void>;
+  /** Remove the outgoing resolver after the overlap window. */
+  retireOutgoingKey(key: string): Promise<void>;
+}
+
+export interface ResolverRotationOptions {
+  provider: ResolverKeyProvider;
+  hooks: ResolverRotationHooks;
+  overlapMs: number;
+  intervalMs: number;
+  sleep?: (ms: number) => Promise<void>;
+  onError?: (error: unknown) => void;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Coordinates safe resolver rotation. The incoming key is registered first,
+ * then promoted while the outgoing key stays authorized. Verification must
+ * succeed before the overlap timer starts. A verification failure restores the
+ * previous active key and leaves it authorized.
+ */
+export class ResolverRotationScheduler {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
+
+  constructor(
+    private readonly manager: ResolverKeyManager,
+    private readonly options: ResolverRotationOptions,
+  ) {
+    if (options.overlapMs < 0) throw new Error("overlapMs must be non-negative");
+    if (options.intervalMs <= 0) throw new Error("intervalMs must be positive");
+  }
+
+  async runOnce(): Promise<boolean> {
+    if (this.running) return false;
+    this.running = true;
+    try {
+      const incoming = (await this.options.provider.getKey()).trim();
+      const outgoing = this.manager.getActiveKey();
+      if (incoming === outgoing) return false;
+
+      await this.options.hooks.registerIncomingKey(incoming);
+      this.manager.rotate(incoming);
+
+      try {
+        await this.options.hooks.verifyIncomingKey(incoming);
+      } catch (error) {
+        // Roll back without ever leaving the system with no working resolver.
+        this.manager.rotate(outgoing);
+        this.manager.revokePendingKey(incoming);
+        throw new Error("Incoming resolver key failed verification; previous key restored", {
+          cause: error,
+        });
+      }
+
+      const sleep = this.options.sleep ?? defaultSleep;
+      await sleep(this.options.overlapMs);
+      await this.options.hooks.retireOutgoingKey(outgoing);
+      this.manager.revokePendingKey(outgoing);
+      return true;
+    } finally {
+      this.running = false;
+    }
+  }
+
+  start(): () => void {
+    if (this.timer) return () => this.stop();
+    this.timer = setInterval(() => {
+      void this.runOnce().catch((error) => this.options.onError?.(error));
+    }, this.options.intervalMs);
+    this.timer.unref?.();
+    return () => this.stop();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
   }
 }

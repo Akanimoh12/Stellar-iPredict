@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectConflict } from "../src/aggregator/conflict-detection.js";
+import { detectConflict, detectAdapterConflict } from "../src/aggregator/conflict-detection.js";
 import type { CouncilVote } from "../src/aggregator/threshold.js";
 
 const votes = (...outcomes: boolean[]): CouncilVote[] =>
@@ -63,5 +63,49 @@ describe("detectConflict", () => {
   it("includes the market id in the report", () => {
     const report = detectConflict("abc-123", votes(true), 0.3);
     expect(report.marketId).toBe("abc-123");
+  });
+});
+
+describe("detectAdapterConflict (Issue #558)", () => {
+  it("detects two-source disagreement (CoinGecko vs Binance)", () => {
+    const sources = [
+      { adapterId: "coingecko", outcome: true, confidence: 1.0, provider: "coingecko" },
+      { adapterId: "binance", outcome: false, confidence: 1.0, provider: "binance" },
+    ];
+
+    const report = detectAdapterConflict("market-btc", sources, 0.3);
+
+    expect(report.conflicting).toBe(true);
+    expect(report.yesCount).toBe(1);
+    expect(report.noCount).toBe(1);
+    expect(report.disagreementRatio).toBe(0.5);
+  });
+
+  it("detects three-source disagreement (CoinGecko vs Binance vs CoinMarketCap)", () => {
+    const sources = [
+      { adapterId: "coingecko", outcome: true, confidence: 1.0, provider: "coingecko" },
+      { adapterId: "binance", outcome: false, confidence: 1.0, provider: "binance" },
+      { adapterId: "coinmarketcap", outcome: true, confidence: 1.0, provider: "coinmarketcap" },
+    ];
+
+    const report = detectAdapterConflict("market-btc-3", sources, 0.3);
+
+    expect(report.conflicting).toBe(true);
+    expect(report.yesCount).toBe(2);
+    expect(report.noCount).toBe(1);
+    expect(report.disagreementRatio).toBeCloseTo(0.333, 2);
+  });
+
+  it("returns no conflict when all sources agree", () => {
+    const sources = [
+      { adapterId: "coingecko", outcome: true, confidence: 1.0 },
+      { adapterId: "binance", outcome: true, confidence: 1.0 },
+      { adapterId: "coinmarketcap", outcome: true, confidence: 1.0 },
+    ];
+
+    const report = detectAdapterConflict("market-agree", sources, 0.3);
+
+    expect(report.conflicting).toBe(false);
+    expect(report.disagreementRatio).toBe(0);
   });
 });

@@ -58,14 +58,19 @@ export class Gauge {
  * `indexerLag` corresponds to the `indexer_lag_ledgers` gauge documented in
  * `docs/ORACLE_AND_BACKEND.md`; it represents the difference between the
  * latest ledger from the RPC and the indexer's checkpoint ledger.
+ *
+ * `activeRpcEndpointIndex` indicates which RPC endpoint is currently active
+ * (0 = primary, 1 = secondary, etc.). Value is -1 when using a single endpoint.
  */
 export const metrics = {
   eventsProcessed: new Counter(),
   indexerLag: new Gauge(),
+  activeRpcEndpointIndex: new Gauge(),
 };
 
 /** Reset all metrics to zero. Intended for tests. */
 export function resetMetrics(): void {
   metrics.eventsProcessed.reset();
   metrics.indexerLag.reset();
+  metrics.activeRpcEndpointIndex.reset();
 }

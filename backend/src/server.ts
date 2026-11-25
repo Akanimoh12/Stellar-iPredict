@@ -20,6 +20,9 @@ import {
 import { createMarketsRoutes } from "./api/markets.js";
 import { registerStatsRoutes } from "./api/stats.js";
 import { registerRateLimiter } from "./cache/rateLimiter.js";
+import { createMaintenanceState } from "./lib/maintenance.js";
+import { registerMaintenanceMiddleware } from "./middleware/maintenance.js";
+import { createAdminRoutes } from "./api/admin.js";
 
 // Re-exported so `@/server` stays the entry point callers already import these
 // from; they live in lib/cors.ts to keep config/index.ts out of an import cycle.
@@ -69,6 +72,27 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // Registered before anything adds a route: the 404/405 handler learns which
   // methods a path accepts from an onRoute hook, which only sees later routes.
   registerNotFoundHandler(server);
+
+  // Maintenance mode — runs after health checks are registered but before
+  // business routes, so health probes remain accessible during maintenance.
+  // Only register if Redis is available (required for state storage).
+  if (redis) {
+    const maintenanceRetryAfter = Number(process.env.MAINTENANCE_RETRY_AFTER_SECONDS ?? 120);
+    const maintenanceMode = (process.env.MAINTENANCE_MODE ?? "off") as "off" | "read_only" | "full";
+    const maintenanceState = createMaintenanceState(redis, maintenanceMode);
+    
+    registerMaintenanceMiddleware(server, {
+      state: maintenanceState,
+      retryAfterSeconds: maintenanceRetryAfter,
+    });
+
+    // Admin routes for toggling maintenance mode
+    const adminSecret = process.env.MAINTENANCE_ADMIN_SECRET;
+    server.register(createAdminRoutes({ maintenanceState, adminSecret }));
+
+    // Expose maintenance state so health routes can read it
+    server.decorate("maintenanceState", maintenanceState);
+  }
 
   // Per-route rate limiting — runs early so abusive clients are rejected
   // before any route handler or downstream middleware does real work.
@@ -160,6 +184,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   // Readiness probe: verifies DB and Redis are reachable.
+  // maintenanceState is set via decorate() above (if Redis is available).
   server.register(healthRoutes);
 
   // Feature routes, all of them under /api/v1. Health checks stay unversioned:

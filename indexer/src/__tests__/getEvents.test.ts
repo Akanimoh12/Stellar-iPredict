@@ -6,7 +6,7 @@ describe("SorobanRpcClient.getEvents", () => {
   let client: SorobanRpcClient;
 
   beforeEach(() => {
-    client = new SorobanRpcClient("https://mock-rpc-url.stellar.org");
+    client = new SorobanRpcClient(["https://mock-rpc-url.stellar.org"]);
     vi.restoreAllMocks();
   });
 

@@ -1,5 +1,7 @@
 import { rpc } from "@stellar/stellar-sdk";
 import type { RpcClient, RpcEvent } from "../poll-loop.js";
+import { EndpointPool, type Logger as PoolLogger } from "./endpoint-pool.js";
+import { metrics } from "../metrics.js";
 
 export class LedgerGapError extends Error {
   constructor(public readonly startLedger: number, message: string) {
@@ -8,11 +10,37 @@ export class LedgerGapError extends Error {
   }
 }
 
+/**
+ * Soroban RPC client with automatic endpoint failover and ledger monotonicity
+ * enforcement.
+ *
+ * The monotonicity rule ensures the indexer never processes events out of order
+ * or regresses to an earlier ledger. Before using an endpoint, this client
+ * verifies that endpoint's latest ledger is at least as far along as the
+ * requested startLedger.
+ */
 export class SorobanRpcClient implements RpcClient {
-  private readonly server: rpc.Server;
+  private readonly pool: EndpointPool;
+  private readonly singleEndpointUrl?: string;
 
-  constructor(rpcUrl: string) {
-    this.server = new rpc.Server(rpcUrl);
+  constructor(rpcUrls: string[], logger?: PoolLogger) {
+    if (rpcUrls.length === 1) {
+      // Single endpoint — no pool needed, use direct connection
+      this.singleEndpointUrl = rpcUrls[0];
+      this.pool = null as any; // Won't be used
+      // Set metric to -1 to indicate single endpoint mode
+      metrics.activeRpcEndpointIndex.set(-1);
+    } else {
+      // Multiple endpoints — use failover pool
+      this.pool = new EndpointPool({
+        endpoints: rpcUrls,
+        logger,
+        onActiveEndpointChanged: (index) => {
+          // Update metric when active endpoint changes
+          metrics.activeRpcEndpointIndex.set(index);
+        },
+      });
+    }
   }
 
   async getEvents(opts: {
@@ -29,6 +57,35 @@ export class SorobanRpcClient implements RpcClient {
       },
     ];
 
+    if (this.singleEndpointUrl) {
+      // Single endpoint path — no failover logic
+      return this.fetchEventsFromEndpoint(this.singleEndpointUrl, startLedger, filters, limit);
+    }
+
+    // Multi-endpoint path with failover and monotonicity enforcement
+    return this.pool.withFailover(async (server, url) => {
+      // Enforce monotonicity: only use this endpoint if its latest ledger >= startLedger
+      const { sequence: latestLedger } = await server.getLatestLedger();
+      
+      if (latestLedger < startLedger) {
+        throw new Error(
+          `Endpoint ${url} is behind (latest=${latestLedger}, need=${startLedger}). ` +
+          `Will try next endpoint to enforce monotonicity.`
+        );
+      }
+
+      return this.fetchEventsFromEndpoint(url, startLedger, filters, limit);
+    });
+  }
+
+  private async fetchEventsFromEndpoint(
+    url: string,
+    startLedger: number,
+    filters: any[],
+    limit: number
+  ): Promise<{ events: RpcEvent[]; latestLedger: number }> {
+    const server = new rpc.Server(url);
+
     try {
       const allEvents: RpcEvent[] = [];
       let latestLedger = 0;
@@ -39,7 +96,7 @@ export class SorobanRpcClient implements RpcClient {
           ? { filters, cursor, limit }
           : { filters, startLedger, limit };
 
-        const response = await this.server.getEvents(request as any);
+        const response = await server.getEvents(request as any);
 
         latestLedger = response.latestLedger;
 
@@ -76,6 +133,15 @@ export class SorobanRpcClient implements RpcClient {
       }
 
       throw error;
+    }
+  }
+
+  /**
+   * Stops the background primary probe timer (if using endpoint pool).
+   */
+  stop(): void {
+    if (this.pool) {
+      this.pool.stop();
     }
   }
 }

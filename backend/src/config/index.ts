@@ -40,6 +40,20 @@ const envSchema = z.object({
     .enum(["development", "test", "production"])
     .optional()
     .default("development"),
+  // Maintenance mode configuration
+  MAINTENANCE_MODE: z
+    .enum(["off", "read_only", "full"])
+    .optional()
+    .default("off"),
+  MAINTENANCE_RETRY_AFTER_SECONDS: z
+    .string()
+    .optional()
+    .transform((v) => (v !== undefined ? Number(v) : 120))
+    .pipe(z.number().int().positive()),
+  MAINTENANCE_ADMIN_SECRET: z
+    .string()
+    .min(32, "MAINTENANCE_ADMIN_SECRET must be at least 32 characters for security")
+    .optional(),
 });
 
 const result = envSchema.safeParse(process.env);

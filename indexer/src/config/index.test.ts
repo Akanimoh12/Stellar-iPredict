@@ -71,9 +71,10 @@ describe("Configuration Validation", () => {
     expect(errSpy).toHaveBeenCalled();
   });
 
-  it("4. Config: Fails fast on missing SOROBAN_RPC_URL", async () => {
+  it("4. Config: Fails fast when neither SOROBAN_RPC_URL nor SOROBAN_RPC_URLS is set", async () => {
     setValidEnv();
     delete process.env.SOROBAN_RPC_URL;
+    delete process.env.SOROBAN_RPC_URLS;
 
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
       throw new Error("process.exit(1)");
@@ -128,5 +129,39 @@ describe("Configuration Validation", () => {
     expect(config.POLL_INTERVAL_MS).toBe(5000);
     expect(config.EVENTS_PER_PAGE).toBe(200);
     expect(config.REDIS_URL).toBe("redis://localhost:6379");
+  });
+
+  it("9. Config: SOROBAN_RPC_URLS takes precedence over SOROBAN_RPC_URL", async () => {
+    setValidEnv();
+    process.env.SOROBAN_RPC_URL = "https://old.stellar.org";
+    process.env.SOROBAN_RPC_URLS = "https://primary.stellar.org , https://secondary.stellar.org";
+
+    const { config } = await import("./index.js");
+    expect(config.SOROBAN_RPC_ENDPOINTS).toEqual([
+      "https://primary.stellar.org",
+      "https://secondary.stellar.org",
+    ]);
+  });
+
+  it("10. Config: Single SOROBAN_RPC_URL produces one-element endpoints list", async () => {
+    setValidEnv();
+    delete process.env.SOROBAN_RPC_URLS;
+
+    const { config } = await import("./index.js");
+    expect(config.SOROBAN_RPC_ENDPOINTS).toEqual([
+      "https://soroban-testnet.stellar.org",
+    ]);
+  });
+
+  it("11. Config: Whitespace in SOROBAN_RPC_URLS is trimmed, duplicates removed", async () => {
+    setValidEnv();
+    process.env.SOROBAN_RPC_URLS =
+      " https://a.stellar.org , https://b.stellar.org , https://a.stellar.org ";
+
+    const { config } = await import("./index.js");
+    expect(config.SOROBAN_RPC_ENDPOINTS).toEqual([
+      "https://a.stellar.org",
+      "https://b.stellar.org",
+    ]);
   });
 });

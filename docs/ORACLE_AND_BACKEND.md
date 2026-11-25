@@ -613,3 +613,175 @@ jobs:
 | Prometheus + Grafana | P1 | 1 week | Production monitoring |
 | Full DNN integration | P2 | 3 months | Phase 3 |
 | Dispute mechanism | P2 | 6 weeks | Phase 2 |
+
+---
+
+## Part 3 — Maintenance Mode (#639)
+
+> **Status:** Implemented. Available on the `implementation-drips` branch.
+
+### Overview
+
+The backend supports a toggleable maintenance mode that lets operators gracefully signal downtime or restrict writes without restarting any process. The mode is stored in Redis so it applies across all API instances immediately and survives restarts.
+
+### States
+
+| Mode | Effect |
+|---|---|
+| `off` (default) | All routes behave normally. Zero overhead — the middleware returns immediately. |
+| `read_only` | `GET`, `HEAD`, `OPTIONS` pass through. All state-changing methods (`POST`, `PUT`, `PATCH`, `DELETE`) return 503 with a `Retry-After` header. |
+| `full` | Every route returns 503 except `/healthz`, `/readyz`, and `/admin/maintenance`. |
+
+### Response Contract
+
+Blocked requests receive:
+
+```
+HTTP/1.1 503 Service Unavailable
+Retry-After: 120
+Content-Type: application/json
+
+{"error":"maintenance","mode":"full","retryAfterSeconds":120}
+```
+
+The `Retry-After` value is set by `MAINTENANCE_RETRY_AFTER_SECONDS` (default: 120 seconds).
+
+### Toggling at Runtime
+
+Toggling requires a `Bearer` token matching `MAINTENANCE_ADMIN_SECRET` (minimum 32 characters). Callers with missing or wrong credentials receive 401 and no information about the current mode is disclosed.
+
+```bash
+# Read current mode
+curl -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
+     https://api.example.com/admin/maintenance
+
+# Set to read_only
+curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"read_only"}' \
+     https://api.example.com/admin/maintenance
+
+# Set to full maintenance
+curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"full"}' \
+     https://api.example.com/admin/maintenance
+
+# Return to normal
+curl -X PUT -H "Authorization: Bearer $MAINTENANCE_ADMIN_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"off"}' \
+     https://api.example.com/admin/maintenance
+```
+
+Every mode change is written to the structured log at `warn` level with the old mode, new mode, and actor field.
+
+### Health Probe Semantics
+
+| Probe | In maintenance (`full` or `read_only`) | On dependency failure |
+|---|---|---|
+| `GET /healthz` (liveness) | **200 `{status:"ok"}`** — always, so the orchestrator never restarts a healthy process | 200 (liveness only checks process, not deps) |
+| `GET /readyz` (readiness) | **200 `{status:"ready (maintenance)", maintenance:{mode:"full"}}`** — load balancers can drain traffic | **503 `{status:"not ready"}`** |
+
+The key distinction: `readyz` returns **200** (not 503) during maintenance so that a rolling deploy or autoscaler does not mark the instance unhealthy. Load balancers that treat 503 as "remove from rotation" should instead watch for `status !== "ready"` in the JSON body.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAINTENANCE_MODE` | `off` | Initial mode on startup. Redis value takes precedence at runtime. |
+| `MAINTENANCE_RETRY_AFTER_SECONDS` | `120` | Value of the `Retry-After` response header. |
+| `MAINTENANCE_ADMIN_SECRET` | _(none — toggle disabled)_ | Bearer token for the admin toggle endpoint. Must be ≥ 32 characters. Generate with `openssl rand -base64 32`. |
+
+### Troubleshooting
+
+- **Toggle endpoint returns 404**: `MAINTENANCE_ADMIN_SECRET` is not set. Set it and restart (or use a live reload mechanism).
+- **Mode set but old responses still served**: The mode is read from Redis on every request. If Redis is unreachable the mode falls back to `MAINTENANCE_MODE` from the environment. Check Redis connectivity.
+- **503 on health probes**: Check that the probe URL is exactly `/healthz` or `/readyz` — these are the only paths exempt from full-maintenance blocking.
+
+---
+
+## Part 4 — RPC Endpoint Failover (#638)
+
+> **Status:** Implemented. Available on the `implementation-drips` branch.
+
+### Overview
+
+The indexer and oracle previously used a single `SOROBAN_RPC_URL`. A new `SOROBAN_RPC_URLS` environment variable accepts a comma-separated ordered list of endpoints. The endpoint pool automatically fails over to the next healthy endpoint when the active one becomes unavailable, then probes for primary recovery in the background.
+
+### Configuration
+
+```bash
+# Multi-endpoint (new, recommended)
+SOROBAN_RPC_URLS=https://primary.sorobanrpc.com,https://secondary.sorobanrpc.com,https://tertiary.sorobanrpc.com
+
+# Single-endpoint (legacy, still fully supported)
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+```
+
+Rules:
+- `SOROBAN_RPC_URLS` takes precedence over `SOROBAN_RPC_URL` when both are set.
+- URLs are trimmed of whitespace and deduplicated while preserving order.
+- At least one of the two must be set; the process exits with a clear error if neither is.
+
+### Failover Behaviour
+
+1. All calls go through `EndpointPool.withFailover()`.
+2. If the active endpoint throws (timeout, 5xx, connection error), the pool marks it failed and tries the next endpoint.
+3. Each failed endpoint enters an exponential backoff cooldown: starts at 5 seconds, doubles on each failure, caps at 5 minutes.
+4. A background probe runs every 60 seconds against the primary. When it succeeds, the pool switches back and logs the recovery.
+5. If all endpoints are exhausted, the error surfaces to the caller — there is no infinite retry loop.
+
+### Ledger Monotonicity Rule (Indexer)
+
+The indexer tracks the highest processed ledger `H` (the checkpoint). Before accepting events from any endpoint, the pool checks that endpoint's `latestLedger ≥ H`.
+
+**Worked example:**
+
+```
+H = 1000  (last processed ledger)
+Primary dies.
+Secondary reports latestLedger = 998  → REJECTED (would create a gap)
+  — indexer logs: "Endpoint … is behind (latest=998, need=1001)"
+  — cursor stays at 1000, no events accepted from this endpoint
+Secondary reaches latestLedger = 1001 → ACCEPTED
+  — events fetched from startLedger = 1001
+  — checkpoint updated to 1001
+Primary recovers with latestLedger = 1005
+  — pool probe fires, switches back to primary
+  — next fetch from startLedger = 1002 (no gap, no duplicate)
+```
+
+The checkpoint value never decreases. `startLedger` is always `checkpoint + 1`.
+
+### Oracle Submission Safety
+
+For transaction reads (`getAccount`, `getTransaction`, `prepareTransaction`) the oracle uses `withFailover` normally. For `sendTransaction` the oracle always uses the primary server and relies on the idempotency check in `resolveMarketOnChain` (`isAlreadyResolved` queries durable state before every submission) to prevent double-submission if a failover occurs mid-flight.
+
+### Observability
+
+Every endpoint switch is written to the structured log at `warn` level:
+
+```json
+{
+  "event": "rpc_endpoint_switched",
+  "from": "https://primary.sorobanrpc.com",
+  "to": "https://secondary.sorobanrpc.com",
+  "fromIndex": 0,
+  "toIndex": 1,
+  "reason": "connection refused"
+}
+```
+
+API keys and passwords embedded in URLs (query params `apikey`, `api_key`, `token`, `key`, `secret`, `auth`; and HTTP Basic credentials) are redacted to `***` before any log line is written.
+
+The `activeRpcEndpointIndex` gauge in `indexer/src/metrics.ts` tracks which endpoint is currently active (0 = primary, 1 = secondary, …; -1 = single-endpoint mode). Wire this into your Prometheus exporter or log-scraping pipeline alongside `indexer_lag_ledgers`.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `All RPC endpoints failed` in logs | All endpoints unreachable or all behind | Check network; verify endpoints are synced |
+| Indexer stuck, repeated "Endpoint is behind" logs | Secondary lagging after primary failure | Wait for secondary to catch up, or provision a better-synced secondary |
+| Unexpected switch back to primary | Probe interval fired, primary healthy | Expected behaviour — no action needed |
+| `Either SOROBAN_RPC_URLS or SOROBAN_RPC_URL must be set` on startup | Neither env var present | Set at least one in `.env` |

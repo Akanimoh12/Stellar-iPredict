@@ -105,7 +105,9 @@ export async function writeEventToDb(
 
 // Historical backfill main entry point
 export async function runBackfill(): Promise<number> {
-  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  // Use endpoint failover if multiple URLs are configured
+  const rpcEndpoints = config.SOROBAN_RPC_ENDPOINTS;
+  const server = new rpc.Server(rpcEndpoints[0]); // Use first endpoint for backfill
 
   console.log(`[backfill] Fetching current network head ledger...`);
   const latestLedgerResponse = await fetchWithRetry<rpc.Api.GetLatestLedgerResponse>(async () => {

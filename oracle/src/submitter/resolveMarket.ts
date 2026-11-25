@@ -1,4 +1,5 @@
 import { Address, Contract, Keypair, TransactionBuilder, nativeToScVal, rpc } from "@stellar/stellar-sdk";
+import { EndpointPool } from "../rpc/endpoint-pool.js";
 
 export interface ResolveMarketResult {
   marketId: string;
@@ -79,18 +80,35 @@ export async function resolveMarketOnChain(
 const POLL_INTERVAL_MS = 2_000;
 const MAX_POLL_ATTEMPTS = 45; // 90 seconds total
 
-/** Real Stellar SDK-backed `OnChainSubmitter`, mirroring the wallet-signed flow in frontend/src/services/soroban.ts but signing server-side with the resolver key. */
+/** 
+ * Real Stellar SDK-backed `OnChainSubmitter`, mirroring the wallet-signed flow in 
+ * frontend/src/services/soroban.ts but signing server-side with the resolver key.
+ * 
+ * Supports RPC endpoint failover with safeguards against double-submission:
+ * - If using multiple endpoints, only uses failover for reads (getAccount, getTransaction)
+ * - Transaction submission (sendTransaction) uses a single endpoint and relies on
+ *   the idempotency check in resolveMarketOnChain to prevent double-submission
+ */
 export function createStellarSubmitter(options: {
   server: rpc.Server;
   contractId: string;
   networkPassphrase: string;
   resolverKeypair: Keypair;
+  endpointPool?: EndpointPool;
 }): OnChainSubmitter {
-  const { server, contractId, networkPassphrase, resolverKeypair } = options;
+  const { server, contractId, networkPassphrase, resolverKeypair, endpointPool } = options;
 
   async function pollUntilTerminal(hash: string): Promise<rpc.Api.GetTransactionResponse> {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-      const response = await server.getTransaction(hash);
+      let response: rpc.Api.GetTransactionResponse;
+      
+      if (endpointPool) {
+        // Use failover for reads
+        response = await endpointPool.withFailover(async (srv) => await srv.getTransaction(hash));
+      } else {
+        response = await server.getTransaction(hash);
+      }
+      
       if (response.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) return response;
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
@@ -100,7 +118,11 @@ export function createStellarSubmitter(options: {
   return {
     async submitResolution(marketId, outcome) {
       const caller = resolverKeypair.publicKey();
-      const sourceAccount = await server.getAccount(caller);
+      
+      // Use failover for reads if available
+      const sourceAccount = endpointPool
+        ? await endpointPool.withFailover(async (srv) => await srv.getAccount(caller))
+        : await server.getAccount(caller);
 
       const contract = new Contract(contractId);
       const operation = contract.call(
@@ -115,10 +137,18 @@ export function createStellarSubmitter(options: {
         .setTimeout(300)
         .build();
 
-      const prepared = await server.prepareTransaction(tx);
+      // Use failover for prepareTransaction (read-like operation)
+      const prepared = endpointPool
+        ? await endpointPool.withFailover(async (srv) => await srv.prepareTransaction(tx))
+        : await server.prepareTransaction(tx);
+      
       prepared.sign(resolverKeypair);
 
+      // CRITICAL: sendTransaction always uses the primary server to prevent
+      // double-submission. The idempotency check in resolveMarketOnChain
+      // prevents resubmission if this succeeds but confirmation fails.
       const sendResponse = await server.sendTransaction(prepared);
+      
       if (sendResponse.status === "ERROR") {
         throw new Error(`resolve_market rejected for market ${marketId}: ${sendResponse.status}`);
       }

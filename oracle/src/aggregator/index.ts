@@ -1,6 +1,7 @@
 import { rpc } from "@stellar/stellar-sdk";
 import { Pool } from "pg";
 import { loadAggregatorConfig, type AggregatorConfig } from "./config.js";
+import { EndpointPool } from "../rpc/endpoint-pool.js";
 
 export { detectConflict, type ConflictReport } from "./conflict-detection.js";
 export { detectStuckMarket, detectStuckMarkets, type StuckMarketAlert, type StuckMarketInput } from "./stuck-market.js";
@@ -31,10 +32,32 @@ export interface AggregatorDependencies {
 
 export function createProductionDependencies(config: AggregatorConfig): AggregatorDependencies {
   const database = new Pool({ connectionString: config.DATABASE_URL });
-  const server = new rpc.Server(config.SOROBAN_RPC_URL);
+  
+  // Use endpoint pool for RPC failover if multiple endpoints configured
+  const rpcEndpoints = config.SOROBAN_RPC_ENDPOINTS;
+  const pool = rpcEndpoints.length > 1 
+    ? new EndpointPool({ endpoints: rpcEndpoints })
+    : null;
+  
+  // Use first endpoint for direct access (single-endpoint case)
+  const server = new rpc.Server(rpcEndpoints[0]);
+  
   return {
     async connect() {
-      await Promise.all([database.query("SELECT 1"), server.getLatestLedger()]);
+      // Health check: verify DB and RPC connectivity
+      if (pool) {
+        // Multi-endpoint: use pool with failover
+        await Promise.all([
+          database.query("SELECT 1"),
+          pool.withFailover(async (srv) => await srv.getLatestLedger()),
+        ]);
+      } else {
+        // Single endpoint: direct connection
+        await Promise.all([
+          database.query("SELECT 1"),
+          server.getLatestLedger(),
+        ]);
+      }
     },
     async listExpiredUnresolvedMarkets(now) {
       const result = await database.query<AggregatorMarket>(
@@ -48,7 +71,12 @@ export function createProductionDependencies(config: AggregatorConfig): Aggregat
     async processMarket() {
       // Threshold evaluation and finalization are composed by follow-up modules.
     },
-    async close() { await database.end(); },
+    async close() { 
+      await database.end();
+      if (pool) {
+        pool.stop();
+      }
+    },
   };
 }
 

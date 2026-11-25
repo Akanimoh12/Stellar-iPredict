@@ -5,418 +5,151 @@
 <h1 align="center">iPredict - Prediction Market on Stellar</h1>
 
 <p align="center">
-  <a href="https://github.com/AkanEf);/ipredict-stellar/actions"><img src="https://img.shields.io/github/actions/workflow/status/AkanEf);/ipredict-stellar/ci.yml?branch=main&label=CI&logo=github" alt="CI" /></a>
+  <a href="https://github.com/Akanimoh12/Stellar-iPredict/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Akanimoh12/Stellar-iPredict/ci.yml?branch=implementation-drips&label=CI&logo=github" alt="CI" /></a>
   <img src="https://img.shields.io/badge/Stellar-Soroban-blue?logo=stellar" alt="Stellar" />
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License" />
-  <img src="https://img.shields.io/badge/tests-207%20passing-brightgreen" alt="Tests" />
 </p>
 
 **Predict. Win or Lose — You Always Earn.** Decentralized prediction market on Stellar with near-zero fees and 5-second finality.
 
----
-
-## Live Demo
-
-**Frontend:** [https://ipredict-stellar.vercel.app](https://ipredict-stellar.vercel.app)
-
-## Demo Video
-
-🎬 [Watch Full MVP Flow on Loom](https://www.loom.com/share/bbfa51fde81645eb9ca13eeba82bc695) — *Wallet connect → browse markets → place bet → view leaderboard → claim reward → referral flow*
-
-## Deployed Contracts (Stellar Mainnet)
-
-| Contract | Address | Explorer |
-|----------|---------|----------|
-| Prediction Market | `CDGNPRYTFDXJLWZE4YDKZXW4IEN2RLPSE4N7VM5HJ7NLPL2QC45GIXI5` | [stellar.expert](https://stellar.expert/explorer/public/contract/CDGNPRYTFDXJLWZE4YDKZXW4IEN2RLPSE4N7VM5HJ7NLPL2QC45GIXI5) |
-| IPREDICT Token | `CAYL4TKNRMXAX5ZLQGFEZ6XOC2QHTCTN5QC2SB5BEEHLVO6SDU2UBLRH` | [stellar.expert](https://stellar.expert/explorer/public/contract/CAYL4TKNRMXAX5ZLQGFEZ6XOC2QHTCTN5QC2SB5BEEHLVO6SDU2UBLRH) |
-| Referral Registry | `CAGJVX6EXMCKKWDJCQFIEJ34CZTHZOGLWJM6KQTGDEXEO723CJZ5773H` | [stellar.expert](https://stellar.expert/explorer/public/contract/CAGJVX6EXMCKKWDJCQFIEJ34CZTHZOGLWJM6KQTGDEXEO723CJZ5773H) |
-| Leaderboard | `CCWWOQSDSO3XXLCMA6A2HYRUFYVNUJZ2HPAMFQSPOB4JWYIBY2HWVTOB` | [stellar.expert](https://stellar.expert/explorer/public/contract/CCWWOQSDSO3XXLCMA6A2HYRUFYVNUJZ2HPAMFQSPOB4JWYIBY2HWVTOB) |
-
-> **Network:** Stellar Mainnet (Public) | **Admin:** `GDZ4VJWNJPLNU3PAWDYX3V5XNATO7X257DPHWRPFXSCCNEUZ7QTXIIUI` | **7 seed markets live** | All contracts upgradeable
->
-> **Native XLM SAC:** `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` (mainnet)
-
----
-## User Validation
-
-> The table below records our **pre-launch testnet validation** — 30+ real users
-> who tested the full flow (bet, claim, referral) on Stellar Testnet before the
-> mainnet launch. These are historical testnet wallets, kept here as proof of
-> product testing. Live mainnet activity is on the contracts listed above.
-
-### Pre-Launch Testnet Users
-
-| # | Wallet Address | Action | Points |
-|---|----------------|--------|--------|
-| 1 | `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD` | Admin — Created markets, placed bets, claimed rewards | 83 |
-| 2 | `GA5OIFR4TLRJC54B3FIDWHIQKVFGVOWQFE3NXIIGCGLSGTJRUY6RHR2Q` | Placed bets, claimed rewards, referral registration | 38 |
-| 3 | `GAIWJS35TTF2XMYGHY6AX6YBGI4IG3RWSEL2FEXV3DESW5RITGPWIIED` | Placed bets, claimed rewards, referral registration | 29 |
-| 4 | `GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY` | Placed bets, referral registration | 20 |
-| 5 | `GDMA5FFWVJIOTBLO4XZWW5O4DWPOO33TLUOFCQQ7GPGTIRU6WXHCT4ZM` | Placed bets, referral registration | 17 |
-| 6 | `GCSX2AGJRP747DWRCB3YYCKTXHU5CC6YNQUZPOCWWGA4DTK2PY5R6MUH` | Placed bets, referral registration | 8 |
-| 7 | `GDKC2TFZVEJ7M7W2DLJZYFHK4AMHFX4JZKDP5JPQODBR7OT7C3RULXXA` | Placed bets, referral registration | 8 |
-| 8 | `GAKY6JQSSCJZ3MQENCYAWIOZWGDKQJI7BCP6ZB35WTQZCMTYZ6M67UQG` | Placed bets, referral registration | 8 |
-| 9 | `GCR32ST6YU3PLIOW7R6LRCB7ZMSSLAROMZGRQTK5CSOGW4GMIGMQGN5V` | Referral registration | 5 |
-| 10 | `GA2LXPEKNP4IYZ2UKD4YUOGWPYMTNHGNXQRR2X3XT52XKQ5UV6BZKNFR` | Referral registration | 5 |
-| 11 | `GCY4URAJ2JKE3UHCAEZHG5CTMVBS54S5IWQEWU3IIJX2ROOZ55YQYSOV` | Referral registration | 5 |
-| 12 | `GDSSMRFIF56YMGR7DJY2DBQNQNLGJHJ5AW2DP3QSNVJVR4US6DTTM5YV` | Referral registration | 5 |
-| 13 | `GB7M36KOEMNREMS4KMCXKUUYSHAT4JWEXLQJOFOEV3OA5SCUYYFEPGVO` | Referral registration | 5 |
-| 14 | `GDD7MQAP2OE4NTEHLKNSUGIUMJN24RQL72ZTJAYGCDVULNP67JLUYGQW` | Referral registration | 5 |
-| 15 | `GDUF4W7CEIM3JFGZFW4PTLWGCY3G3JD5P4WZMA4C6QFODLC7M6ASC3PU` | Referral registration | 5 |
-| 16 | `GCXEQC2DIPFWPVR4JMROCYSB6YMP6TW3Q2YEV3IXTCRE4ZGSURKVL5LT` | Referral registration | 5 |
-| 17 | `GBDFA2O72OOCUII5NWWKQ6G7V2EZ6D3GDWIYMCMQFVOAHFVAAM33ZOFZ` | Referral registration | 5 |
-| 18 | `GACER5XK5SMHR64FZOELYPPLJVRWFBDY5UWCBOEBSLNK266Q2L45YD2P` | Referral registration | 5 |
-| 19 | `GDKZYMCENO7VCOHIZRAV5OP26X5F6KV5ETT7L35WW6G7QWD4TVI72CXE` | Referral registration | 5 |
-| 20 | `GCLS42CXE5GJGVNPBTF7YIJLI2QGO7LLZK5QFAGO7KPXRNQOLIUBZHFP` | Referral registration | 5 |
-| 21 | `GAW5CACDFYE4T4U26IYYSEJTGXLU4HU5LREGTM4D5NLRPZSK5Y4YBVCE` | Referral registration | 5 |
-| 22 | `GAWDCG7UCCJH4AOZPD45R4VPZG3XH7NVPIMZGNXT2BDKHMPRK6WSZXVV` | Referral registration | 5 |
-| 23 | `GDQIMRXKQDDPXAAU6RQIXFG34GZPV2TEZWJTPE6IPSISG4P5GF5CZZ3B` | Referral registration | 5 |
-| 24 | `GAEAQCVLZML7E74YYSA4VMACJWFZKABU774BDZ2PIOZC7QVQ3R3LKLPO` | Referral registration | 5 |
-| 25 | `GAYU7KUVSIO2CQDMPN7GB62GTJTG73UYOBVO6RVV6WPOO45R2PTGABJI` | Referral registration | 5 |
-| 26 | `GDJWQ5PBXYYRVQRMLZVRSKRCSJJBZNK2V7S5UN323JCUDK3D54YBUTM2` | Referral registration | 5 |
-| 27 | `GCO7CTBLSFEGZKBYNWO34COSOON3FRAOM44HF23XLRV5QM72ZGV35ZL4` | Referral registration | 5 |
-| 28 | `GBE663I55YXLC7U26GZBDUBHYXOYQFUXSXALDM2BXQRFUOPMFASGDGWQ` | Referral registration | 5 |
-| 29 | `GBX3HFO3J6IPOXPH2BWPWKNSCFNMKGANMFJPBFC3JACIMBJM6UISGNZK` | Referral registration | 5 |
-| 30 | `GASJLRNNMPYN3AIA6MFB6ETRDI5H5C36QRRXLFK62XZUJWGVK4YWNF6R` | Referral registration | 5 |
-| 31 | `GBQI3WD2YKYUWB4MXOO3QP7DPENLV3WD32EHA43VV3US2DCBOWEPV7GW` | Referral registration | 5 |
-
-## Screenshot of Leaderboard with 30+ Pre-Launch Testnet Users
-![Leaderboard of 30+ Users](image_of_30+_testnet_user.png)
-
-*Pre-launch testnet wallets verifiable on [Stellar Expert Testnet Explorer](https://stellar.expert/explorer/testnet). Live mainnet contracts are linked in the Deployed Contracts section above.*
-
-### User Feedback
-- **Form Link that I shared with users:** [https://forms.gle/WrTyoCzQ6LJegL8a9](https://forms.gle/WrTyoCzQ6LJegL8a9)
-- **The Spreadsheet with feedback:** [https://docs.google.com/spreadsheets/d/1rGhq1rgeDPiF6hI4iDL2eFt0vUMBDA6LSm9zS2txpiA/edit?usp=sharing](https://docs.google.com/spreadsheets/d/1rGhq1rgeDPiF6hI4iDL2eFt0vUMBDA6LSm9zS2txpiA/edit?usp=sharing)
-
----
-
-## User Feedback Implementation: Added more filtering and default sorting options to the leaderboard on Active
-|*User Name*| *User Email* | *User Wallet Adddress* | *Commit ID*|
-|----------------------|-------------------------|-------------------------|----------------|
-| best_bettor | `tesinger96@gmail.com` | `GA7GFCGUDLWZ6DIDCNERHA5CI7MATE6NT3MKDVJKFYIM5Y543OTLO3UY` | `77c37784589046eeeb917a9015085dfa6fb26a52` |
-
-
-## Advance Feature Added: Fee Sponsorship, Gasless Transactions
-  > we added a Fee Sponsorship, Gasless Transactions feature to our MVP, allowing users to interact with the prediction market without needing to hold XLM for transaction fees. This significantly lowers the barrier to entry, enabling anyone to place bets and participate in the market seamlessly. The platform covers the transaction fees on behalf of the users, creating a more inclusive and user-friendly experience.
-
+- **Live app:** [ipredict-stellar.vercel.app](https://ipredict-stellar.vercel.app)
+- **Demo video:** [Full MVP flow on Loom](https://www.loom.com/share/bbfa51fde81645eb9ca13eeba82bc695): wallet connect → browse markets → place bet → leaderboard → claim reward → referral
 
 ## Features
 
-- **Binary Prediction Markets** — Bet YES or NO on any question with XLM
-- **Inclusive Reward System** — Both winners AND losers earn points + IPREDICT tokens
-- **Onchain Referral Program** — Share your link, earn 0.5% of every referred bet + bonus points
-- **Real-Time Leaderboard** — Rankings by points, volume, and win rate from onchain data
-- **Social Sharing** — One-tap sharing to X, Telegram, WhatsApp after every bet
-- **4 Independent Smart Contracts** — Single responsibility, independently testable
-- **Near-Zero Fees** — Only 2% total (1.5% platform + 0.5% referrer)
-- **5-Second Finality** — Instant settlement on Stellar/Soroban
-- **Mobile-First Design** — Fully responsive glassmorphic UI
-- **Non-Custodial** — Your keys, your funds. Smart contracts handle everything
+- **Binary prediction markets:** bet YES or NO on any question with XLM.
+- **Everyone earns:** winners and losers both earn points and IPREDICT tokens.
+- **On-chain referrals:** earn 0.5% of every referred bet, plus bonus points.
+- **Low fees, fast settlement:** 2% total (1.5% platform + 0.5% referrer), 5-second finality.
+- **Gasless betting:** fee sponsorship means users don't need XLM for transaction fees.
+- **Non-custodial:** your wallet signs every transaction; the contracts hold the funds.
 
----
+The reward and fee model is in [docs/CONTRACTS.md](docs/CONTRACTS.md#reward-system).
+
+## Deployed Contracts (Stellar Mainnet)
+
+| Contract | Address |
+|----------|---------|
+| Prediction Market | [`CDGNPRYTFDXJLWZE4YDKZXW4IEN2RLPSE4N7VM5HJ7NLPL2QC45GIXI5`](https://stellar.expert/explorer/public/contract/CDGNPRYTFDXJLWZE4YDKZXW4IEN2RLPSE4N7VM5HJ7NLPL2QC45GIXI5) |
+| IPREDICT Token | [`CAYL4TKNRMXAX5ZLQGFEZ6XOC2QHTCTN5QC2SB5BEEHLVO6SDU2UBLRH`](https://stellar.expert/explorer/public/contract/CAYL4TKNRMXAX5ZLQGFEZ6XOC2QHTCTN5QC2SB5BEEHLVO6SDU2UBLRH) |
+| Referral Registry | [`CAGJVX6EXMCKKWDJCQFIEJ34CZTHZOGLWJM6KQTGDEXEO723CJZ5773H`](https://stellar.expert/explorer/public/contract/CAGJVX6EXMCKKWDJCQFIEJ34CZTHZOGLWJM6KQTGDEXEO723CJZ5773H) |
+| Leaderboard | [`CCWWOQSDSO3XXLCMA6A2HYRUFYVNUJZ2HPAMFQSPOB4JWYIBY2HWVTOB`](https://stellar.expert/explorer/public/contract/CCWWOQSDSO3XXLCMA6A2HYRUFYVNUJZ2HPAMFQSPOB4JWYIBY2HWVTOB) |
+
+> **Admin:** `GDZ4VJWNJPLNU3PAWDYX3V5XNATO7X257DPHWRPFXSCCNEUZ7QTXIIUI` · **Native XLM SAC:** `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` · All contracts are upgradeable.
+
+The 30+ users who validated the product on testnet before launch are recorded in [docs/USER_VALIDATION.md](docs/USER_VALIDATION.md).
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current backend/oracle topology and the target production data flow.
+```mermaid
+flowchart LR
+    user([User + wallet])
+    providers([External data providers])
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Next.js 14 Frontend                        │
-│  (App Router • Tailwind CSS • Stellar Wallets Kit)             │
-└──────────────┬──────────────┬──────────────┬──────────────┬─────┘
-               │              │              │              │
-        Soroban RPC      Soroban RPC    Soroban RPC    Soroban RPC
-               │              │              │              │
-  ┌────────────▼──┐ ┌────────▼────┐ ┌───────▼──────┐ ┌────▼────────┐
-  │  Prediction   │ │  IPREDICT   │ │   Referral   │ │ Leaderboard │
-  │    Market     │ │    Token    │ │   Registry   │ │             │
-  │               │ │             │ │              │ │             │
-  │ create_market │ │ mint        │ │ register     │ │ add_pts     │
-  │ place_bet ────┼─┼─► mint ◄───┼─┤ credit ──────┼─┤ record_bet  │
-  │ resolve    ───┼─┼─► mint     │ │ get_referrer │ │ get_stats   │
-  │ claim      ───┼─┼─► mint     │ │ get_earnings │ │ get_top     │
-  │ cancel        │ │ transfer   │ │ is_registered│ │ get_rank    │
-  │ withdraw_fees │ │ balance    │ │              │ │             │
-  └───────────────┘ └────────────┘ └──────────────┘ └─────────────┘
-```
+    subgraph frontend["Frontend · Next.js"]
+        ui[App Router UI]
+        proxy["/api/rpc proxy"]
+    end
 
-### Inter-Contract Call Flow
+    subgraph chain["Stellar · Soroban contracts"]
+        market[Prediction Market]
+        token[IPREDICT Token]
+        referral[Referral Registry]
+        board[Leaderboard]
+        market --> token
+        market --> referral
+        market --> board
+        referral --> board
+        referral --> token
+    end
 
-**Place Bet:** `PredictionMarket.place_bet()` → Transfers XLM via SAC → `ReferralRegistry.credit()` (splits fee: 0.5% to referrer, 1.5% to platform) → `Leaderboard.record_bet()` → `IPredictToken.mint()` (bet participation tokens)
+    subgraph services["Off-chain services · Node + TypeScript"]
+        indexer[Indexer]
+        backend[Backend API · Fastify]
+        oracle[Oracle · adapters + council]
+        pg[(PostgreSQL)]
+        redis[(Redis)]
+    end
 
-**Resolve Market:** `PredictionMarket.resolve_market()` → Stores outcome onchain
-
-**Claim Reward:** `PredictionMarket.claim()` → Calculates pro-rata payout → Transfers XLM to user → `Leaderboard.add_pts()` (win: 30 pts / lose: 10 pts) → `IPredictToken.mint()` (win: 10 IPRED / lose: 2 IPRED)
-
-**Referral Registration:** `ReferralRegistry.register_referral()` → `Leaderboard.add_bonus_pts()` (5 pts) → `IPredictToken.mint()` (1 IPRED welcome bonus)
-
----
-
-## Reward System
-
-| Outcome | XLM Payout | Points | IPREDICT Tokens |
-|---------|-----------|--------|-----------------|
-| **Win** | Pro-rata share of losing pool | +30 pts | +10 IPRED |
-| **Lose** | 0 XLM | +10 pts | +2 IPRED |
-| **Cancelled** | Full refund | +10 pts | +2 IPRED |
-| **Referral Registration** | — | +5 pts | +1 IPRED |
-| **Referred Bet** (referrer earns) | 0.5% of bet | +3 pts | — |
-
-### Payout Formula
-
-$$\text{Payout} = \frac{\text{UserBet}}{\text{WinningSidePool}} \times \text{TotalPool}$$
-
-### Fee Model
-
-| Component | Rate | Recipient |
-|-----------|------|-----------|
-| Platform fee | 1.5% | Admin (accumulated, withdrawable) |
-| Referral fee | 0.5% | Referrer's XLM wallet |
-| **Total** | **2.0%** | Deducted at bet time |
-
-*If bettor has no referrer, full 2% goes to platform.*
-
----
-
-## Tech Stack
-
-| Layer | Technology | Version |
-|-------|-----------|---------|
-| **Smart Contracts** | Rust + Soroban SDK | 1.85.0 / 20.3.1 |
-| **Frontend** | Next.js (App Router) | 14.2.35 |
-| **UI** | React + Tailwind CSS | 18.3.1 / 3.4.17 |
-| **Language** | TypeScript | 5.7.3 |
-| **Wallet** | Stellar Wallets Kit | Freighter, xBull, Albedo |
-| **Testing** | Vitest + Testing Library | 2.1.9 |
-| **Contract Testing** | `#[test]` + soroban-sdk testutils | — |
-| **CI/CD** | GitHub Actions | Node 18/20 + Rust |
-| **Deployment** | Vercel (frontend) + Stellar Mainnet | — |
-
----
-
-## Project Structure
-
-```
-ipredict-stellar/
-├── .github/workflows/ci.yml       # CI pipeline (2 jobs)
-├── contracts/
-│   ├── Cargo.toml                  # Workspace manifest
-│   ├── prediction_market/          # Core market logic (36 tests)
-│   ├── ipredict_token/             # Platform token (11 tests)
-│   ├── referral_registry/          # Referral tracking (13 tests)
-│   └── leaderboard/                # Rankings + stats (10 tests)
-├── frontend/
-│   ├── public/                     # Favicon, OG image
-│   ├── src/
-│   │   ├── app/                    # Next.js pages (7 routes)
-│   │   ├── components/             # 30+ React components
-│   │   │   ├── layout/             # Navbar, Footer, MobileMenu
-│   │   │   ├── market/             # MarketCard, BettingPanel, OddsBar…
-│   │   │   ├── leaderboard/        # LeaderboardTable, Tabs, PlayerRow
-│   │   │   ├── profile/            # BetHistory, PointsCard, Referral…
-│   │   │   ├── social/             # ShareBetButton, SocialShareModal
-│   │   │   ├── wallet/             # WalletConnect, WalletModal
-│   │   │   ├── admin/              # CreateMarket, Resolve, Stats
-│   │   │   └── ui/                 # Spinner, Skeleton, Toast, Badge…
-│   │   ├── hooks/                  # useMarket, useWallet, useBet…
-│   │   ├── services/               # Soroban RPC service layer
-│   │   ├── utils/                  # Helpers, cache, formatting
-│   │   ├── config/                 # Network constants
-│   │   └── types/                  # TypeScript interfaces
-│   ├── __tests__/                  # 9 test suites (137 tests)
-│   └── .env.local.example          # Environment template
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── DEPLOYMENT-GUIDE.md
-│   ├── LOCAL_DEV.md
-│   └── notes/
-│       ├── USER-FEEDBACK.md
-│       └── ITERATION-LOG.md
-└── README.md
+    user --> ui
+    ui -- signed transactions --> proxy
+    proxy -- Soroban RPC --> market
+    ui -- reads --> backend
+    market -- events --> indexer
+    indexer -- projections --> pg
+    indexer -. invalidate .-> redis
+    backend --> pg
+    backend --> redis
+    providers --> oracle
+    oracle -- resolve / challenge --> market
+    oracle --> pg
 ```
 
----
+- **Contracts** (`contracts/`) hold funds and bets, resolve markets and pay out. They are the source of truth.
+- **Frontend** (`frontend/`) builds transactions for the user's wallet to sign and reads data from the backend or directly over RPC.
+- **Indexer** (`indexer/`) is the only writer of on-chain state into PostgreSQL. The database can always be rebuilt from contract events.
+- **Backend** (`backend/`) serves the indexed data over HTTP, with Redis for caching and rate limits.
+- **Oracle** (`oracle/`) gathers evidence from data providers, aggregates it, and submits or challenges resolutions on-chain.
 
-## Getting Started
+Details, including the current versus target data paths, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The contracts and how they call each other are in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
-### Prerequisites
+## Quickstart
 
-- **Rust** ≥ 1.85.0 with `wasm32-unknown-unknown` target
-- **Node.js** ≥ 22
-- **Stellar CLI** (`stellar-cli` or `soroban-cli`)
-- **Freighter Wallet** browser extension (for mainnet interaction)
-
-### Setup
+Requires Node.js 22+, Docker with Compose, and `make`. Rust is only needed to rebuild the contracts.
 
 ```bash
-# Clone
 git clone https://github.com/Akanimoh12/Stellar-iPredict.git
 cd Stellar-iPredict
+git checkout implementation-drips
 
-# Build smart contracts
-cd contracts
-stellar contract build
-cargo test   # 70 tests
-
-# Setup frontend
-cd ../frontend
-cp .env.local.example .env.local
-
-# Edit .env.local with your deployed contract IDs
-npm install
-npm test     # 137 tests
-npm run build
-npm run dev  # http://localhost:3000
+make install       # dependencies for every workspace
+make env           # create missing .env files from the examples
+make up            # Postgres + Redis
+make migrate       # apply db/migrations
+make seed          # sample markets, bets and leaderboard rows
+make dev-backend   # then dev-indexer and dev-frontend, one terminal each
 ```
 
-For the current host-based local workflow across infra, indexer, backend, frontend, and oracle, see [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md).
+Open http://localhost:3000. Run `make test` for the Node suites, `make test-frontend` and `make test-contracts` for the others, and `make` on its own to list every target.
 
-### Deploy Contracts (Testnet for dev, Mainnet for production)
+The [Quickstart](docs/QUICKSTART.md) walks through each step with a check. See also [Local development](docs/LOCAL_DEV.md) and [Troubleshooting](docs/TROUBLESHOOTING.md).
 
-See [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md) for the full step-by-step deployment guide with correct dependency order.
+## Repository layout
 
----
-
-## Testing
-
-### Summary
-
-| Suite | Tests | Status |
-|-------|-------|--------|
-| **Prediction Market** (Rust) | 36 | ✅ All passing |
-| **Referral Registry** (Rust) | 13 | ✅ All passing |
-| **IPREDICT Token** (Rust) | 11 | ✅ All passing |
-| **Leaderboard** (Rust) | 10 | ✅ All passing |
-| **Frontend Helpers** | 49 | ✅ All passing |
-| **Frontend Cache** | 20 | ✅ All passing |
-| **BettingPanel Component** | 13 | ✅ All passing |
-| **MarketCard Component** | 10 | ✅ All passing |
-| **LeaderboardTable Component** | 10 | ✅ All passing |
-| **Navbar Component** | 7 | ✅ All passing |
-| **WalletConnect Component** | 6 | ✅ All passing |
-| **Market Service** | 12 | ✅ All passing |
-| **Leaderboard Service** | 10 | ✅ All passing |
-| **Total** | **207** | **✅ All passing** |
-
-### Run Tests
-
-```bash
-# Rust contract tests
-cd contracts && cargo test
-
-# Frontend tests
-cd frontend && npm test
-
-# Key-screen visual regression layout guards
-cd frontend && npm run test:visual
-
-# Frontend tests with coverage
-cd frontend && npx vitest run --coverage
-```
-
----
-
-## CI/CD Pipeline
-
-GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main`/`develop` and every PR to `main`.
-
-### Job 1: `lint-test-build`
-- **Matrix:** Node.js 22, 24
-- **Steps:** `npm ci` → `npm test` → `npm run build`
-- **Artifacts:** Production build uploaded on Node 22
-
-### Job 2: `contract-check`
-- **Toolchain:** Rust stable + `wasm32-unknown-unknown` target
-- **Steps:** `cargo check --workspace` → `cargo test --workspace`
-- **Cache:** Cargo registry + target directory cached
-
----
-
-### Feedback & Iteration
-
-See [docs/notes/USER-FEEDBACK.md](docs/notes/USER-FEEDBACK.md) for the full feedback log.
-
-**Iteration Summary:** After initial testnet deployment, user feedback on loading states led to replacing spinner-only loading indicators with content-aware skeleton placeholders across leaderboard, profile, and market detail pages — improving perceived performance and reducing layout shift.
-
----
+| Path | Contents |
+|------|----------|
+| `contracts/` | Soroban smart contracts (Rust) |
+| `frontend/` | Next.js app |
+| `backend/` | Fastify read API |
+| `indexer/` | Soroban event indexer |
+| `oracle/` | Data adapters, council aggregation, submitter, monitor |
+| `db/` | PostgreSQL migrations and seed tooling |
+| `shared/` | Shared TypeScript types and event constants |
+| `infra/` | Docker Compose, monitoring and deployment configuration |
+| `status-page/` | Independently hosted status page |
+| `docs/` | Design docs, runbooks and guides |
 
 ## Documentation
 
-- [Contributor Onboarding](docs/ONBOARDING.md) — guided onboarding path for new contributors through starting issues and setup.
-- [API Reference](docs/API.md) — every HTTP endpoint, request/response schema, error format, and the rate-limit & caching behaviour of the backend API.
-- [Runbook Index](docs/RUNBOOK_INDEX.md) — **on-call start here**: every alert mapped to its runbook procedure, with runbook links embedded in alert payloads.
-- [Indexer Runbook](docs/INDEXER_RUNBOOK.md) — how to run, backfill, recover, and monitor the Soroban event indexer.
-- [Synthetic Monitoring](infra/monitoring/synthetic.md) — uptime probes for `/healthz` and `/api/markets`.
-- [Releasing and Versioning](docs/RELEASING.md) — the versioning scheme, how a release is cut, hotfixes, and how API breaking changes are versioned and announced. Changes are recorded in the [Changelog](CHANGELOG.md).
-- [Backend Deployment Guide](docs/BACKEND_DEPLOYMENT.md) — deploying the API, indexer, oracle, Postgres, and Redis to production.
-- [Database Schema Reference](docs/DB_SCHEMA.md) — the shared Postgres schema, with an ER diagram, for the backend and indexer.
-- [Backend & Oracle Security Considerations](docs/SECURITY_BACKEND.md) — threat model covering key custody, bond mechanics, and RPC trust.
-- [Glossary](docs/GLOSSARY.md) — definitions of market, bet, outcome, bond, council, and other domain terms.
+**Getting started**
+- [Quickstart](docs/QUICKSTART.md) · [Local development](docs/LOCAL_DEV.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Contributor onboarding](docs/ONBOARDING.md)
 
----
+**Design and reference**
+- [Architecture](docs/ARCHITECTURE.md): system topology and data flows.
+- [Smart contracts](docs/CONTRACTS.md): contract functions, call flow, rewards and fees.
+- [Oracle and backend design](docs/ORACLE_AND_BACKEND.md): the design reference for the off-chain services.
+- [API reference](docs/API.md): every HTTP endpoint, with rate-limit and caching behaviour.
+- [Database schema](docs/DB_SCHEMA.md): the shared Postgres schema, with an ER diagram.
+- [Glossary](docs/GLOSSARY.md): market, bet, outcome, bond, council and other terms.
 
-## Smart Contract Functions
+**Operations**
+- [Runbook index](docs/RUNBOOK_INDEX.md): **on-call starts here**; every alert mapped to its runbook.
+- [Indexer runbook](docs/INDEXER_RUNBOOK.md) · [Oracle runbook](docs/ORACLE_RUNBOOK.md) · [Synthetic monitoring](infra/monitoring/synthetic.md) · [Status page](status-page/README.md)
+- [Backend deployment](docs/BACKEND_DEPLOYMENT.md) · [Contract deployment](docs/DEPLOYMENT-GUIDE.md)
+- [Backend and oracle security](docs/SECURITY_BACKEND.md): key custody, bonds and RPC trust.
 
-### Prediction Market
-
-| Function | Description |
-|----------|-------------|
-| `initialize(admin, token, referral, leaderboard, xlm_sac)` | One-time setup with linked contracts |
-| `create_market(admin, question, image_url, duration_secs)` | Create new prediction market |
-| `place_bet(user, market_id, is_yes, amount)` | Place or increase bet (2% fee deducted) |
-| `resolve_market(admin, market_id, outcome)` | Admin resolves with YES/NO outcome |
-| `cancel_market(admin, market_id)` | Cancel market, enable refunds |
-| `claim(user, market_id)` | Claim payout + points + tokens |
-| `withdraw_fees(admin)` | Admin withdraws accumulated platform fees |
-| `get_market(market_id)` | Read market data |
-| `get_bet(market_id, user)` | Read user's bet on market |
-| `get_market_count()` | Total markets created |
-| `get_odds(market_id)` | Current YES/NO percentages |
-| `get_market_bettors(market_id)` | List all bettors on a market |
-| `get_accumulated_fees()` | Total unclaimed platform fees |
-
-### IPREDICT Token
-
-| Function | Description |
-|----------|-------------|
-| `initialize(admin, name, symbol, decimals)` | One-time token setup |
-| `set_minter(minter)` | Authorize address to mint (multi-minter) |
-| `remove_minter(minter)` | Revoke minting rights |
-| `mint(minter, to, amount)` | Mint tokens (authorized minters only) |
-| `transfer(from, to, amount)` | Transfer tokens between accounts |
-| `burn(from, amount)` | Burn tokens |
-| `balance(account)` | Get token balance |
-| `total_supply()` | Total tokens minted |
-| `name()` / `symbol()` / `decimals()` | Token metadata |
-
-### Referral Registry
-
-| Function | Description |
-|----------|-------------|
-| `initialize(admin, market, token, leaderboard, xlm_sac)` | One-time setup |
-| `register_referral(user, display_name, referrer?)` | Register with optional referrer |
-| `credit(caller, user, referral_fee)` | Credit referral fee (called by market contract) |
-| `get_referrer(user)` | Get user's referrer address |
-| `get_display_name(user)` | Get registered display name |
-| `get_referral_count(user)` | Number of referrals |
-| `get_earnings(user)` | Total referral earnings |
-| `has_referrer(user)` / `is_registered(user)` | Status checks |
-
-### Leaderboard
-
-| Function | Description |
-|----------|-------------|
-| `initialize(admin, market, referral)` | One-time setup |
-| `add_pts(caller, user, points, is_winner)` | Add win/loss points + update stats |
-| `add_bonus_pts(caller, user, points)` | Add bonus points (no stat inflation) |
-| `record_bet(caller, user)` | Increment total bets count |
-| `get_points(user)` | Get user's total points |
-| `get_stats(user)` | Full player stats (points, bets, wins, losses) |
-| `get_top_players(limit)` | Sorted leaderboard |
-| `get_rank(user)` | User's current rank |
-
----
+**Project**
+- [Contributing](CONTRIBUTING.md) · [Releasing and versioning](docs/RELEASING.md) · [Changelog](CHANGELOG.md) · [User validation](docs/USER_VALIDATION.md)
 
 ## Roadmap
 
@@ -427,7 +160,9 @@ See [docs/notes/USER-FEEDBACK.md](docs/notes/USER-FEEDBACK.md) for the full feed
 | **Token Utility** | Q3 2026 | IPREDICT staking, governance, reward tiers |
 | **Scale** | Q4 2026 | Mainnet launch, mobile app, cross-chain bridges |
 
----
+## Contributing
+
+Work happens on the `implementation-drips` branch. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, the pre-PR checks and how to record changes in the [changelog](CHANGELOG.md). All contributors follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Security
 
@@ -435,30 +170,12 @@ Found a vulnerability? **Do not open a public issue.** Report it privately
 through GitHub's *Report a vulnerability* form on the Security tab. See
 [SECURITY.md](SECURITY.md) for scope, response times and the disclosure process.
 
----
-
 ## License
 
-This repository is licensed under the [Apache License 2.0](LICENSE).
-
-### Dependency License Auditing
-
-All project dependencies are audited against permissive open-source license standards (Apache-2.0, MIT, BSD, ISC, etc.) to ensure compliance and eliminate unvetted copyleft libraries.
-
-To run the dependency license check:
-
-```bash
-npm run license:check
-```
-
----
+Licensed under the [Apache License 2.0](LICENSE). Dependencies are restricted to permissive licenses; check them with `npm run license:check`.
 
 ## Author
 
 Built by **Akan** for the Stellar Build-a-10M-Startup challenge.
 
 - Stellar Admin Wallet: `GDHQ6TNWZ4V2JVCDWEUVW7YKFBXCOQZRRUCT27LAKES3PGOE6JSZMSMD`
-
-## Backend Database Foundation
-
-Added Oracle submissions table (migration 0006). Implemented typed market upsert helper in backend/src/db/markets.ts.

@@ -31,9 +31,27 @@ No release has been tagged yet. Every package and contract crate declares
 - Docs: [`docs/RELEASING.md`](docs/RELEASING.md) describes the versioning
   scheme, the release process, hotfixes, the API breaking-change policy and the
   release record; this changelog is introduced. (#628)
+- Docs: the README has an architecture diagram showing the contracts, indexer,
+  backend, oracle and frontend and how data moves between them. (#978)
+- Docs: [`docs/CONTRACTS.md`](docs/CONTRACTS.md) holds the contract function
+  reference, inter-contract call flow and reward and fee model, and
+  [`docs/USER_VALIDATION.md`](docs/USER_VALIDATION.md) the pre-launch testnet
+  validation record, both moved out of the README. (#979)
+- Releases: `scripts/release-notes.sh` (also `make release-notes`) prints a
+  version's changelog section for the GitHub release notes and fails when it is
+  empty. `CONTRIBUTING.md` explains when and how to add changelog entries, and a
+  pull request template asks for one. (#980)
 
 ### Changed
 
+- Docs: the README is shortened to an overview, a quickstart and an index of
+  the detailed docs. Stale hard-coded test counts are removed. (#979)
+- Status page: `status-page/snapshot.json` is generated at deploy time by
+  `scripts/generate-status-snapshot.sh` and is no longer committed, so the
+  5-minute workflow no longer pushes commits and needs only read access to the
+  repository. When `/status` is unreachable the deploy carries forward the
+  snapshot the live page is serving; set the `STATUS_PAGE_URL` Actions variable
+  to enable this. (#976)
 - Frontend: MAX now sets the whole-XLM spendable balance only when that covers
   the minimum bet and the per-market bet limit has not been reached; otherwise
   it is disabled, with a hint when the balance is too low. (#849)

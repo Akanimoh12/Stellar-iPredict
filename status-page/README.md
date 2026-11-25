@@ -24,8 +24,7 @@ Every 5 minutes
   GitHub Actions workflow (.github/workflows/status-page.yml)
     └─ curl GET /status          (live API)
     └─ curl GET /api/markets/resolution-status   (oracle health)
-    └─ merge into status-page/snapshot.json
-    └─ git commit + push [skip ci]
+    └─ merge into status-page/snapshot.json   (build artifact, not committed)
     └─ deploy status-page/ → Cloudflare Pages
           │
           ▼
@@ -37,6 +36,26 @@ Every 5 minutes
                falls back to snapshot.json     ← last known state, ≤5 min stale
                shows "snapshot" warning banner
 ```
+
+### The snapshot is a build artifact
+
+`snapshot.json` is generated on every deploy by
+[`scripts/generate-status-snapshot.sh`](../scripts/generate-status-snapshot.sh)
+and shipped with the site. It is gitignored and never committed, so the
+5-minute schedule does not add commits to the repository and the workflow
+needs only read access to it.
+
+The script picks the first source that works:
+
+| Source | When | Result |
+|--------|------|--------|
+| `live` | `GET /status` answers with a valid payload | Fresh snapshot, merged with oracle resolution status |
+| `previous` | The live fetch fails and `STATUS_PAGE_URL` is set | The snapshot the deployed page is serving now, carried forward unchanged |
+| `placeholder` | Neither is available | `status: "unknown"` |
+
+A failed fetch never fails the deploy: a stale snapshot is better than a blank
+page during an outage. Because the `previous` snapshot keeps its original
+`generatedAt`, the page shows how old it is.
 
 ### Incident history
 
@@ -73,7 +92,7 @@ Push the change — the deploy job picks it up within seconds.
 |------|---------|
 | `index.html` | Single-page status UI — pure HTML/CSS/JS, no build step |
 | `incidents.json` | Incident history + manual override — edit to post notices |
-| `snapshot.json` | Last-known-good status snapshot, written by GitHub Actions |
+| `snapshot.json` | Last-known-good status snapshot. Generated at deploy time, gitignored, not in the repository |
 | `_redirects` | Cloudflare Pages routing (SPA fallback) |
 
 ---
@@ -90,6 +109,7 @@ In the repository **Settings → Secrets and variables → Actions**:
 | `CLOUDFLARE_API_TOKEN` | Secret | CF API token with **Pages:Edit** permission |
 | `CLOUDFLARE_ACCOUNT_ID` | Secret | Your Cloudflare account ID |
 | `CF_PAGES_PROJECT_NAME` | Variable | Cloudflare Pages project name, e.g. `ipredict-status` |
+| `STATUS_PAGE_URL` | Variable | Public URL of the deployed page, e.g. `https://ipredict-status.pages.dev`. Lets a deploy carry the last snapshot forward when `/status` is down |
 
 ### 2. Create the Cloudflare Pages project
 
@@ -133,15 +153,18 @@ If you prefer GitHub Pages over Cloudflare Pages:
 ## Local development
 
 ```bash
-cd status-page
-
-# Write a real snapshot from the live API
-curl -s https://api.ipredict.app/status -o snapshot.json
+# Write status-page/snapshot.json from the live API (gitignored)
+STATUS_API_URL=https://api.ipredict.app/status scripts/generate-status-snapshot.sh
 
 # Serve the directory
+cd status-page
 python3 -m http.server 8080
 open http://localhost:8080
 ```
+
+Without `STATUS_API_URL` the script writes the placeholder snapshot. If
+`snapshot.json` is missing, the page still works: it just has no fallback when
+the live fetch fails.
 
 The page polls `./snapshot.json` as its fallback. For the live fetch to work
 locally you need CORS headers from the API (or use a browser extension to
@@ -182,7 +205,7 @@ immediately if you trigger the workflow manually.
 | Criterion | How it is met |
 |-----------|--------------|
 | Status accurately reflects real system health | Page polls `GET /status` which aggregates DB, Redis, indexer, and oracle health |
-| Updates automatically from health signals | GitHub Actions fetches `/status` every 5 minutes and commits `snapshot.json`; browser also polls live every 60 s |
+| Updates automatically from health signals | GitHub Actions fetches `/status` every 5 minutes and deploys a fresh `snapshot.json`; browser also polls live every 60 s |
 | Remains available during an outage of the main platform | Hosted on Cloudflare Pages CDN; falls back to `snapshot.json` when the live API is unreachable |
 | Incident history is retained | `incidents.json` is version-controlled; history is permanent |
 | Manual override for incidents automated checks cannot detect | `override.message` in `incidents.json` shows a banner; `endsAt` makes it expire automatically |

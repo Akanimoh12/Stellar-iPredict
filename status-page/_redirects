@@ -1,4 +1,5 @@
 # Cloudflare Pages routing
 # All paths serve index.html (single-page app fallback).
-# snapshot.json and incidents.json are served as static files directly.
+# snapshot.json (generated at deploy time) and incidents.json are served as
+# static files directly.
 /*    /index.html   200

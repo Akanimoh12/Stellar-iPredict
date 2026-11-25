@@ -63,7 +63,7 @@ SERVICE ?=
         build typecheck test test-shared test-backend test-indexer test-oracle \
         test-db test-frontend test-contracts verify \
         monitoring-up monitoring-down metrics promtool \
-        secrets-check secrets-scaffold clean
+        secrets-check secrets-scaffold release-notes clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 ##@ General
@@ -214,6 +214,10 @@ smoke-list: ## List the smoke suite's checks and which of them write state
 	$(NPM) run smoke:list
 
 verify: typecheck test ## Typecheck, then run every Node suite
+
+VERSION ?= Unreleased
+release-notes: ## Print a version's CHANGELOG section. VERSION=0.2.0 make release-notes
+	./scripts/release-notes.sh "$(VERSION)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 ##@ Observability

@@ -217,10 +217,26 @@ taken from the changelog:
 git checkout implementation-drips && git pull
 git tag -a vX.Y.Z -m "iPredict vX.Y.Z"
 git push origin vX.Y.Z
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <section-of-CHANGELOG.md>
+scripts/release-notes.sh X.Y.Z > /tmp/release-notes.md
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/release-notes.md
 ```
 
 Mark a `-rc` tag as a pre-release with `--prerelease`.
+
+### Release notes
+
+The GitHub release notes are the version's section of `CHANGELOG.md`, copied
+unchanged, so the changelog and the release page never disagree.
+[`scripts/release-notes.sh`](../scripts/release-notes.sh) prints the section
+for a version (`make release-notes VERSION=X.Y.Z` does the same) and fails if
+it is missing or empty, so a release cannot go out with blank notes. Run it
+with `Unreleased` while preparing the release PR to preview what will ship.
+
+Do not use GitHub's *Generate release notes* button: it lists PR titles, not the
+reader-facing entries, and skips the **BREAKING** and migration notes. For a
+release with a breaking change or a contract upgrade, add a short summary above
+the copied section with links to the migration notes and the
+[release record](#release-record).
 
 ### 5. Deploy
 

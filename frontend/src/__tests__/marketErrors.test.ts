@@ -27,8 +27,8 @@ describe("friendlyContractError", () => {
     expect(friendlyContractError("Error(Contract, #999)")).toBeNull();
   });
 
-  it("covers every MarketError code from 1 to 32", () => {
-    for (let code = 1; code <= 32; code++) {
+  it("covers every MarketError code from 1 to 33", () => {
+    for (let code = 1; code <= 33; code++) {
       expect(MARKET_ERROR_MESSAGES[code], `code ${code}`).toBeTruthy();
     }
   });

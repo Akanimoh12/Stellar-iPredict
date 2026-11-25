@@ -357,6 +357,7 @@ export function buildServer(options: BuildServerOptions): FastifyInstance {
   });
 
   // Readiness probe: verifies DB and Redis are reachable.
+  // maintenanceState is set via decorate() above (if Redis is available).
   server.register(healthRoutes);
 
   // Public status feed for an external status page. Unversioned alongside the

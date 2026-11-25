@@ -263,4 +263,144 @@ describe("useWallet", () => {
 
     expect(result.current.connected).toBe(false);
   });
+
+  it("should handle account change event and update publicKey, localStorage, and simulationSource", async () => {
+    mockWalletKit.connectKit.mockResolvedValue({
+      publicKey: "GACCOUNT1...",
+    });
+
+    const { result } = renderHook(() => useWallet());
+
+    await act(async () => {
+      await result.current.connect("freighter");
+    });
+
+    expect(result.current.publicKey).toBe("GACCOUNT1...");
+
+    // Dispatch account change event from extension
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("freighter:accountChanged", {
+          detail: { publicKey: "GACCOUNT2..." },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.publicKey).toBe("GACCOUNT2...");
+      expect(localStorage.getItem("ip_wallet_pubkey")).toBe("GACCOUNT2...");
+    });
+  });
+
+  it("should disconnect when account becomes unavailable or revoked via account change event", async () => {
+    mockWalletKit.connectKit.mockResolvedValue({
+      publicKey: "GACCOUNT1...",
+    });
+
+    const { result } = renderHook(() => useWallet());
+
+    await act(async () => {
+      await result.current.connect("freighter");
+    });
+
+    expect(result.current.connected).toBe(true);
+
+    // Dispatch account change event with null/empty address
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("stellar:accountChanged", {
+          detail: { publicKey: "" },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.connected).toBe(false);
+      expect(result.current.publicKey).toBeNull();
+      expect(localStorage.getItem("ip_wallet_pubkey")).toBeNull();
+      expect(localStorage.getItem("ip_wallet_type")).toBeNull();
+    });
+  });
+
+  it("should detect account switch on window focus", async () => {
+    mockWalletKit.connectKit.mockResolvedValueOnce({
+      publicKey: "GACCOUNT_OLD...",
+    });
+
+    const { result } = renderHook(() => useWallet());
+
+    await act(async () => {
+      await result.current.connect("freighter");
+    });
+
+    expect(result.current.publicKey).toBe("GACCOUNT_OLD...");
+
+    // Mock wallet kit to return new account on subsequent call
+    mockWalletKit.connectKit.mockResolvedValue({
+      publicKey: "GACCOUNT_NEW...",
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => {
+      expect(result.current.publicKey).toBe("GACCOUNT_NEW...");
+      expect(localStorage.getItem("ip_wallet_pubkey")).toBe("GACCOUNT_NEW...");
+    });
+  });
+
+  it("should handle network change event and detect network mismatch", async () => {
+    mockWalletKit.connectKit.mockResolvedValue({
+      publicKey: "GACCOUNT1...",
+    });
+
+    const { result } = renderHook(() => useWallet());
+
+    await act(async () => {
+      await result.current.connect("freighter");
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("freighter:networkChanged", {
+          detail: {
+            network: "testnet",
+            networkPassphrase: "Test SDF Future Network ; October 2022",
+          },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.network).toBe("testnet");
+      expect(result.current.error?.message).toContain("Wallet network mismatch");
+    });
+  });
+
+  it("should disconnect when extension reports locked or revoked error during check", async () => {
+    mockWalletKit.connectKit.mockResolvedValueOnce({
+      publicKey: "GACCOUNT1...",
+    });
+
+    const { result } = renderHook(() => useWallet());
+
+    await act(async () => {
+      await result.current.connect("freighter");
+    });
+
+    expect(result.current.connected).toBe(true);
+
+    mockWalletKit.connectKit.mockRejectedValue(new Error("Wallet locked"));
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => {
+      expect(result.current.connected).toBe(false);
+      expect(result.current.publicKey).toBeNull();
+      expect(localStorage.getItem("ip_wallet_pubkey")).toBeNull();
+    });
+  });
 });

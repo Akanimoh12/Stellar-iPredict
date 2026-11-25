@@ -14,7 +14,8 @@ const schema = z.object({
   COUNCIL_SIZE: positiveInteger.default(7),
   COUNCIL_THRESHOLD: positiveInteger.default(4),
   DATABASE_URL: z.string().min(1),
-  SOROBAN_RPC_URL: z.string().url(),
+  SOROBAN_RPC_URL: z.string().url().optional(),
+  SOROBAN_RPC_URLS: z.string().optional(),
   POLL_INTERVAL_MS: positiveInteger.default(5_000),
   LOG_LEVEL: z.string().min(1).default("info"),
 

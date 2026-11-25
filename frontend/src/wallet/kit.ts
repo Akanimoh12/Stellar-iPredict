@@ -149,3 +149,28 @@ export async function signWithKit(xdr: string): Promise<string> {
     };
   }
 }
+
+/**
+ * Get current network details from kit or fallback to configured network.
+ */
+export async function getNetworkDetails(): Promise<{
+  network?: string;
+  networkPassphrase?: string;
+}> {
+  try {
+    const kit = await getWalletKit();
+    const untypedKit = kit as unknown as Record<string, unknown>;
+    if (typeof untypedKit.getNetwork === "function") {
+      const res = await (untypedKit.getNetwork as () => Promise<unknown>)();
+      if (typeof res === "string") return { network: res };
+      if (typeof res === "object" && res !== null) return res as { network?: string; networkPassphrase?: string };
+    }
+    if (typeof untypedKit.getNetworkDetails === "function") {
+      const res = await (untypedKit.getNetworkDetails as () => Promise<unknown>)();
+      if (typeof res === "object" && res !== null) return res as { network?: string; networkPassphrase?: string };
+    }
+    return { networkPassphrase: NETWORK.passphrase };
+  } catch {
+    return { networkPassphrase: NETWORK.passphrase };
+  }
+}

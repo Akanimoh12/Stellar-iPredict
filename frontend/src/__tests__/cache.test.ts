@@ -8,6 +8,10 @@ import {
   invalidateAll,
   getCacheHealth,
   resetCacheHealth,
+  CACHE_PREFIX,
+  CACHE_VERSION,
+  LEGACY_PREFIX,
+  purgeLegacyCache,
 } from "@/services/cache";
 
 // ── localStorage mock ─────────────────────────────────────────────────────────
@@ -118,10 +122,11 @@ describe("cache – basic CRUD", () => {
     expect(get("arr")).toEqual([1, 2, 3]);
   });
 
-  it("prefixes keys with ip_ in localStorage", () => {
+  it("prefixes keys with versioned CACHE_PREFIX in localStorage", () => {
     set("myKey", "data");
-    expect(store["ip_myKey"]).toBeDefined();
+    expect(store[CACHE_PREFIX + "myKey"]).toBeDefined();
     expect(store["myKey"]).toBeUndefined();
+    expect(store["ip_myKey"]).toBeUndefined();
   });
 });
 
@@ -144,7 +149,7 @@ describe("cache – TTL expiry", () => {
     set("cleanup", "data", 1000);
     vi.advanceTimersByTime(1001);
     get("cleanup"); // triggers cleanup
-    expect(store["ip_cleanup"]).toBeUndefined();
+    expect(store[CACHE_PREFIX + "cleanup"]).toBeUndefined();
   });
 
   it("uses default TTL of 30 seconds when not specified", () => {
@@ -185,7 +190,7 @@ describe("cache – invalidation", () => {
     expect(get("keep")).toBe("yes");
   });
 
-  it("invalidates all ip_ prefixed keys", () => {
+  it("invalidates all versioned cache keys", () => {
     set("a", 1);
     set("b", 2);
     set("c", 3);
@@ -213,7 +218,7 @@ describe("cache – JSON serialization", () => {
   });
 
   it("returns null for corrupted JSON in localStorage", () => {
-    store["ip_corrupt"] = "not valid json {{{";
+    store[CACHE_PREFIX + "corrupt"] = "not valid json {{{";
     expect(get("corrupt")).toBeNull();
   });
 });
@@ -227,7 +232,7 @@ describe("cache – getOrSet", () => {
     expect(await getOrSet("gos_miss", loader)).toEqual({ id: 1 });
     expect(await getOrSet("gos_miss", loader)).toEqual({ id: 1 });
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(store["ip_gos_miss"]).toBeDefined();
+    expect(store[CACHE_PREFIX + "gos_miss"]).toBeDefined();
   });
 
   it("does not run the loader while the entry is fresh", async () => {
@@ -323,7 +328,7 @@ describe("cache – graceful degradation (storage unavailable)", () => {
 
     expect(() => set("deg_write", "value")).not.toThrow();
     expect(get("deg_write")).toBe("value"); // memory tier still holds it
-    expect(store["ip_deg_write"]).toBeUndefined(); // nothing persisted
+    expect(store[CACHE_PREFIX + "deg_write"]).toBeUndefined(); // nothing persisted
   });
 
   it("reports the outage through getCacheHealth", () => {
@@ -357,7 +362,7 @@ describe("cache – graceful degradation (storage unavailable)", () => {
   });
 
   it("treats corrupt data as a miss, NOT as an outage", () => {
-    store["ip_deg_corrupt"] = "not valid json {{{";
+    store[CACHE_PREFIX + "deg_corrupt"] = "not valid json {{{";
 
     expect(get("deg_corrupt")).toBeNull();
     expect(getCacheHealth().persistent).toBe(true);
@@ -400,13 +405,13 @@ describe("cache – graceful degradation (storage unavailable)", () => {
     // Storage comes back, but we do not probe on every call.
     installLocalStorageMock();
     set("deg_b", "b");
-    expect(store["ip_deg_b"]).toBeUndefined();
+    expect(store[CACHE_PREFIX + "deg_b"]).toBeUndefined();
     expect(getCacheHealth().persistent).toBe(false);
 
     // After the cool-down the next access probes and finds storage healthy.
     vi.advanceTimersByTime(60_001);
     set("deg_c", "c");
-    expect(store["ip_deg_c"]).toBeDefined();
+    expect(store[CACHE_PREFIX + "deg_c"]).toBeDefined();
     expect(getCacheHealth().persistent).toBe(true);
   });
 
@@ -452,6 +457,91 @@ describe("cache – SSR safety (no window)", () => {
     });
     installLocalStorageMock();
     // Key should not be stored (set was a no-op)
-    expect(store["ip_ssr"]).toBeUndefined();
+    expect(store[CACHE_PREFIX + "ssr"]).toBeUndefined();
+  });
+});
+
+// ── Versioning and legacy cache migration ─────────────────────────────────────
+
+describe("cache – versioning and legacy handling", () => {
+  it("exports CACHE_VERSION and versioned CACHE_PREFIX", () => {
+    expect(CACHE_VERSION).toBe(1);
+    expect(CACHE_PREFIX).toBe("ip_v1_");
+    expect(LEGACY_PREFIX).toBe("ip_");
+  });
+
+  it("does not rehydrate legacy unversioned entries and purges them on read to avoid broken rehydration", () => {
+    // Simulate legacy unversioned entry with outdated schema in localStorage
+    store["ip_legacyMarket"] = JSON.stringify({
+      data: { oldField: "incompatible_schema" },
+      expiry: Date.now() + 60_000,
+    });
+
+    // Reading should return null so callers refetch fresh data with new types
+    const result = get("legacyMarket");
+    expect(result).toBeNull();
+
+    // Legacy entry was purged from localStorage
+    expect(store["ip_legacyMarket"]).toBeUndefined();
+  });
+
+  it("removes legacy unversioned entry on set() to avoid duplicate storage", () => {
+    store["ip_item"] = JSON.stringify({
+      data: "old_unversioned",
+      expiry: Date.now() + 60_000,
+    });
+
+    set("item", "new_versioned");
+
+    expect(store[CACHE_PREFIX + "item"]).toBeDefined();
+    expect(store["ip_item"]).toBeUndefined();
+    expect(get("item")).toBe("new_versioned");
+  });
+
+  it("removes legacy unversioned entry on invalidate()", () => {
+    store["ip_itemToDelete"] = JSON.stringify({
+      data: "old",
+      expiry: Date.now() + 60_000,
+    });
+    set("itemToDelete", "new");
+
+    invalidate("itemToDelete");
+
+    expect(store[CACHE_PREFIX + "itemToDelete"]).toBeUndefined();
+    expect(store["ip_itemToDelete"]).toBeUndefined();
+    expect(get("itemToDelete")).toBeNull();
+  });
+
+  it("purgeLegacyCache purges unversioned cache entries while preserving wallet keys and versioned entries", () => {
+    store["ip_oldCache1"] = JSON.stringify({ data: "old1", expiry: Date.now() + 1000 });
+    store["ip_oldCache2"] = JSON.stringify({ data: "old2", expiry: Date.now() + 1000 });
+    store["ip_wallet_type"] = "freighter";
+    store["ip_wallet_pubkey"] = "GTEST123...";
+    store[CACHE_PREFIX + "current"] = JSON.stringify({ data: "current", expiry: Date.now() + 1000 });
+    store["unrelated_key"] = "keep";
+
+    purgeLegacyCache();
+
+    expect(store["ip_oldCache1"]).toBeUndefined();
+    expect(store["ip_oldCache2"]).toBeUndefined();
+    expect(store["ip_wallet_type"]).toBe("freighter");
+    expect(store["ip_wallet_pubkey"]).toBe("GTEST123...");
+    expect(store[CACHE_PREFIX + "current"]).toBeDefined();
+    expect(store["unrelated_key"]).toBe("keep");
+  });
+
+  it("invalidateAll clears both current version and legacy cache entries without touching wallet preferences", () => {
+    set("freshA", "dataA");
+    store["ip_legacyB"] = JSON.stringify({ data: "dataB", expiry: Date.now() + 1000 });
+    store["ip_wallet_type"] = "xbull";
+    store["ip_wallet_pubkey"] = "GXBULL123...";
+
+    invalidateAll();
+
+    expect(get("freshA")).toBeNull();
+    expect(store[CACHE_PREFIX + "freshA"]).toBeUndefined();
+    expect(store["ip_legacyB"]).toBeUndefined();
+    expect(store["ip_wallet_type"]).toBe("xbull");
+    expect(store["ip_wallet_pubkey"]).toBe("GXBULL123...");
   });
 });

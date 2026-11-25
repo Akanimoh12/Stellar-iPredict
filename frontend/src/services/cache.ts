@@ -1,4 +1,6 @@
-const CACHE_PREFIX = "ip_";
+export const CACHE_VERSION = 1;
+export const CACHE_PREFIX = `ip_v${CACHE_VERSION}_`;
+export const LEGACY_PREFIX = "ip_";
 const DEFAULT_TTL = 30_000; // 30 seconds
 
 /**
@@ -131,13 +133,29 @@ function peek<T>(key: string): CacheEntry<T> | null {
   if (!ls) return null;
 
   let raw: string | null = null;
+  const versionedKey = CACHE_PREFIX + key;
   try {
-    raw = ls.getItem(CACHE_PREFIX + key);
+    raw = ls.getItem(versionedKey);
   } catch (err) {
     markDegraded("read-failed", err);
     return null;
   }
-  if (!raw) return null;
+
+  // If not found in current version, check for legacy unversioned entry
+  if (!raw) {
+    const legacyKey = LEGACY_PREFIX + key;
+    try {
+      if (ls.getItem(legacyKey) !== null) {
+        // Outdated unversioned entry found. To prevent broken rehydration from
+        // incompatible schema/type changes, purge the legacy entry and return null
+        // so callers fetch fresh data cleanly.
+        ls.removeItem(legacyKey);
+      }
+    } catch {
+      // Ignore errors during legacy cleanup
+    }
+    return null;
+  }
 
   try {
     const entry = JSON.parse(raw) as CacheEntry<T>;
@@ -159,6 +177,8 @@ function removeFromStorage(key: string): void {
   if (!ls) return;
   try {
     ls.removeItem(CACHE_PREFIX + key);
+    // Also clean up any legacy unversioned key
+    ls.removeItem(LEGACY_PREFIX + key);
   } catch (err) {
     markDegraded("delete-failed", err);
   }
@@ -193,6 +213,8 @@ export function set<T>(key: string, data: T, ttl = DEFAULT_TTL): void {
   if (!ls) return;
   try {
     ls.setItem(CACHE_PREFIX + key, JSON.stringify(entry));
+    // Clean up legacy key if it existed to avoid duplicate storage
+    ls.removeItem(LEGACY_PREFIX + key);
   } catch (err) {
     // Quota exceeded, private mode, or storage disabled mid-session. The
     // memory tier still holds the value, so this is a downgrade, not a failure.
@@ -272,7 +294,41 @@ export function invalidateAll(): void {
     const keysToRemove: string[] = [];
     for (let i = 0; i < ls.length; i++) {
       const key = ls.key(i);
-      if (key?.startsWith(CACHE_PREFIX)) keysToRemove.push(key);
+      if (!key) continue;
+      if (key.startsWith(CACHE_PREFIX)) {
+        keysToRemove.push(key);
+      } else if (
+        key.startsWith(LEGACY_PREFIX) &&
+        !key.startsWith("ip_wallet_")
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((key) => ls.removeItem(key));
+  } catch (err) {
+    markDegraded("clear-failed", err);
+  }
+}
+
+/**
+ * Purge any legacy unversioned cache entries from localStorage to free up quota
+ * and prevent incompatible schema rehydration.
+ */
+export function purgeLegacyCache(): void {
+  const ls = storage();
+  if (!ls) return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < ls.length; i++) {
+      const key = ls.key(i);
+      if (
+        key &&
+        key.startsWith(LEGACY_PREFIX) &&
+        !key.startsWith(CACHE_PREFIX) &&
+        !key.startsWith("ip_wallet_")
+      ) {
+        keysToRemove.push(key);
+      }
     }
     keysToRemove.forEach((key) => ls.removeItem(key));
   } catch (err) {

@@ -40,6 +40,11 @@ const ICON_COLORS: Record<WalletType, string> = {
   albedo: "from-cyan-400 to-teal-600",
 };
 
+const INSTALL_URLS: Partial<Record<WalletType, string>> = {
+  freighter: "https://www.freighter.app/",
+  xbull: "https://xbull.app/",
+};
+
 interface WalletModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -49,6 +54,7 @@ export default function WalletModal({ isOpen, onClose }: WalletModalProps) {
   const { connect, connecting } = useWallet();
   const [connectingId, setConnectingId] = useState<WalletType | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [missingWallet, setMissingWallet] = useState<WalletOption | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -80,13 +86,19 @@ export default function WalletModal({ isOpen, onClose }: WalletModalProps) {
     async (wallet: WalletOption) => {
       setConnectingId(wallet.id);
       setError(null);
+      setMissingWallet(null);
       try {
         await connect(wallet.id);
         onClose();
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to connect wallet"
-        );
+        const message =
+          err instanceof Error
+            ? err.message
+            : typeof err === "object" && err !== null && "message" in err && typeof err.message === "string"
+              ? err.message
+              : "Failed to connect wallet";
+        setError(message);
+        if (message.toLowerCase().includes("not installed")) setMissingWallet(wallet);
       } finally {
         setConnectingId(null);
       }
@@ -99,6 +111,7 @@ export default function WalletModal({ isOpen, onClose }: WalletModalProps) {
     if (!isOpen) {
       setError(null);
       setConnectingId(null);
+      setMissingWallet(null);
     }
   }, [isOpen]);
 
@@ -146,6 +159,16 @@ export default function WalletModal({ isOpen, onClose }: WalletModalProps) {
         {error && (
           <div className="mx-6 mb-3 px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">
             {error}
+            {missingWallet && INSTALL_URLS[missingWallet.id] && (
+              <a
+                className="mt-1 block font-medium underline hover:text-red-300"
+                href={INSTALL_URLS[missingWallet.id]}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Install {missingWallet.name}
+              </a>
+            )}
           </div>
         )}
 

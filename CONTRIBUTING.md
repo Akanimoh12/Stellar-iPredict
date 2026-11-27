@@ -44,8 +44,8 @@ All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md
    - Link the issue (`Closes #123`).
    - Make sure `npm run typecheck` and `npm test` pass in the package you touched.
    - Add a line under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for any
-     change a user, operator or integrator would notice. Versioning and the
-     release process are in [`docs/RELEASING.md`](docs/RELEASING.md).
+     change a user, operator or integrator would notice. See
+     [Changelog and releases](#changelog-and-releases).
 
 > **Automated CI Checks:** Every pull request targeting `implementation-drips` (or any feature branch) is automatically checked by GitHub Actions:
 > - **TypeScript Typecheck:** Dedicated CI job validates TypeScript compilation (`npm run typecheck`) across all packages (`@ipredict/shared`, `backend`, `db`, `indexer`, `oracle`).
@@ -53,6 +53,51 @@ All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md
 > - **Migration Testing & Idempotency (`db`):** Applies all SQL migrations in order against a clean Postgres container and re-runs to verify clean idempotency.
 > - **Code Linting:** Required lint check enforces code quality across all Node packages.
 > - **Dependency Vulnerability Scan:** Automated `npm audit` security scans check lockfiles for high-severity vulnerabilities on PRs and daily schedule.
+
+### Changelog and releases
+
+[`CHANGELOG.md`](CHANGELOG.md) records every notable change, in the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format, and is the
+source of each release's notes. You keep it current in the PR that makes the
+change, not afterwards.
+
+**When an entry is needed.** Add one for anything a user, operator or
+integrator would notice: features, behaviour changes, fixes, API or contract
+changes, new configuration, migrations and security fixes. Pure refactors,
+test-only changes and CI tweaks do not need one.
+
+**How to write it.** Add a bullet under `## [Unreleased]`, in the right group
+(`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`):
+
+```markdown
+### Fixed
+
+- API: `GET /api/markets` no longer returns cancelled markets in the
+  `active` filter. (#1234)
+```
+
+- Write for the reader, not the diff, and end with the issue or PR number.
+- Prefix the area when it is not obvious: `API:`, `Contracts:`, `DB:`,
+  `Oracle:`, `Frontend:`.
+- Start with **BREAKING** if it breaks compatibility, and say what to do about
+  it. API breaking changes follow the policy in
+  [`docs/RELEASING.md`](docs/RELEASING.md#api-versioning-and-breaking-changes).
+- Contract changes name the contract, its new crate version and whether
+  `SCHEMA_VERSION` changed. Migrations name the migration file.
+- Do not edit released sections or bump versions in a feature PR; that happens
+  in the release PR.
+
+**Versions.** The platform and the Node packages share one
+[semantic version](https://semver.org); the HTTP API is versioned by its URL
+prefix (`/api/v1`); each contract crate has its own version, bumped only when
+its code changes. While the platform is `0.x`, a MINOR release may carry
+breaking changes, always flagged **BREAKING**.
+
+**Releases.** A release manager turns `[Unreleased]` into a dated version
+section in a release PR, tags it, and publishes the section as the GitHub
+release notes with `scripts/release-notes.sh`. The full process, including
+hotfixes and contract upgrades, is in [`docs/RELEASING.md`](docs/RELEASING.md).
+Preview what the next release contains with `make release-notes`.
 
 ### Database migration compatibility
 

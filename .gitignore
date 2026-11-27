@@ -68,3 +68,7 @@ __pycache__/
 infra/cert-monitor/.state.json
 # Coverage output
 coverage/
+
+# ── Generated status page snapshot ─────────────────────────────────────────────
+# Written at deploy time by scripts/generate-status-snapshot.sh; never committed.
+status-page/snapshot.json

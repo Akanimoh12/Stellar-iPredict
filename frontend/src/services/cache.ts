@@ -2,6 +2,7 @@ export const CACHE_VERSION = 1;
 export const CACHE_PREFIX = `ip_v${CACHE_VERSION}_`;
 export const LEGACY_PREFIX = "ip_";
 const DEFAULT_TTL = 30_000; // 30 seconds
+const SWEEP_INTERVAL_MS = 5 * 60_000;
 
 /**
  * How long we stay in "degraded" mode before re-probing the persistent tier.
@@ -45,6 +46,7 @@ const inflight = new Map<string, Promise<unknown>>();
 let degraded = false;
 let degradedSince = 0;
 let degradedReason: string | null = null;
+let sweepTimer: number | null = null;
 
 /** Snapshot of persistent-tier health — useful in tests and debug overlays. */
 export function getCacheHealth(): {
@@ -108,6 +110,7 @@ function storage(): Storage | null {
       ls.setItem(PROBE_KEY, "1");
       ls.removeItem(PROBE_KEY);
       markRecovered();
+      scheduleSweep();
       return ls;
     } catch (err) {
       markDegraded("probe-failed", err);
@@ -116,11 +119,56 @@ function storage(): Storage | null {
   }
 
   try {
-    return window.localStorage ?? null;
+    const ls = window.localStorage ?? null;
+    if (ls) scheduleSweep();
+    return ls;
   } catch (err) {
     // Accessing the property itself can throw when site data is blocked.
     markDegraded("access-denied", err);
     return null;
+  }
+}
+
+function scheduleSweep(): void {
+  if (sweepTimer !== null || typeof window === "undefined") return;
+  sweepTimer = window.setInterval(sweepExpired, SWEEP_INTERVAL_MS);
+  sweepExpired();
+}
+
+/**
+ * Remove expired entries from both cache tiers. Scheduled after the first
+ * successful persistent-storage access and exported for explicit cleanup.
+ */
+export function sweepExpired(): void {
+  const now = Date.now();
+  for (const [key, entry] of memory) {
+    if (now > entry.expiry) memory.delete(key);
+  }
+
+  const ls = storage();
+  if (!ls) return;
+
+  try {
+    const expiredKeys: string[] = [];
+    for (let i = 0; i < ls.length; i++) {
+      const key = ls.key(i);
+      if (!key?.startsWith(CACHE_PREFIX)) continue;
+
+      const raw = ls.getItem(key);
+      if (!raw) continue;
+      try {
+        const entry = JSON.parse(raw) as CacheEntry<unknown>;
+        if (typeof entry?.expiry === "number" && now > entry.expiry) {
+          expiredKeys.push(key);
+        }
+      } catch {
+        // Corrupt entries are handled as misses when read; this sweep targets expiry.
+      }
+    }
+
+    for (const key of expiredKeys) ls.removeItem(key);
+  } catch (err) {
+    markDegraded("sweep-failed", err);
   }
 }
 

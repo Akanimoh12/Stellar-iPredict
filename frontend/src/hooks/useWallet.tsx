@@ -8,7 +8,12 @@ import React, {
   useEffect,
   useRef,
 } from "react";
-import type { WalletType } from "@/wallet/types";
+import {
+  isWalletType,
+  WALLET_PUBKEY_STORAGE_KEY,
+  WALLET_TYPE_STORAGE_KEY,
+  type WalletType,
+} from "@/wallet/types";
 import { AppErrorType } from "@/types";
 import type { AppError } from "@/types";
 import { setSimulationSource } from "@/services/soroban";
@@ -16,8 +21,8 @@ import { NETWORK } from "@/config/network";
 
 // ── localStorage keys ─────────────────────────────────────────────────────────
 
-export const WALLET_TYPE_KEY = "ip_wallet_type";
-export const WALLET_PUBKEY_KEY = "ip_wallet_pubkey";
+export const WALLET_TYPE_KEY = WALLET_TYPE_STORAGE_KEY;
+export const WALLET_PUBKEY_KEY = WALLET_PUBKEY_STORAGE_KEY;
 
 // ── Context shape ─────────────────────────────────────────────────────────────
 
@@ -88,10 +93,7 @@ export function useWalletState(enabled = true): WalletContextValue {
     setNetwork(null);
     setNetworkPassphrase(null);
     setSimulationSource(null);
-    if (typeof window !== "undefined") {
-      localStorage.removeItem(WALLET_TYPE_KEY);
-      localStorage.removeItem(WALLET_PUBKEY_KEY);
-    }
+    clearSavedWallet();
   }, []);
 
   // ── Auto-reconnect on mount ───────────────────────────────────────────────
@@ -99,10 +101,9 @@ export function useWalletState(enabled = true): WalletContextValue {
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
 
-    const savedType = localStorage.getItem(WALLET_TYPE_KEY) as WalletType | null;
-    const savedKey = localStorage.getItem(WALLET_PUBKEY_KEY);
+    const savedType = readSavedWalletType();
 
-    if (savedType && savedKey) {
+    if (savedType) {
       (async () => {
         try {
           const kit = await getKit();
@@ -123,8 +124,7 @@ export function useWalletState(enabled = true): WalletContextValue {
           }
         } catch {
           // Silent fail — clear stale stored state
-          localStorage.removeItem(WALLET_TYPE_KEY);
-          localStorage.removeItem(WALLET_PUBKEY_KEY);
+          clearSavedWallet();
         }
       })();
     }
@@ -146,10 +146,7 @@ export function useWalletState(enabled = true): WalletContextValue {
         setWalletType(type);
         setSimulationSource(pk);
 
-        if (typeof window !== "undefined") {
-          localStorage.setItem(WALLET_TYPE_KEY, type);
-          localStorage.setItem(WALLET_PUBKEY_KEY, pk);
-        }
+        persistSavedWallet(type, pk);
 
         if (kit.getNetworkDetails) {
           try {
@@ -208,9 +205,7 @@ export function useWalletState(enabled = true): WalletContextValue {
         // Account switched in extension
         setPublicKey(currentPk);
         setSimulationSource(currentPk);
-        if (typeof window !== "undefined") {
-          localStorage.setItem(WALLET_PUBKEY_KEY, currentPk);
-        }
+        persistSavedPublicKey(currentPk);
       }
 
       if (kit.getNetworkDetails) {
@@ -261,7 +256,7 @@ export function useWalletState(enabled = true): WalletContextValue {
         if (newPk !== publicKey) {
           setPublicKey(newPk);
           setSimulationSource(newPk);
-          localStorage.setItem(WALLET_PUBKEY_KEY, newPk);
+          persistSavedPublicKey(newPk);
         }
       } else if (
         customEvent.detail &&
@@ -377,4 +372,43 @@ function isAppError(err: unknown): err is AppError {
     "type" in err &&
     "message" in err
   );
+}
+
+function readSavedWalletType(): WalletType | null {
+  try {
+    const type = window.localStorage.getItem(WALLET_TYPE_KEY);
+    const publicKey = window.localStorage.getItem(WALLET_PUBKEY_KEY);
+    if (isWalletType(type) && publicKey) return type;
+    if (type !== null || publicKey !== null) clearSavedWallet();
+  } catch (err) {
+    console.warn("[iPredict][wallet] unable to read saved wallet", err);
+  }
+  return null;
+}
+
+function persistSavedWallet(type: WalletType, publicKey: string): void {
+  try {
+    window.localStorage.setItem(WALLET_TYPE_KEY, type);
+    window.localStorage.setItem(WALLET_PUBKEY_KEY, publicKey);
+  } catch (err) {
+    console.warn("[iPredict][wallet] unable to remember wallet selection", err);
+  }
+}
+
+function persistSavedPublicKey(publicKey: string): void {
+  try {
+    window.localStorage.setItem(WALLET_PUBKEY_KEY, publicKey);
+  } catch (err) {
+    console.warn("[iPredict][wallet] unable to remember wallet account", err);
+  }
+}
+
+function clearSavedWallet(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(WALLET_TYPE_KEY);
+    window.localStorage.removeItem(WALLET_PUBKEY_KEY);
+  } catch (err) {
+    console.warn("[iPredict][wallet] unable to clear remembered wallet", err);
+  }
 }

@@ -1,7 +1,11 @@
 import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
 import { NETWORK } from "@/config/network";
 import { AppErrorType } from "@/types";
-import type { WalletType } from "./types";
+import {
+  isWalletType,
+  WALLET_TYPE_STORAGE_KEY,
+  type WalletType,
+} from "./types";
 
 // ── Wallet ID mapping ─────────────────────────────────────────────────────────
 
@@ -9,6 +13,25 @@ import type { WalletType } from "./types";
 
 let _kit: StellarWalletsKit | null = null;
 let _kitPromise: Promise<StellarWalletsKit> | null = null;
+
+function getSavedWalletId(
+  walletKit: typeof import("@creit.tech/stellar-wallets-kit")
+): string {
+  if (typeof window === "undefined") return walletKit.FREIGHTER_ID;
+
+  try {
+    const savedType = window.localStorage.getItem(WALLET_TYPE_STORAGE_KEY);
+    if (isWalletType(savedType)) {
+      if (savedType === "xbull") return walletKit.XBULL_ID;
+      if (savedType === "albedo") return walletKit.ALBEDO_ID;
+      return walletKit.FREIGHTER_ID;
+    }
+  } catch (err) {
+    console.warn("[iPredict][wallet] unable to restore saved wallet selection", err);
+  }
+
+  return walletKit.FREIGHTER_ID;
+}
 
 /**
  * Get or create the StellarWalletsKit singleton.
@@ -25,7 +48,7 @@ export async function getWalletKit(): Promise<StellarWalletsKit> {
 
       const kit = new walletKit.StellarWalletsKit({
         network: networkPassphrase,
-        selectedWalletId: walletKit.FREIGHTER_ID,
+        selectedWalletId: getSavedWalletId(walletKit),
         modules: [
           new walletKit.FreighterModule(),
           new walletKit.xBullModule(),

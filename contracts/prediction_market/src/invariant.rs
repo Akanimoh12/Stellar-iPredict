@@ -257,3 +257,100 @@ fn test_invariant_interleaved_multi_market_operations() {
     assert!(!market3.resolved && !market3.cancelled);
     verify_pool_accounting_invariants(&t);
 }
+
+/// Fees are withdrawn before the market is cancelled. Cancellation must not
+/// try to reclaim the same fees again, and every gross stake must still be
+/// refundable in full (#1003).
+#[test]
+fn test_invariant_fee_withdrawal_before_cancel_refund_sequence() {
+    let t = setup();
+    let market_id = create_test_market(&t);
+
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    let treasury = Address::generate(&t.env);
+
+    let alice_bet = 60 * 10_000_000_i128;
+    let bob_bet = 40 * 10_000_000_i128;
+    fund_user(&t, &alice, alice_bet);
+    fund_user(&t, &bob, bob_bet);
+
+    t.client.place_bet(&alice, &market_id, &true, &alice_bet);
+    t.client.place_bet(&bob, &market_id, &false, &bob_bet);
+    verify_pool_accounting_invariants(&t);
+
+    let acc_fees = t.client.get_accumulated_fees();
+    assert!(acc_fees > 0, "bets should have accumulated platform fees");
+    let withdrawn = t.client.withdraw_fees(&t.admin, &treasury);
+    assert_eq!(withdrawn, acc_fees);
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+    assert_eq!(t.xlm.balance(&treasury), withdrawn);
+    verify_pool_accounting_invariants(&t);
+
+    // Cancelling after withdrawal must not re-credit or double-spend fees.
+    t.client.cancel_market(&t.admin, &market_id);
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+    verify_pool_accounting_invariants(&t);
+
+    assert_eq!(t.client.cancel_refund(&alice, &market_id), alice_bet);
+    verify_pool_accounting_invariants(&t);
+    assert_eq!(t.client.cancel_refund(&bob, &market_id), bob_bet);
+    verify_pool_accounting_invariants(&t);
+
+    assert_eq!(t.xlm.balance(&treasury), withdrawn);
+    assert_eq!(t.xlm.balance(&t.market_id), 0);
+}
+
+/// Refunds and fee withdrawals interleaved across two cancelled markets stay
+/// solvent at every step: each refund returns that market's gross stake even
+/// after fees from both markets have already left the contract (#1003).
+#[test]
+fn test_invariant_interleaved_fee_withdrawal_and_refunds() {
+    let t = setup();
+    let m1 = create_test_market(&t);
+    let m2 = t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Will SOL hit 300?"),
+        &String::from_str(&t.env, "https://example.com/sol.png"),
+        &Category::Crypto,
+        &7200_u64,
+    );
+
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    let treasury = Address::generate(&t.env);
+
+    let stake = 50 * 10_000_000_i128;
+    fund_user(&t, &alice, stake * 2);
+    fund_user(&t, &bob, stake);
+
+    t.client.place_bet(&alice, &m1, &true, &stake);
+    t.client.place_bet(&bob, &m1, &false, &stake);
+    t.client.place_bet(&alice, &m2, &true, &stake);
+    verify_pool_accounting_invariants(&t);
+
+    let fees = t.client.withdraw_fees(&t.admin, &treasury);
+    assert!(fees > 0);
+    assert_eq!(t.xlm.balance(&treasury), fees);
+    verify_pool_accounting_invariants(&t);
+
+    // Cancel and partially refund m1 while m2 still holds an active stake.
+    t.client.cancel_market(&t.admin, &m1);
+    assert_eq!(t.client.cancel_refund(&alice, &m1), stake);
+    verify_pool_accounting_invariants(&t);
+
+    // A second refund for the same bet must fail and must not move funds.
+    assert!(t.client.try_cancel_refund(&alice, &m1).is_err());
+    verify_pool_accounting_invariants(&t);
+
+    t.client.cancel_market(&t.admin, &m2);
+    assert_eq!(t.client.cancel_refund(&alice, &m2), stake);
+    verify_pool_accounting_invariants(&t);
+
+    assert_eq!(t.client.cancel_refund(&bob, &m1), stake);
+    verify_pool_accounting_invariants(&t);
+
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+    assert_eq!(t.xlm.balance(&treasury), fees);
+    assert_eq!(t.xlm.balance(&t.market_id), 0);
+}

@@ -1,5 +1,21 @@
 # Infrastructure
 
+## Local end-to-end environment (Issue #1002)
+
+`docker-compose.dev.yml` starts Postgres and Redis with health checks so an
+end-to-end run can wait for a usable stack instead of sleeping for a fixed
+delay. The full check is one command from the repository root:
+
+```bash
+npm run test:e2e:local
+```
+
+It starts the dev stack, applies every migration, runs the scripted market
+lifecycle in `test/e2e/local-environment.ts` (market creation → bets → oracle
+finalization → claim → event replay), and asserts the resulting database state.
+Containers and volumes are removed when the command exits; set `KEEP_STACK=1`
+to keep them for debugging. CI runs the same command in the `local-e2e` job.
+
 ## Certificate expiry monitoring (`cert-monitor/`)
 
 An expired TLS certificate takes iPredict offline instantly — every browser and
